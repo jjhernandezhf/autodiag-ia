@@ -1,18 +1,8 @@
-import express from "express";
-import { z } from "zod";
+import { createApp } from "./app.js";
+import { env } from "./config.js";
 
-const portSchema = z.coerce.number().int().min(1).max(65_535).default(3_000);
-const port = portSchema.parse(process.env.PORT);
+const app = createApp({ maxFileSizeBytes: env.REPORT_MAX_SIZE_BYTES });
 
-const app = express();
-
-app.use(express.json());
-
-app.get("/health", (_request, response) => {
-  response.json({ status: "ok", service: "AutoDiag IA" });
+app.listen(env.PORT, () => {
+  console.log(`AutoDiag IA API disponible en http://localhost:${env.PORT}`);
 });
-
-app.listen(port, () => {
-  console.log(`AutoDiag IA API disponible en http://localhost:${port}`);
-});
-
