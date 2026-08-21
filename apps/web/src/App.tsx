@@ -1,16 +1,102 @@
-import { type ChangeEvent, type DragEvent, type FormEvent, useRef, useState } from "react";
+import { type ChangeEvent, type DragEvent, type FormEvent, useEffect, useRef, useState } from "react";
 
 const PDF_MIME_TYPE = "application/pdf";
 
 type UploadStatus = "idle" | "uploading" | "success" | "error";
+type AnalysisStatus = "unavailable" | "ready" | "confirming" | "analyzing" | "completed" | "error" | "cancelled";
+
+type DtcStatus = "current" | "stored" | "pending" | "permanent" | "history" | "unknown";
+
+interface ExtractionResult {
+  status: "completed" | "partial";
+  format: "autel_vehicle_diagnostic_report";
+  requiresManualReview: boolean;
+  vehicle: {
+    year: number | null;
+    make: string | null;
+    model: string | null;
+    engine: string | null;
+    odometer: { value: number; unit: "km" | "mi" } | null;
+    vinMasked: string | null;
+    vinPseudonym: string | null;
+  };
+  scanSummary: {
+    declaredSystems: number | null;
+    parsedSystems: number;
+    declaredDtcs: number | null;
+    parsedDtcs: number;
+  };
+  systems: Array<{ code: string | null; name: string; dtcCount: number }>;
+  dtcs: Array<{
+    code: string;
+    moduleCode: string | null;
+    moduleName: string;
+    status: DtcStatus;
+    statusOriginal: string | null;
+    descriptionOriginal: string;
+  }>;
+  warnings: Array<{ code: string; message: string }>;
+}
+
+interface DiagnosticAnalysisInput {
+  vehicle: { make: string; model: string; year: number };
+  modules: Array<{
+    code: string | null;
+    name: string;
+    dtcs: Array<{ code: string; description: string; status: DtcStatus }>;
+  }>;
+}
+
+interface AnalysisAvailabilityReason {
+  code: string;
+  message: string;
+}
+
+type AnalysisPreparation =
+  | { available: true; input: DiagnosticAnalysisInput; reasons: AnalysisAvailabilityReason[]; warnings: string[] }
+  | { available: false; reasons: AnalysisAvailabilityReason[]; warnings: string[] };
+
+type AnalysisPriority = "critical" | "high" | "medium" | "low";
+type AnalysisConfidence = "high" | "medium" | "low";
+
+interface DiagnosticFinding {
+  relatedDtcCode: string | null;
+  priority: AnalysisPriority;
+  simpleExplanation: string;
+  possibleCauses: string[];
+  recommendedChecks: string[];
+  safetyWarnings: string[];
+  confidence: AnalysisConfidence;
+}
+
+interface DiagnosticAnalysis {
+  technicalSummary: string;
+  findings: DiagnosticFinding[];
+  safetyWarnings: string[];
+  confidence: AnalysisConfidence;
+  requiresTechnicianConfirmation: true;
+}
+
+interface AnalysisResponse {
+  status: "completed";
+  analysis: DiagnosticAnalysis;
+}
+
+interface AnalysisUiState {
+  status: AnalysisStatus;
+  analysis?: DiagnosticAnalysis;
+  message?: string;
+}
 
 interface UploadResponse {
   id: string;
   originalName: string;
   size: number;
-  hash: string;
+  sha256: string;
   type: string;
   status: "received";
+  extraction: ExtractionResult;
+  analysisPreparation: AnalysisPreparation;
 }
 
 interface ErrorResponse {
@@ -36,21 +122,356 @@ function validateFile(file: File) {
   return null;
 }
 
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.length > 0
+    && value.every((item) => typeof item === "string" && item.trim().length > 0);
+}
+
+function isDiagnosticAnalysis(value: unknown): value is DiagnosticAnalysis {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<DiagnosticAnalysis>;
+  const priorities = new Set<AnalysisPriority>(["critical", "high", "medium", "low"]);
+  const confidences = new Set<AnalysisConfidence>(["high", "medium", "low"]);
+
+  return (
+    typeof candidate.technicalSummary === "string" &&
+    candidate.technicalSummary.trim().length > 0 &&
+    Array.isArray(candidate.findings) &&
+    candidate.findings.length > 0 &&
+    candidate.findings.every(
+      (finding) =>
+        finding !== null &&
+        typeof finding === "object" &&
+        (finding.relatedDtcCode === null || (
+          typeof finding.relatedDtcCode === "string"
+          && finding.relatedDtcCode.trim().length > 0
+          && finding.relatedDtcCode.length <= 32
+        )) &&
+        priorities.has(finding.priority) &&
+        typeof finding.simpleExplanation === "string" &&
+        finding.simpleExplanation.trim().length > 0 &&
+        isStringArray(finding.possibleCauses) &&
+        isStringArray(finding.recommendedChecks) &&
+        isStringArray(finding.safetyWarnings) &&
+        confidences.has(finding.confidence),
+    ) &&
+    isStringArray(candidate.safetyWarnings) &&
+    candidate.confidence !== undefined &&
+    confidences.has(candidate.confidence) &&
+    candidate.requiresTechnicianConfirmation === true
+  );
+}
+
+function parseAnalysisResponse(value: unknown): AnalysisResponse | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Partial<AnalysisResponse>;
+  if (candidate.status !== "completed" || !isDiagnosticAnalysis(candidate.analysis)) return null;
+  return { status: candidate.status, analysis: candidate.analysis };
+}
+
+function getAiErrorMessage(code: string | undefined) {
+  return (code && AI_ERROR_MESSAGES[code]) ?? "No fue posible obtener la orientación por IA.";
+}
+
+const AI_ERROR_MESSAGES: Record<string, string> = {
+  OPENAI_API_KEY_MISSING: "La orientación por IA no está configurada en el servidor.",
+  OPENAI_MODEL_MISSING: "El modelo de orientación por IA no está configurado en el servidor.",
+  AI_INPUT_INVALID: "Los datos extraídos no son compatibles con el análisis por IA.",
+  OPENAI_TIMEOUT: "La solicitud de orientación agotó el tiempo disponible.",
+  OPENAI_LIMIT_EXCEEDED: "El servicio de orientación alcanzó su límite de uso o saldo.",
+  OPENAI_RESPONSE_INVALID: "El servicio devolvió una orientación que no pudo validarse.",
+  OPENAI_UNAVAILABLE: "El servicio de orientación por IA no está disponible temporalmente.",
+};
+
+const PRIORITY_LABELS: Record<AnalysisPriority, string> = {
+  critical: "Crítica",
+  high: "Alta",
+  medium: "Media",
+  low: "Baja",
+};
+
+const CONFIDENCE_LABELS: Record<AnalysisConfidence, string> = {
+  high: "Alta",
+  medium: "Media",
+  low: "Baja",
+};
+
+function displayVehicleName(extraction: ExtractionResult) {
+  return [extraction.vehicle.year, extraction.vehicle.make, extraction.vehicle.model].filter(Boolean).join(" · ") || "No disponible";
+}
+
+function ExtractionResults({ extraction }: { extraction: ExtractionResult }) {
+  const vehicle = extraction.vehicle;
+
+  return (
+    <section className="extraction-results" aria-labelledby="extraction-title">
+      <div className="results-heading">
+        <div>
+          <span className="eyebrow">RESULTADO DE EXTRACCIÓN</span>
+          <h2 id="extraction-title">Datos del reporte</h2>
+        </div>
+        <span className={`extraction-badge ${extraction.status}`}>
+          {extraction.status === "completed" ? "Completa" : "Revisión requerida"}
+        </span>
+      </div>
+
+      {extraction.requiresManualReview && (
+        <div className="manual-review" role="alert">
+          La extracción contiene diferencias o datos que requieren revisión manual.
+        </div>
+      )}
+
+      <div className="vehicle-summary">
+        <div className="vehicle-main">
+          <span>Vehículo</span>
+          <strong>{displayVehicleName(extraction)}</strong>
+        </div>
+        <dl className="vehicle-details">
+          {vehicle.engine && <div><dt>Motor</dt><dd>{vehicle.engine}</dd></div>}
+          {vehicle.odometer && <div><dt>Odómetro</dt><dd>{vehicle.odometer.value.toLocaleString("es-GT")} {vehicle.odometer.unit}</dd></div>}
+          {vehicle.vinMasked && <div><dt>VIN protegido</dt><dd>{vehicle.vinMasked}</dd></div>}
+        </dl>
+      </div>
+
+      <div className="scan-totals" aria-label="Resumen del escaneo">
+        <div><strong>{extraction.scanSummary.parsedSystems}</strong><span>Sistemas escaneados</span></div>
+        <div><strong>{extraction.scanSummary.parsedDtcs}</strong><span>DTC encontrados</span></div>
+      </div>
+
+      {extraction.warnings.length > 0 && (
+        <div className="warnings-panel">
+          <h3>Advertencias de extracción</h3>
+          <ul>{extraction.warnings.map((warning) => <li key={warning.code}>{warning.message}</li>)}</ul>
+        </div>
+      )}
+
+      <div className="dtc-section">
+        <h3>DTC reportados</h3>
+        {extraction.dtcs.length === 0 ? (
+          <p className="empty-dtc">No se reportaron DTC en este escaneo</p>
+        ) : (
+          <div className="table-scroll" tabIndex={0}>
+            <table>
+              <caption className="sr-only">Códigos DTC extraídos del reporte Autel</caption>
+              <thead><tr><th scope="col">Código</th><th scope="col">Módulo</th><th scope="col">Estado</th><th scope="col">Descripción</th></tr></thead>
+              <tbody>
+                {extraction.dtcs.map((dtc, index) => (
+                  <tr key={`${dtc.moduleCode ?? dtc.moduleName}-${dtc.code}-${index}`}>
+                    <td><code>{dtc.code}</code></td>
+                    <td>{dtc.moduleCode ? `${dtc.moduleCode} · ${dtc.moduleName}` : dtc.moduleName}</td>
+                    <td>{dtc.statusOriginal ?? "No indicado"}</td>
+                    <td>{dtc.descriptionOriginal}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function AnalysisResult({ analysis }: { analysis: DiagnosticAnalysis }) {
+  return (
+    <div className="analysis-result">
+      <div className="analysis-summary">
+        <h3>Resumen técnico</h3>
+        <p>{analysis.technicalSummary}</p>
+        <span>Confianza general: <strong>{CONFIDENCE_LABELS[analysis.confidence]}</strong></span>
+      </div>
+
+      <div className="analysis-findings">
+        <h3>Hallazgos priorizados</h3>
+        {analysis.findings.map((finding, index) => (
+          <article className="analysis-finding" key={`${finding.relatedDtcCode ?? "general"}-${index}`}>
+            <header>
+              <div>
+                <span>Hallazgo {index + 1}</span>
+                <strong>{finding.relatedDtcCode ?? "Sin DTC específico"}</strong>
+              </div>
+              <span className={`priority-badge ${finding.priority}`}>Prioridad {PRIORITY_LABELS[finding.priority]}</span>
+            </header>
+            <p>{finding.simpleExplanation}</p>
+            <div className="guidance-grid">
+              <div>
+                <h4>Posibles causas</h4>
+                {finding.possibleCauses.length > 0 ? (
+                  <ul>{finding.possibleCauses.map((cause) => <li key={cause}>{cause}</li>)}</ul>
+                ) : <p>No se propusieron causas específicas.</p>}
+              </div>
+              <div>
+                <h4>Comprobaciones recomendadas</h4>
+                {finding.recommendedChecks.length > 0 ? (
+                  <ul>{finding.recommendedChecks.map((check) => <li key={check}>{check}</li>)}</ul>
+                ) : <p>No se propusieron comprobaciones específicas.</p>}
+              </div>
+            </div>
+            {finding.safetyWarnings.length > 0 && (
+              <div className="analysis-warning">
+                <h4>Advertencias de seguridad</h4>
+                <ul>{finding.safetyWarnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>
+              </div>
+            )}
+            <span className="finding-confidence">Confianza: {CONFIDENCE_LABELS[finding.confidence]}</span>
+          </article>
+        ))}
+      </div>
+
+      {analysis.safetyWarnings.length > 0 && (
+        <div className="analysis-warning overall">
+          <h3>Advertencias generales de seguridad</h3>
+          <ul>{analysis.safetyWarnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>
+        </div>
+      )}
+
+      {analysis.requiresTechnicianConfirmation && (
+        <p className="technician-confirmation">Requiere confirmación del técnico</p>
+      )}
+    </div>
+  );
+}
+
+interface AiAnalysisSectionProps {
+  preparation: AnalysisPreparation;
+  state: AnalysisUiState;
+  onRequestConfirmation: () => void;
+  onCancelConfirmation: () => void;
+  onConfirm: () => void;
+}
+
+function AiAnalysisSection({
+  preparation,
+  state,
+  onRequestConfirmation,
+  onCancelConfirmation,
+  onConfirm,
+}: AiAnalysisSectionProps) {
+  const requestButtonRef = useRef<HTMLButtonElement>(null);
+  const confirmationTitleRef = useRef<HTMLHeadingElement>(null);
+  const previousStatusRef = useRef(state.status);
+
+  useEffect(() => {
+    if (state.status === "confirming") confirmationTitleRef.current?.focus();
+    if (previousStatusRef.current === "confirming" && state.status === "ready") requestButtonRef.current?.focus();
+    previousStatusRef.current = state.status;
+  }, [state.status]);
+
+  return (
+    <section className="ai-analysis" aria-labelledby="ai-analysis-title">
+      <div className="results-heading">
+        <div>
+          <span className="eyebrow">ORIENTACIÓN, NO DIAGNÓSTICO DEFINITIVO</span>
+          <h2 id="ai-analysis-title">Orientación asistida por IA</h2>
+        </div>
+        <span className={`analysis-state ${state.status}`}>
+          {state.status === "completed" ? "Completada" : state.status === "analyzing" ? "Analizando" : "Opcional"}
+        </span>
+      </div>
+
+      {!preparation.available ? (
+        <div className="analysis-unavailable" role="status">
+          <h3>Análisis no disponible</h3>
+          <ul>{preparation.reasons.map((reason) => <li key={reason.code}>{reason.message}</li>)}</ul>
+        </div>
+      ) : (
+        <>
+          {preparation.warnings.length > 0 && (
+            <div className="analysis-preparation-warnings">
+              <ul>{preparation.warnings.map((warning) => <li key={warning}>{warning}</li>)}</ul>
+            </div>
+          )}
+
+          {state.status === "ready" && (
+            <div className="analysis-ready">
+              <p>Solicita una orientación basada únicamente en los DTC extraídos cuando estés listo.</p>
+              <button ref={requestButtonRef} className="analysis-button" type="button" onClick={onRequestConfirmation}>Analizar DTC con IA</button>
+            </div>
+          )}
+
+          {state.status === "confirming" && (
+            <div className="analysis-confirmation" role="group" aria-labelledby="analysis-confirmation-title">
+              <h3 ref={confirmationTitleRef} id="analysis-confirmation-title" tabIndex={-1}>Confirma los datos que se enviarán</h3>
+              <p>Se enviarán únicamente:</p>
+              <ul>
+                <li>Marca, modelo y año.</li>
+                <li>Nombres y códigos de módulos.</li>
+                <li>Códigos DTC, descripciones y estados.</li>
+              </ul>
+              <p className="data-exclusion"><strong>No se enviarán</strong> VIN, PDF, odómetro ni datos del cliente.</p>
+              <div className="confirmation-actions">
+                <button className="analysis-button" type="button" onClick={onConfirm}>Confirmar y analizar</button>
+                <button className="secondary-button" type="button" onClick={onCancelConfirmation}>Cancelar</button>
+              </div>
+            </div>
+          )}
+
+          {state.status === "analyzing" && (
+            <div className="analysis-progress" role="status" aria-live="polite">
+              <span className="analysis-spinner" aria-hidden="true" />
+              <div><strong>Analizando DTC…</strong><span>Preparando orientación y comprobaciones recomendadas.</span></div>
+              <button className="analysis-button" type="button" disabled>Analizar DTC con IA</button>
+            </div>
+          )}
+
+          {state.status === "error" && (
+            <div className="analysis-error" role="alert">
+              <h3>No fue posible obtener la orientación</h3>
+              <p>{state.message}</p>
+              <button className="analysis-button" type="button" onClick={onRequestConfirmation}>Intentar de nuevo</button>
+            </div>
+          )}
+
+          {state.status === "completed" && state.analysis && <AnalysisResult analysis={state.analysis} />}
+        </>
+      )}
+    </section>
+  );
+}
+
 export function App() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [status, setStatus] = useState<UploadStatus>("idle");
   const [message, setMessage] = useState("");
   const [uploadResult, setUploadResult] = useState<UploadResponse | null>(null);
+  const [analysisState, setAnalysisState] = useState<AnalysisUiState>({ status: "unavailable" });
   const [isDragging, setIsDragging] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const uploadInProgressRef = useRef(false);
   const uploadSequenceRef = useRef(0);
-  const activeUploadRef = useRef<{ id: number; file: File } | null>(null);
+  const activeUploadRef = useRef<{ id: number; file: File; controller: AbortController } | null>(null);
+  const analysisInProgressRef = useRef(false);
+  const analysisSequenceRef = useRef(0);
+  const activeAnalysisRef = useRef<{ id: number; reportId: string; controller: AbortController } | null>(null);
+
+  useEffect(() => () => {
+    uploadSequenceRef.current += 1;
+    analysisSequenceRef.current += 1;
+    activeUploadRef.current?.controller.abort();
+    activeAnalysisRef.current?.controller.abort();
+    activeUploadRef.current = null;
+    activeAnalysisRef.current = null;
+    uploadInProgressRef.current = false;
+    analysisInProgressRef.current = false;
+  }, []);
+
+  function resetAnalysisForReportChange(showCancellation: boolean) {
+    analysisSequenceRef.current += 1;
+    activeAnalysisRef.current?.controller.abort();
+    activeAnalysisRef.current = null;
+    analysisInProgressRef.current = false;
+    setAnalysisState(
+      showCancellation
+        ? { status: "cancelled", message: "La orientación anterior se canceló al cambiar de reporte." }
+        : { status: "unavailable" },
+    );
+  }
 
   function selectFile(file: File | undefined) {
     if (!file || uploadInProgressRef.current) return false;
 
     const validationError = validateFile(file);
+    resetAnalysisForReportChange(uploadResult !== null || activeAnalysisRef.current !== null);
     setUploadResult(null);
 
     if (validationError) {
@@ -82,6 +503,7 @@ export function App() {
     if (uploadInProgressRef.current) return;
 
     if (event.dataTransfer.files.length > 1) {
+      resetAnalysisForReportChange(uploadResult !== null || activeAnalysisRef.current !== null);
       setSelectedFile(null);
       setStatus("error");
       setMessage("Selecciona solamente un archivo PDF.");
@@ -97,6 +519,7 @@ export function App() {
   function removeFile() {
     if (uploadInProgressRef.current) return;
 
+    resetAnalysisForReportChange(uploadResult !== null || activeAnalysisRef.current !== null);
     setSelectedFile(null);
     setStatus("idle");
     setMessage("");
@@ -111,15 +534,19 @@ export function App() {
     uploadInProgressRef.current = true;
     const uploadId = ++uploadSequenceRef.current;
     const fileBeingUploaded = selectedFile;
-    activeUploadRef.current = { id: uploadId, file: fileBeingUploaded };
+    const controller = new AbortController();
+    activeUploadRef.current = { id: uploadId, file: fileBeingUploaded, controller };
 
     const isActiveUpload = () => {
       const activeUpload = activeUploadRef.current;
-      return activeUpload?.id === uploadId && activeUpload.file === fileBeingUploaded;
+      return activeUpload?.id === uploadId
+        && activeUpload.file === fileBeingUploaded
+        && activeUpload.controller === controller;
     };
 
     setStatus("uploading");
     setMessage("Enviando reporte de forma segura…");
+    resetAnalysisForReportChange(uploadResult !== null || activeAnalysisRef.current !== null);
     setUploadResult(null);
 
     const formData = new FormData();
@@ -129,6 +556,7 @@ export function App() {
       const response = await fetch("/api/reports/upload", {
         method: "POST",
         body: formData,
+        signal: controller.signal,
       });
       let body: UploadResponse | ErrorResponse;
 
@@ -147,6 +575,7 @@ export function App() {
 
       const result = body as UploadResponse;
       setUploadResult(result);
+      setAnalysisState({ status: result.analysisPreparation.available ? "ready" : "unavailable" });
       setStatus("success");
       setMessage("Reporte recibido correctamente.");
     } catch (error) {
@@ -164,6 +593,87 @@ export function App() {
       if (isActiveUpload()) {
         activeUploadRef.current = null;
         uploadInProgressRef.current = false;
+      }
+    }
+  }
+
+  function requestAnalysisConfirmation() {
+    if (!uploadResult?.analysisPreparation.available || analysisInProgressRef.current) return;
+    setAnalysisState({ status: "confirming" });
+  }
+
+  function cancelAnalysisConfirmation() {
+    if (analysisInProgressRef.current) return;
+    setAnalysisState({ status: "ready" });
+  }
+
+  async function confirmAnalysis() {
+    const preparation = uploadResult?.analysisPreparation;
+    if (!uploadResult || !preparation?.available || analysisInProgressRef.current) return;
+
+    analysisInProgressRef.current = true;
+    const requestId = ++analysisSequenceRef.current;
+    const reportId = uploadResult.id;
+    const controller = new AbortController();
+    activeAnalysisRef.current = { id: requestId, reportId, controller };
+
+    const isActiveAnalysis = () => {
+      const active = activeAnalysisRef.current;
+      return active?.id === requestId && active.reportId === reportId && active.controller === controller;
+    };
+
+    setAnalysisState({ status: "analyzing" });
+
+    try {
+      const response = await fetch("/api/reports/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(preparation.input),
+        signal: controller.signal,
+      });
+
+      let body: unknown;
+      try {
+        body = await response.json();
+      } catch {
+        if (isActiveAnalysis()) {
+          setAnalysisState({ status: "error", message: AI_ERROR_MESSAGES.OPENAI_RESPONSE_INVALID });
+        }
+        return;
+      }
+
+      if (!isActiveAnalysis()) return;
+
+      if (!response.ok) {
+        const errorBody = body as ErrorResponse;
+        setAnalysisState({ status: "error", message: getAiErrorMessage(errorBody.error?.code) });
+        return;
+      }
+
+      const result = parseAnalysisResponse(body);
+      const inputDtcCodes = new Set(preparation.input.modules.flatMap((module) => module.dtcs.map((dtc) => dtc.code)));
+      const hasUnknownDtc = result?.analysis.findings.some(
+        (finding) => finding.relatedDtcCode !== null && !inputDtcCodes.has(finding.relatedDtcCode),
+      );
+      if (!result || hasUnknownDtc) {
+        setAnalysisState({ status: "error", message: AI_ERROR_MESSAGES.OPENAI_RESPONSE_INVALID });
+        return;
+      }
+
+      setAnalysisState({ status: "completed", analysis: result.analysis });
+    } catch (error) {
+      if (!isActiveAnalysis()) return;
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      setAnalysisState({
+        status: "error",
+        message: error instanceof TypeError
+          ? "No fue posible conectar con el servicio de orientación por IA."
+          : "No fue posible obtener la orientación por IA.",
+      });
+    } finally {
+      if (isActiveAnalysis()) {
+        activeAnalysisRef.current = null;
+        analysisInProgressRef.current = false;
       }
     }
   }
@@ -271,6 +781,23 @@ export function App() {
             {status === "uploading" ? "Enviando…" : "Enviar reporte"}
           </button>
         </form>
+
+        {uploadResult && (
+          <>
+            <ExtractionResults extraction={uploadResult.extraction} />
+            <AiAnalysisSection
+              preparation={uploadResult.analysisPreparation}
+              state={analysisState}
+              onRequestConfirmation={requestAnalysisConfirmation}
+              onCancelConfirmation={cancelAnalysisConfirmation}
+              onConfirm={() => void confirmAnalysis()}
+            />
+          </>
+        )}
+
+        {!uploadResult && analysisState.status === "cancelled" && (
+          <div className="analysis-cancelled" role="status">{analysisState.message}</div>
+        )}
 
         <div className="privacy-note">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 10V7a6 6 0 0 1 12 0v3M5 10h14v11H5z" /><path d="M12 14v3" /></svg>

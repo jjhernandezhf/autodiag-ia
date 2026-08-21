@@ -3,12 +3,75 @@ import request from "supertest";
 import { describe, expect, it } from "vitest";
 
 import { createApp } from "./app.js";
+import type { ExtractedPdfPage, ExtractedTextFragment } from "./report-types.js";
 
 const validPdf = Buffer.from("%PDF-1.7\nAutoDiag test fixture\n%%EOF");
+const TEST_SECRET = "synthetic-test-secret-with-at-least-32-bytes";
+
+function line(text: string, fragments?: ExtractedTextFragment[]) {
+  return { text, y: 0, fragments: fragments ?? [{ text, x: 0, width: text.length }] };
+}
+
+function columns(code: string, description: string, status: string) {
+  return line(`${code} ${description} ${status}`, [
+    { text: code, x: 20, width: 70 },
+    { text: description, x: 130, width: 250 },
+    { text: status, x: 480, width: 70 },
+  ]);
+}
+
+const completedPages: ExtractedPdfPage[] = [
+  {
+    pageNumber: 1,
+    lines: [
+      line("Informe de diagnóstico de vehículo"),
+      line("Información del vehículo"),
+      line("2024 / Fabricante Sintético / Modelo Sintético / Motor Sintético"),
+      line("Lectura del odómetro: 1200 km"),
+      line("VIN: 1ABCD23EFGH456789"),
+      line("Sistema/s escaneado/s (0)"),
+      line("Sistema Estado/DTC"),
+      line("DTC (0)"),
+    ],
+  },
+];
+
+const completedDtcPages: ExtractedPdfPage[] = [
+  {
+    pageNumber: 1,
+    lines: [
+      line("Informe de diagnóstico de vehículo"),
+      line("Información del vehículo"),
+      line("2024 / Fabricante Sintético / Modelo Sintético / Motor Sintético"),
+      line("Lectura del odómetro: 1200 km"),
+      line("VIN: 1ABCD23EFGH456789"),
+      line("Sistema/s escaneado/s (1)"),
+      line("Sistema Estado/DTC"),
+      line("PCM(Módulo sintético) 1"),
+      line("DTC (1)"),
+      line("PCM(Módulo sintético) (1 DTC)"),
+      line("DTC Descripción Estado", [
+        { text: "DTC", x: 20, width: 50 },
+        { text: "Descripción", x: 130, width: 100 },
+        { text: "Estado", x: 480, width: 60 },
+      ]),
+      columns("P0300", "Fallo sintético", "Corriente"),
+    ],
+  },
+];
+
+function createTestApp(options: { maxFileSizeBytes?: number; pages?: ExtractedPdfPage[] } = {}) {
+  const { pages = completedPages, ...appOptions } = options;
+  return createApp({
+    ...appOptions,
+    vinHmacSecret: TEST_SECRET,
+    extractPdfPages: async () => pages,
+  });
+}
 
 describe("POST /api/reports/upload", () => {
   it("recibe un PDF válido y devuelve sus metadatos", async () => {
-    const response = await request(createApp())
+    const response = await request(createTestApp())
       .post("/api/reports/upload")
       .attach("report", validPdf, { filename: "reporte-autel.pdf", contentType: "application/pdf" });
 
@@ -17,15 +80,57 @@ describe("POST /api/reports/upload", () => {
       id: expect.any(String),
       originalName: "reporte-autel.pdf",
       size: validPdf.length,
-      hash: createHash("sha256").update(validPdf).digest("hex"),
+      sha256: createHash("sha256").update(validPdf).digest("hex"),
       type: "application/pdf",
       status: "received",
+      extraction: expect.objectContaining({
+        status: "completed",
+        format: "autel_vehicle_diagnostic_report",
+        requiresManualReview: false,
+      }),
+      analysisPreparation: expect.objectContaining({
+        available: false,
+        reasons: expect.arrayContaining([expect.objectContaining({ code: "NO_VALID_DTCS" })]),
+      }),
     });
     expect(response.body.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
   });
 
+  it("incluye un DTO de análisis sanitizado sin datos sensibles ni propiedades desconocidas", async () => {
+    const response = await request(createTestApp({ pages: completedDtcPages }))
+      .post("/api/reports/upload")
+      .attach("report", validPdf, { filename: "cliente-autel.pdf", contentType: "application/pdf" });
+
+    expect(response.status).toBe(201);
+    expect(response.body.analysisPreparation).toEqual({
+      available: true,
+      input: {
+        vehicle: { make: "Fabricante Sintético", model: "Modelo Sintético", year: 2024 },
+        modules: [
+          {
+            code: "PCM",
+            name: "Módulo sintético",
+            dtcs: [{ code: "P0300", description: "Fallo sintético", status: "current" }],
+          },
+        ],
+      },
+      reasons: [],
+      warnings: [],
+    });
+
+    const sanitized = response.body.analysisPreparation.input;
+    expect(Object.keys(sanitized)).toEqual(["vehicle", "modules"]);
+    expect(Object.keys(sanitized.vehicle)).toEqual(["make", "model", "year"]);
+    expect(Object.keys(sanitized.modules[0])).toEqual(["code", "name", "dtcs"]);
+    expect(Object.keys(sanitized.modules[0].dtcs[0])).toEqual(["code", "description", "status"]);
+    const serialized = JSON.stringify(sanitized).toLowerCase();
+    for (const forbidden of ["vin", "odometer", "originalname", "sha256", "pdf", "cliente-autel", "1abcd23efgh456789"]) {
+      expect(serialized).not.toContain(forbidden);
+    }
+  });
+
   it("rechaza una solicitud sin archivo", async () => {
-    const response = await request(createApp()).post("/api/reports/upload");
+    const response = await request(createTestApp()).post("/api/reports/upload");
 
     expect(response.status).toBe(400);
     expect(response.body).toEqual({
@@ -37,10 +142,10 @@ describe("POST /api/reports/upload", () => {
   });
 
   it("rechaza un archivo con tipo o extensión inválidos", async () => {
-    const invalidMimeResponse = await request(createApp())
+    const invalidMimeResponse = await request(createTestApp())
       .post("/api/reports/upload")
       .attach("report", validPdf, { filename: "reporte.pdf", contentType: "text/plain" });
-    const invalidExtensionResponse = await request(createApp())
+    const invalidExtensionResponse = await request(createTestApp())
       .post("/api/reports/upload")
       .attach("report", validPdf, { filename: "reporte.txt", contentType: "application/pdf" });
 
@@ -51,7 +156,7 @@ describe("POST /api/reports/upload", () => {
   });
 
   it("rechaza un archivo que declara ser PDF pero tiene una firma falsa", async () => {
-    const response = await request(createApp())
+    const response = await request(createTestApp())
       .post("/api/reports/upload")
       .attach("report", Buffer.from("not really a PDF"), { filename: "reporte.pdf", contentType: "application/pdf" });
 
@@ -65,7 +170,7 @@ describe("POST /api/reports/upload", () => {
   });
 
   it("rechaza un archivo que excede el límite configurado", async () => {
-    const response = await request(createApp({ maxFileSizeBytes: 16 }))
+    const response = await request(createTestApp({ maxFileSizeBytes: 16 }))
       .post("/api/reports/upload")
       .attach("report", validPdf, { filename: "reporte.pdf", contentType: "application/pdf" });
 

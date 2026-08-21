@@ -2,17 +2,46 @@ import { createHash, randomUUID } from "node:crypto";
 import express, { type NextFunction, type Request, type Response } from "express";
 import multer from "multer";
 
-import { DEFAULT_MAX_FILE_SIZE_BYTES } from "./config.js";
+import {
+  AiAnalysisError,
+  DiagnosticAnalysisService,
+  OpenAiResponsesClient,
+  validateDiagnosticAnalysisInput,
+} from "./ai-analysis-service.js";
+import { prepareAiAnalysis } from "./ai-analysis-adapter.js";
+import { AutelFormatError, extractAutelReport, type PdfPageExtractor } from "./autel-extraction.js";
+import {
+  DEFAULT_MAX_FILE_SIZE_BYTES,
+  DEFAULT_OPENAI_TIMEOUT_MS,
+  resolvePdfExtractionLimits,
+  type PdfExtractionLimits,
+} from "./config.js";
+import { extractPdfPages, PdfExtractionError } from "./pdf-extractor.js";
 
 const PDF_MIME_TYPE = "application/pdf";
 const PDF_SIGNATURE = Buffer.from("%PDF-");
+const ANALYSIS_JSON_LIMIT_BYTES = 256 * 1024;
 
 type ErrorCode =
   | "FILE_REQUIRED"
   | "FILE_TOO_LARGE"
   | "INVALID_FILE_FORMAT"
   | "INVALID_UPLOAD"
-  | "INTERNAL_ERROR";
+  | "INTERNAL_ERROR"
+  | "PDF_ENCRYPTED"
+  | "PDF_UNREADABLE"
+  | "PDF_NO_USABLE_TEXT"
+  | "PDF_EXTRACTION_LIMIT_EXCEEDED"
+  | "PDF_EXTRACTION_TIMEOUT"
+  | "AUTEL_FORMAT_NOT_RECOGNIZED"
+  | "PDF_EXTRACTION_ERROR"
+  | "OPENAI_API_KEY_MISSING"
+  | "OPENAI_MODEL_MISSING"
+  | "AI_INPUT_INVALID"
+  | "OPENAI_TIMEOUT"
+  | "OPENAI_LIMIT_EXCEEDED"
+  | "OPENAI_RESPONSE_INVALID"
+  | "OPENAI_UNAVAILABLE";
 
 interface ApiErrorBody {
   error: {
@@ -23,6 +52,13 @@ interface ApiErrorBody {
 
 interface AppOptions {
   maxFileSizeBytes?: number;
+  pdfExtractionLimits?: Partial<PdfExtractionLimits>;
+  vinHmacSecret: string;
+  extractPdfPages?: PdfPageExtractor;
+  openAiApiKey?: string;
+  openAiModel?: string;
+  openAiTimeoutMs?: number;
+  analysisService?: DiagnosticAnalysisService;
 }
 
 class UploadValidationError extends Error {
@@ -40,8 +76,16 @@ function sendError(response: Response, status: number, code: ErrorCode, message:
   response.status(status).json(body);
 }
 
-export function createApp(options: AppOptions = {}) {
+export function createApp(options: AppOptions) {
   const maxFileSizeBytes = options.maxFileSizeBytes ?? DEFAULT_MAX_FILE_SIZE_BYTES;
+  const pdfExtractionLimits = resolvePdfExtractionLimits(options.pdfExtractionLimits);
+  const pageExtractor = options.extractPdfPages ?? ((buffer: Buffer) => extractPdfPages(buffer, pdfExtractionLimits));
+  const openAiApiKey = options.openAiApiKey?.trim();
+  const openAiModel = options.openAiModel?.trim();
+  let analysisService = options.analysisService;
+  if (Buffer.byteLength(options.vinHmacSecret, "utf8") < 32) {
+    throw new Error("VIN_HMAC_SECRET debe contener al menos 32 bytes.");
+  }
   const app = express();
 
   const upload = multer({
@@ -71,13 +115,16 @@ export function createApp(options: AppOptions = {}) {
   });
 
   app.disable("x-powered-by");
-  app.use(express.json());
+  // The largest contract-valid analysis DTO (40 modules, 100 DTC and all text
+  // fields at their maxima) stays below 256 KiB; the bounded margin rejects
+  // unrelated oversized JSON without changing Multer's multipart file limit.
+  app.use(express.json({ limit: ANALYSIS_JSON_LIMIT_BYTES }));
 
   app.get("/health", (_request, response) => {
     response.json({ status: "ok", service: "AutoDiag IA" });
   });
 
-  app.post("/api/reports/upload", upload.single("report"), (request, response) => {
+  app.post("/api/reports/upload", upload.single("report"), async (request, response) => {
     const file = request.file;
 
     if (!file) {
@@ -90,17 +137,45 @@ export function createApp(options: AppOptions = {}) {
       return;
     }
 
+    const extraction = await extractAutelReport(file.buffer, options.vinHmacSecret, pageExtractor);
+    const analysisPreparation = prepareAiAnalysis(extraction);
+
     response.status(201).json({
       id: randomUUID(),
       originalName: file.originalname,
       size: file.size,
-      hash: createHash("sha256").update(file.buffer).digest("hex"),
+      sha256: createHash("sha256").update(file.buffer).digest("hex"),
       type: PDF_MIME_TYPE,
       status: "received",
+      extraction,
+      analysisPreparation,
     });
   });
 
-  app.use((error: unknown, _request: Request, response: Response, _next: NextFunction) => {
+  app.post("/api/reports/analyze", async (request, response) => {
+    const input = validateDiagnosticAnalysisInput(request.body);
+
+    if (!analysisService) {
+      if (!openAiApiKey) {
+        sendError(response, 503, "OPENAI_API_KEY_MISSING", "La orientación por IA no está configurada en el servidor.");
+        return;
+      }
+      if (!openAiModel) {
+        sendError(response, 503, "OPENAI_MODEL_MISSING", "El modelo de orientación no está configurado en el servidor.");
+        return;
+      }
+      analysisService = new DiagnosticAnalysisService(
+        new OpenAiResponsesClient(openAiApiKey),
+        openAiModel,
+        options.openAiTimeoutMs ?? DEFAULT_OPENAI_TIMEOUT_MS,
+      );
+    }
+
+    const analysis = await analysisService.analyze(input);
+    response.json({ status: "completed", analysis });
+  });
+
+  app.use((error: unknown, request: Request, response: Response, _next: NextFunction) => {
     void _next;
 
     if (error instanceof UploadValidationError) {
@@ -118,7 +193,39 @@ export function createApp(options: AppOptions = {}) {
       return;
     }
 
-    sendError(response, 500, "INTERNAL_ERROR", "No fue posible procesar el archivo.");
+    if (error instanceof PdfExtractionError) {
+      sendError(response, error.code === "PDF_EXTRACTION_ERROR" ? 500 : 422, error.code, error.message);
+      return;
+    }
+
+    if (error instanceof AutelFormatError) {
+      sendError(response, 422, error.code, error.message);
+      return;
+    }
+
+    if (error instanceof AiAnalysisError) {
+      const statusByCode: Record<typeof error.code, number> = {
+        AI_INPUT_INVALID: 400,
+        OPENAI_TIMEOUT: 504,
+        OPENAI_LIMIT_EXCEEDED: 429,
+        OPENAI_RESPONSE_INVALID: 502,
+        OPENAI_UNAVAILABLE: 503,
+      };
+      sendError(response, statusByCode[error.code], error.code, error.message);
+      return;
+    }
+
+    if (request.path === "/api/reports/analyze" && error instanceof Error) {
+      const httpStatus = "status" in error && typeof error.status === "number" ? error.status : null;
+      if (!(error instanceof SyntaxError) && httpStatus !== 413) {
+        sendError(response, 503, "OPENAI_UNAVAILABLE", "El servicio de orientación no está disponible temporalmente.");
+        return;
+      }
+      sendError(response, httpStatus === 413 ? 413 : 400, "AI_INPUT_INVALID", "Los datos estructurados del reporte no son válidos.");
+      return;
+    }
+
+    sendError(response, 500, "PDF_EXTRACTION_ERROR", "No fue posible extraer el contenido del PDF.");
   });
 
   return app;
