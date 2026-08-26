@@ -263,6 +263,16 @@ No pegues claves en solicitudes, archivos versionados, logs ni conversaciones.
 
 Para probar el flujo manualmente, inicia API y frontend, carga un reporte Autel compatible con al menos un DTC y verifica que no se envíe ninguna solicitud a `/api/reports/analyze` hasta completar las dos acciones de confirmación. Usa únicamente datos ficticios en entornos de desarrollo.
 
+## Persistencia preparada (FASE 3.1)
+
+La migración versionada de `supabase/migrations` prepara un historial diagnóstico normalizado, pero todavía no existe una conexión ni una escritura real a Supabase. El modelo separa reportes, módulos, DTC, análisis de IA, hallazgos, causas posibles, comprobaciones, advertencias por hallazgo y advertencias generales. Las posiciones originales se conservan en cada relación ordenada.
+
+Solo se contempla persistir marca, modelo, año, módulos, DTC y la orientación estructurada completada. El constructor del backend acepta únicamente extracciones completas y análisis válidos, comprueba que cada DTC relacionado pertenezca inequívocamente al reporte y produce solo campos de esas tablas.
+
+Nunca se contempla almacenar VIN original, protegido o seudonimizado; odómetro; motor; PDF o texto completo extraído; contenido binario; nombre, hash o identificador del archivo; datos del cliente; claves o tokens; prompts; identificadores del proveedor; métricas ni respuestas crudas de OpenAI.
+
+Todas las tablas tienen RLS habilitado, no incluyen políticas públicas para `anon` o `authenticated` y reservan sus privilegios al rol de servicio del backend. Esas credenciales deberán permanecer exclusivamente en el servidor. La configuración del cliente, la ejecución de la migración contra un proyecto y las escrituras reales quedan pendientes para la FASE 3.2.
+
 ## Verificación
 
 ```bash
