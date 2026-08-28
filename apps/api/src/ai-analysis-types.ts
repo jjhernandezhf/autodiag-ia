@@ -5,11 +5,21 @@ const MAX_DTCS_PER_MODULE = 20;
 const MAX_TOTAL_DTCS = 100;
 const NON_WHITESPACE_PATTERN = ".*\\S.*";
 
+export const actionableDtcStatusSchema = z.enum([
+  "current",
+  "confirmed",
+  "stored",
+  "pending",
+  "permanent",
+  "intermittent",
+]);
+
 const diagnosticDtcSchema = z
   .object({
     code: z.string().trim().min(1).max(32),
     description: z.string().trim().min(1).max(1_000),
-    status: z.enum(["current", "stored", "pending", "permanent", "history", "unknown"]),
+    status: actionableDtcStatusSchema,
+    alsoHistorical: z.boolean(),
   })
   .strict();
 
@@ -17,7 +27,7 @@ const diagnosticModuleSchema = z
   .object({
     code: z.string().trim().min(1).max(32).nullable(),
     name: z.string().trim().min(1).max(160),
-    dtcs: z.array(diagnosticDtcSchema).max(MAX_DTCS_PER_MODULE),
+    dtcs: z.array(diagnosticDtcSchema).min(1).max(MAX_DTCS_PER_MODULE),
   })
   .strict();
 
@@ -46,7 +56,14 @@ export const diagnosticAnalysisInputSchema = z
 
 const diagnosticFindingSchema = z
   .object({
-    relatedDtcCode: z.string().trim().min(1).max(32).nullable(),
+    relatedDtc: z
+      .object({
+        code: z.string().trim().min(1).max(32),
+        moduleCode: z.string().trim().min(1).max(32).nullable(),
+        moduleName: z.string().trim().min(1).max(160),
+      })
+      .strict()
+      .nullable(),
     priority: z.enum(["critical", "high", "medium", "low"]),
     simpleExplanation: z.string().trim().min(1).max(1_000),
     possibleCauses: z.array(z.string().trim().min(1).max(500)).min(1).max(8),
@@ -82,11 +99,25 @@ export const DIAGNOSTIC_ANALYSIS_JSON_SCHEMA = {
         type: "object",
         additionalProperties: false,
         properties: {
-          relatedDtcCode: {
-            type: ["string", "null"],
-            minLength: 1,
-            maxLength: 32,
-            pattern: NON_WHITESPACE_PATTERN,
+          relatedDtc: {
+            anyOf: [
+              {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  code: { type: "string", minLength: 1, maxLength: 32, pattern: NON_WHITESPACE_PATTERN },
+                  moduleCode: {
+                    type: ["string", "null"],
+                    minLength: 1,
+                    maxLength: 32,
+                    pattern: NON_WHITESPACE_PATTERN,
+                  },
+                  moduleName: { type: "string", minLength: 1, maxLength: 160, pattern: NON_WHITESPACE_PATTERN },
+                },
+                required: ["code", "moduleCode", "moduleName"],
+              },
+              { type: "null" },
+            ],
           },
           priority: { type: "string", enum: ["critical", "high", "medium", "low"] },
           simpleExplanation: {
@@ -116,7 +147,7 @@ export const DIAGNOSTIC_ANALYSIS_JSON_SCHEMA = {
           confidence: { type: "string", enum: ["high", "medium", "low"] },
         },
         required: [
-          "relatedDtcCode",
+          "relatedDtc",
           "priority",
           "simpleExplanation",
           "possibleCauses",

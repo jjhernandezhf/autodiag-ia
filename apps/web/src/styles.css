@@ -295,6 +295,7 @@ td code { color: #c34628; font-family: ui-monospace, SFMono-Regular, Consolas, m
 .analysis-finding header div { display: flex; flex-direction: column; gap: 3px; }
 .analysis-finding header div span { color: #7a8795; font-size: .68rem; text-transform: uppercase; }
 .analysis-finding header div strong { color: #c34628; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .85rem; }
+.analysis-finding header div small { color: #5b6e7f; font-size: .7rem; overflow-wrap: anywhere; }
 .analysis-finding > p { margin: 13px 0; color: #425567; font-size: .82rem; line-height: 1.55; }
 .priority-badge { padding: 5px 8px; border-radius: 999px; font-size: .68rem; font-weight: 750; white-space: nowrap; }
 .priority-badge.critical, .priority-badge.high { color: #923b2b; background: #ffe9e4; }

@@ -5,10 +5,20 @@ import {
   diagnosticAnalysisOutputSchema,
   type DiagnosticAnalysisOutput,
 } from "./ai-analysis-types.js";
-import type { AutelExtraction, DtcStatus } from "./report-types.js";
+import type { AutelExtraction, DtcClassification, DtcStatus, ParsedDtc, ScannedSystem } from "./report-types.js";
 import { containsVinCandidate } from "./text-normalization.js";
 
 const nullableTextSchema = z.string().nullable();
+const dtcStatusSchema = z.enum([
+  "current",
+  "confirmed",
+  "stored",
+  "pending",
+  "permanent",
+  "intermittent",
+  "history",
+  "unknown",
+]);
 
 const extractionSchema = z
   .object({
@@ -55,8 +65,9 @@ const extractionSchema = z
           code: z.string(),
           moduleCode: nullableTextSchema,
           moduleName: z.string(),
-          status: z.enum(["current", "stored", "pending", "permanent", "history", "unknown"]),
+          status: dtcStatusSchema,
           statusOriginal: nullableTextSchema,
+          classification: z.enum(["actionable", "historical", "unknown"]),
           descriptionOriginal: z.string(),
         })
         .strict(),
@@ -96,6 +107,8 @@ export interface PersistableDiagnosticDtc {
   code: string;
   description: string;
   status: DtcStatus;
+  statusOriginal: string | null;
+  classification: DtcClassification;
   position: number;
 }
 
@@ -106,8 +119,14 @@ export interface PersistableDiagnosticModule {
   dtcs: PersistableDiagnosticDtc[];
 }
 
+export interface PersistableDtcReference {
+  code: string;
+  modulePosition: number;
+  dtcPosition: number;
+}
+
 export interface PersistableDiagnosticFinding {
-  relatedDtcCode: string | null;
+  relatedDtc: PersistableDtcReference | null;
   priority: DiagnosticAnalysisOutput["findings"][number]["priority"];
   simpleExplanation: string;
   confidence: DiagnosticAnalysisOutput["findings"][number]["confidence"];
@@ -169,6 +188,15 @@ function positioned(values: string[]): PersistablePositionedText[] {
   return values.map((value, position) => ({ value, position }));
 }
 
+function matchesSystem(system: ScannedSystem, dtc: ParsedDtc) {
+  if (system.code !== null) return dtc.moduleCode === system.code;
+  return dtc.moduleCode === null && dtc.moduleName === system.name;
+}
+
+function dtcIdentity(value: { code: string; moduleCode: string | null; moduleName: string }) {
+  return JSON.stringify([value.moduleCode, value.moduleName, value.code]);
+}
+
 export function buildDiagnosticPersistenceRecord(
   rawExtraction: unknown,
   rawCompletedAnalysis: unknown,
@@ -202,16 +230,54 @@ export function buildDiagnosticPersistenceRecord(
   if (!analysisValidation.success) return failure("ANALYSIS_INVALID");
   const analysis = analysisValidation.data.analysis;
 
-  const dtcOccurrences = new Map<string, number>();
-  for (const module of preparation.input.modules) {
-    for (const dtc of module.dtcs) {
-      dtcOccurrences.set(dtc.code, (dtcOccurrences.get(dtc.code) ?? 0) + 1);
+  const assignmentCounts = extraction.dtcs.map(() => 0);
+  const modules: PersistableDiagnosticModule[] = extraction.systems.map((system, modulePosition) => {
+    const dtcs = extraction.dtcs.flatMap((dtc, extractionIndex) => {
+      if (!matchesSystem(system, dtc)) return [];
+      assignmentCounts[extractionIndex] = (assignmentCounts[extractionIndex] ?? 0) + 1;
+      return [{
+        code: dtc.code,
+        description: dtc.descriptionOriginal,
+        status: dtc.status,
+        statusOriginal: dtc.statusOriginal,
+        classification: dtc.classification,
+        position: extractionIndex,
+      }];
+    });
+    return { code: system.code, name: system.name, position: modulePosition, dtcs };
+  });
+  if (
+    assignmentCounts.some((count) => count !== 1) ||
+    modules.some((module, index) => module.dtcs.length !== extraction.systems[index]?.dtcCount)
+  ) {
+    return failure("EXTRACTION_INVALID");
+  }
+
+  const actionableReferences = new Map<string, PersistableDtcReference>();
+  for (const inputModule of preparation.input.modules) {
+    const modulePosition = modules.findIndex(
+      (module) => module.code === inputModule.code && module.name === inputModule.name,
+    );
+    if (modulePosition < 0) return failure("DTC_REFERENCE_INVALID");
+    const persistedModule = modules[modulePosition]!;
+    for (const inputDtc of inputModule.dtcs) {
+      const dtcIndex = persistedModule.dtcs.findIndex(
+        (dtc) => dtc.code === inputDtc.code && dtc.classification === "actionable",
+      );
+      if (dtcIndex < 0) return failure("DTC_REFERENCE_INVALID");
+      actionableReferences.set(
+        dtcIdentity({ code: inputDtc.code, moduleCode: inputModule.code, moduleName: inputModule.name }),
+        { code: inputDtc.code, modulePosition, dtcPosition: persistedModule.dtcs[dtcIndex]!.position },
+      );
     }
   }
+
+  const relatedIdentities = analysis.findings.flatMap((finding) =>
+    finding.relatedDtc === null ? [] : [dtcIdentity(finding.relatedDtc)],
+  );
   if (
-    analysis.findings.some(
-      (finding) => finding.relatedDtcCode !== null && dtcOccurrences.get(finding.relatedDtcCode) !== 1,
-    )
+    relatedIdentities.some((identity) => !actionableReferences.has(identity)) ||
+    new Set(relatedIdentities).size !== relatedIdentities.length
   ) {
     return failure("DTC_REFERENCE_INVALID");
   }
@@ -224,27 +290,19 @@ export function buildDiagnosticPersistenceRecord(
       extractionStatus: "completed",
       analysisStatus: "completed",
     },
-    modules: preparation.input.modules.map((module, modulePosition) => ({
-      code: module.code,
-      name: module.name,
-      position: modulePosition,
-      dtcs: module.dtcs.map((dtc, dtcPosition) => ({
-        code: dtc.code,
-        description: dtc.description,
-        status: dtc.status,
-        position: dtcPosition,
-      })),
-    })),
+    modules,
     analysis: {
       technicalSummary: analysis.technicalSummary,
       confidence: analysis.confidence,
       requiresTechnicianConfirmation: analysis.requiresTechnicianConfirmation,
-      findings: analysis.findings.map((finding, findingPosition) => ({
-        relatedDtcCode: finding.relatedDtcCode,
+      findings: analysis.findings.map((finding, position) => ({
+        relatedDtc: finding.relatedDtc === null
+          ? null
+          : actionableReferences.get(dtcIdentity(finding.relatedDtc)) ?? null,
         priority: finding.priority,
         simpleExplanation: finding.simpleExplanation,
         confidence: finding.confidence,
-        position: findingPosition,
+        position,
         possibleCauses: positioned(finding.possibleCauses),
         recommendedChecks: positioned(finding.recommendedChecks),
         safetyWarnings: positioned(finding.safetyWarnings),

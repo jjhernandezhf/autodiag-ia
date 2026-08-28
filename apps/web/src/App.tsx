@@ -5,7 +5,17 @@ const PDF_MIME_TYPE = "application/pdf";
 type UploadStatus = "idle" | "uploading" | "success" | "error";
 type AnalysisStatus = "unavailable" | "ready" | "confirming" | "analyzing" | "completed" | "error" | "cancelled";
 
-type DtcStatus = "current" | "stored" | "pending" | "permanent" | "history" | "unknown";
+type DtcStatus =
+  | "current"
+  | "confirmed"
+  | "stored"
+  | "pending"
+  | "permanent"
+  | "intermittent"
+  | "history"
+  | "unknown";
+type ActionableDtcStatus = Exclude<DtcStatus, "history" | "unknown">;
+type DtcClassification = "actionable" | "historical" | "unknown";
 
 interface ExtractionResult {
   status: "completed" | "partial";
@@ -33,6 +43,7 @@ interface ExtractionResult {
     moduleName: string;
     status: DtcStatus;
     statusOriginal: string | null;
+    classification: DtcClassification;
     descriptionOriginal: string;
   }>;
   warnings: Array<{ code: string; message: string }>;
@@ -43,8 +54,14 @@ interface DiagnosticAnalysisInput {
   modules: Array<{
     code: string | null;
     name: string;
-    dtcs: Array<{ code: string; description: string; status: DtcStatus }>;
+    dtcs: Array<{ code: string; description: string; status: ActionableDtcStatus; alsoHistorical: boolean }>;
   }>;
+}
+
+interface AnalysisCounts {
+  detected: number;
+  actionable: number;
+  historical: number;
 }
 
 interface AnalysisAvailabilityReason {
@@ -53,14 +70,14 @@ interface AnalysisAvailabilityReason {
 }
 
 type AnalysisPreparation =
-  | { available: true; input: DiagnosticAnalysisInput; reasons: AnalysisAvailabilityReason[]; warnings: string[] }
-  | { available: false; reasons: AnalysisAvailabilityReason[]; warnings: string[] };
+  | { available: true; input: DiagnosticAnalysisInput; reasons: AnalysisAvailabilityReason[]; warnings: string[]; counts: AnalysisCounts }
+  | { available: false; reasons: AnalysisAvailabilityReason[]; warnings: string[]; counts: AnalysisCounts };
 
 type AnalysisPriority = "critical" | "high" | "medium" | "low";
 type AnalysisConfidence = "high" | "medium" | "low";
 
 interface DiagnosticFinding {
-  relatedDtcCode: string | null;
+  relatedDtc: { code: string; moduleCode: string | null; moduleName: string } | null;
   priority: AnalysisPriority;
   simpleExplanation: string;
   possibleCauses: string[];
@@ -127,6 +144,24 @@ function isStringArray(value: unknown): value is string[] {
     && value.every((item) => typeof item === "string" && item.trim().length > 0);
 }
 
+function isRelatedDtc(value: unknown): value is NonNullable<DiagnosticFinding["relatedDtc"]> {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<NonNullable<DiagnosticFinding["relatedDtc"]>>;
+  return (
+    typeof candidate.code === "string" &&
+    candidate.code.trim().length > 0 &&
+    candidate.code.length <= 32 &&
+    (candidate.moduleCode === null || (
+      typeof candidate.moduleCode === "string" &&
+      candidate.moduleCode.trim().length > 0 &&
+      candidate.moduleCode.length <= 32
+    )) &&
+    typeof candidate.moduleName === "string" &&
+    candidate.moduleName.trim().length > 0 &&
+    candidate.moduleName.length <= 160
+  );
+}
+
 function isDiagnosticAnalysis(value: unknown): value is DiagnosticAnalysis {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<DiagnosticAnalysis>;
@@ -142,11 +177,7 @@ function isDiagnosticAnalysis(value: unknown): value is DiagnosticAnalysis {
       (finding) =>
         finding !== null &&
         typeof finding === "object" &&
-        (finding.relatedDtcCode === null || (
-          typeof finding.relatedDtcCode === "string"
-          && finding.relatedDtcCode.trim().length > 0
-          && finding.relatedDtcCode.length <= 32
-        )) &&
+        (finding.relatedDtc === null || isRelatedDtc(finding.relatedDtc)) &&
         priorities.has(finding.priority) &&
         typeof finding.simpleExplanation === "string" &&
         finding.simpleExplanation.trim().length > 0 &&
@@ -167,6 +198,10 @@ function parseAnalysisResponse(value: unknown): AnalysisResponse | null {
   const candidate = value as Partial<AnalysisResponse>;
   if (candidate.status !== "completed" || !isDiagnosticAnalysis(candidate.analysis)) return null;
   return { status: candidate.status, analysis: candidate.analysis };
+}
+
+function dtcIdentity(value: { code: string; moduleCode: string | null; moduleName: string }) {
+  return JSON.stringify([value.moduleCode, value.moduleName, value.code]);
 }
 
 function getAiErrorMessage(code: string | undefined) {
@@ -200,7 +235,7 @@ function displayVehicleName(extraction: ExtractionResult) {
   return [extraction.vehicle.year, extraction.vehicle.make, extraction.vehicle.model].filter(Boolean).join(" · ") || "No disponible";
 }
 
-function ExtractionResults({ extraction }: { extraction: ExtractionResult }) {
+function ExtractionResults({ extraction, counts }: { extraction: ExtractionResult; counts: AnalysisCounts }) {
   const vehicle = extraction.vehicle;
 
   return (
@@ -235,7 +270,9 @@ function ExtractionResults({ extraction }: { extraction: ExtractionResult }) {
 
       <div className="scan-totals" aria-label="Resumen del escaneo">
         <div><strong>{extraction.scanSummary.parsedSystems}</strong><span>Sistemas escaneados</span></div>
-        <div><strong>{extraction.scanSummary.parsedDtcs}</strong><span>DTC encontrados</span></div>
+        <div><strong>{counts.detected}</strong><span>DTC detectados</span></div>
+        <div><strong>{counts.actionable}</strong><span>DTC para análisis</span></div>
+        <div><strong>{counts.historical}</strong><span>Registros históricos</span></div>
       </div>
 
       {extraction.warnings.length > 0 && (
@@ -284,11 +321,21 @@ function AnalysisResult({ analysis }: { analysis: DiagnosticAnalysis }) {
       <div className="analysis-findings">
         <h3>Hallazgos priorizados</h3>
         {analysis.findings.map((finding, index) => (
-          <article className="analysis-finding" key={`${finding.relatedDtcCode ?? "general"}-${index}`}>
+          <article
+            className="analysis-finding"
+            key={`${finding.relatedDtc?.moduleCode ?? finding.relatedDtc?.moduleName ?? "general"}-${finding.relatedDtc?.code ?? index}`}
+          >
             <header>
               <div>
                 <span>Hallazgo {index + 1}</span>
-                <strong>{finding.relatedDtcCode ?? "Sin DTC específico"}</strong>
+                <strong>{finding.relatedDtc?.code ?? "Sin DTC específico"}</strong>
+                {finding.relatedDtc && (
+                  <small>
+                    {finding.relatedDtc.moduleCode
+                      ? `${finding.relatedDtc.moduleCode} · ${finding.relatedDtc.moduleName}`
+                      : finding.relatedDtc.moduleName}
+                  </small>
+                )}
               </div>
               <span className={`priority-badge ${finding.priority}`}>Prioridad {PRIORITY_LABELS[finding.priority]}</span>
             </header>
@@ -651,11 +698,17 @@ export function App() {
       }
 
       const result = parseAnalysisResponse(body);
-      const inputDtcCodes = new Set(preparation.input.modules.flatMap((module) => module.dtcs.map((dtc) => dtc.code)));
-      const hasUnknownDtc = result?.analysis.findings.some(
-        (finding) => finding.relatedDtcCode !== null && !inputDtcCodes.has(finding.relatedDtcCode),
+      const inputDtcIdentities = new Set(
+        preparation.input.modules.flatMap((module) =>
+          module.dtcs.map((dtc) => dtcIdentity({ code: dtc.code, moduleCode: module.code, moduleName: module.name })),
+        ),
       );
-      if (!result || hasUnknownDtc) {
+      const relatedIdentities = result?.analysis.findings.flatMap((finding) =>
+        finding.relatedDtc === null ? [] : [dtcIdentity(finding.relatedDtc)],
+      ) ?? [];
+      const hasInvalidDtcReference = relatedIdentities.some((identity) => !inputDtcIdentities.has(identity))
+        || new Set(relatedIdentities).size !== relatedIdentities.length;
+      if (!result || hasInvalidDtcReference) {
         setAnalysisState({ status: "error", message: AI_ERROR_MESSAGES.OPENAI_RESPONSE_INVALID });
         return;
       }
@@ -784,7 +837,10 @@ export function App() {
 
         {uploadResult && (
           <>
-            <ExtractionResults extraction={uploadResult.extraction} />
+            <ExtractionResults
+              extraction={uploadResult.extraction}
+              counts={uploadResult.analysisPreparation.counts}
+            />
             <AiAnalysisSection
               preparation={uploadResult.analysisPreparation}
               state={analysisState}

@@ -65,6 +65,7 @@ function successfulUpload(file: File) {
       available: false,
       reasons: [{ code: "NO_VALID_DTCS", message: "El reporte no contiene DTC válidos para analizar." }],
       warnings: [],
+      counts: { detected: 0, actionable: 0, historical: 0 },
     },
   });
 }
@@ -78,6 +79,11 @@ function extractedUpload(
     warnings: [],
   },
 ) {
+  const scanSummary = extraction.scanSummary as { parsedDtcs?: number } | undefined;
+  const availableInput = analysisPreparation.available
+    ? analysisPreparation.input as { modules?: Array<{ dtcs?: unknown[] }> } | undefined
+    : undefined;
+  const actionable = availableInput?.modules?.reduce((total, module) => total + (module.dtcs?.length ?? 0), 0) ?? 0;
   return createJsonResponse(true, {
     id: "5f02d19b-5fd2-4128-aeb6-c5eef33554a0",
     originalName: file.name,
@@ -86,7 +92,10 @@ function extractedUpload(
     type: "application/pdf",
     status: "received",
     extraction,
-    analysisPreparation,
+    analysisPreparation: {
+      counts: { detected: scanSummary?.parsedDtcs ?? 0, actionable, historical: 0 },
+      ...analysisPreparation,
+    },
   });
 }
 
@@ -114,6 +123,7 @@ function readyAnalysisUpload(file: File) {
         moduleName: "Módulo motriz",
         status: "current",
         statusOriginal: "Corriente",
+        classification: "actionable",
         descriptionOriginal: "Fallo de encendido sintético",
       }],
       warnings: [],
@@ -125,11 +135,17 @@ function readyAnalysisUpload(file: File) {
         modules: [{
           code: "PCM",
           name: "Módulo motriz",
-          dtcs: [{ code: "P0300", description: "Fallo de encendido sintético", status: "current" }],
+          dtcs: [{
+            code: "P0300",
+            description: "Fallo de encendido sintético",
+            status: "current",
+            alsoHistorical: false,
+          }],
         }],
       },
       reasons: [],
       warnings: [],
+      counts: { detected: 1, actionable: 1, historical: 0 },
     },
   );
 }
@@ -140,7 +156,7 @@ function successfulAnalysis() {
     analysis: {
       technicalSummary: "Orientación sintética sobre una falla de encendido que debe comprobarse.",
       findings: [{
-        relatedDtcCode: "P0300",
+        relatedDtc: { code: "P0300", moduleCode: "PCM", moduleName: "Módulo motriz" },
         priority: "high",
         simpleExplanation: "El código indica una posible combustión irregular en uno o más cilindros.",
         possibleCauses: ["Bujía desgastada", "Conexión eléctrica deficiente"],
@@ -315,6 +331,7 @@ describe("carga de reportes", () => {
           moduleName: "Módulo sintético",
           status: "current",
           statusOriginal: "Corriente",
+          classification: "actionable",
           descriptionOriginal: "Descripción completamente sintética",
         }],
         warnings: [],
@@ -389,6 +406,46 @@ describe("carga de reportes", () => {
 
     expect(await screen.findByText("No se reportaron DTC en este escaneo")).toBeTruthy();
     expect(screen.queryByText(/libre de fallas/i)).toBeNull();
+  });
+
+  it.each([
+    ["Toyota", { detected: 27, actionable: 14, historical: 13 }],
+    ["BMW", { detected: 10, actionable: 10, historical: 0 }],
+  ])("presenta los contadores documentales y accionables de %s", async (_case, counts) => {
+    const file = createPdf(`conteos-${_case}.pdf`);
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(extractedUpload(
+      file,
+      {
+        status: "completed",
+        format: "autel_vehicle_diagnostic_report",
+        requiresManualReview: false,
+        vehicle: { year: 2024, make: "Marca", model: "Modelo", engine: null, odometer: null, vinMasked: null, vinPseudonym: null },
+        scanSummary: { declaredSystems: 1, parsedSystems: 1, declaredDtcs: counts.detected, parsedDtcs: counts.detected },
+        systems: [{ code: "PCM", name: "Módulo", dtcCount: counts.detected }],
+        dtcs: [],
+        warnings: [],
+      },
+      {
+        available: false,
+        reasons: [{ code: "SYNTHETIC", message: "Razón activa sintética." }],
+        warnings: [],
+        counts,
+      },
+    )));
+    const user = userEvent.setup();
+    const { container } = render(<App />);
+    const { input } = getUploadElements(container);
+
+    await user.upload(input, file);
+    await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+
+    const detectedLabel = await screen.findByText("DTC detectados");
+    const actionableLabel = screen.getByText("DTC para análisis");
+    const historicalLabel = screen.getByText("Registros históricos");
+    expect(detectedLabel.previousElementSibling?.textContent).toBe(String(counts.detected));
+    expect(actionableLabel.previousElementSibling?.textContent).toBe(String(counts.actionable));
+    expect(historicalLabel.previousElementSibling?.textContent).toBe(String(counts.historical));
+    expect(screen.getByText("Razón activa sintética.")).toBeTruthy();
   });
 });
 
@@ -479,7 +536,12 @@ describe("orientación asistida por IA", () => {
       modules: [{
         code: "PCM",
         name: "Módulo motriz",
-        dtcs: [{ code: "P0300", description: "Fallo de encendido sintético", status: "current" }],
+        dtcs: [{
+          code: "P0300",
+          description: "Fallo de encendido sintético",
+          status: "current",
+          alsoHistorical: false,
+        }],
       }],
     });
     const serialized = JSON.stringify(requestBody).toLowerCase();
@@ -539,6 +601,7 @@ describe("orientación asistida por IA", () => {
     expect(screen.getByRole("heading", { name: "Comprobaciones recomendadas" })).toBeTruthy();
     expect(screen.getAllByText("Advertencias de seguridad").length).toBeGreaterThan(0);
     expect(screen.getByText("Confianza: Media")).toBeTruthy();
+    expect(screen.getAllByText("PCM · Módulo motriz")).toHaveLength(2);
     expect(screen.getByText("Requiere confirmación del técnico")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Datos del reporte" })).toBeTruthy();
   });
@@ -564,6 +627,34 @@ describe("orientación asistida por IA", () => {
     expect(screen.queryByText(rawMessage)).toBeNull();
     expect(screen.getByRole("button", { name: "Intentar de nuevo" })).toBeTruthy();
     expect(fetchMock.mock.calls.filter(([url]) => url === "/api/reports/analyze")).toHaveLength(1);
+    expect(screen.getByRole("heading", { name: "Datos del reporte" })).toBeTruthy();
+    expect(screen.getByText("P0300")).toBeTruthy();
+  });
+
+  it("rechaza un hallazgo asociado a un DTC no accionable enviado por el proveedor", async () => {
+    const file = createPdf("hallazgo-historico.pdf");
+    const invalidAnalysis = successfulAnalysis();
+    const body = await invalidAnalysis.json() as {
+      analysis: { findings: Array<{ relatedDtc: { code: string; moduleCode: string | null; moduleName: string } }> };
+    };
+    body.analysis.findings[0]!.relatedDtc.code = "H0001";
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(readyAnalysisUpload(file))
+      .mockResolvedValueOnce(createJsonResponse(true, body));
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const { container } = render(<App />);
+    const { input } = getUploadElements(container);
+
+    await user.upload(input, file);
+    await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+    await user.click(await screen.findByRole("button", { name: "Analizar DTC con IA" }));
+    await user.click(screen.getByRole("button", { name: "Confirmar y analizar" }));
+
+    expect(await screen.findByText("El servicio devolvió una orientación que no pudo validarse.")).toBeTruthy();
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/reports/analyze")).toHaveLength(1);
+    expect(screen.getByRole("heading", { name: "Datos del reporte" })).toBeTruthy();
   });
 
   it("aborta la solicitud y limpia la orientación al cambiar de archivo", async () => {

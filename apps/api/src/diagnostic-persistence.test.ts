@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { buildDiagnosticPersistenceRecord } from "./diagnostic-persistence.js";
 import type { DiagnosticAnalysisOutput } from "./ai-analysis-types.js";
 import type { AutelExtraction, ParsedDtc } from "./report-types.js";
+import { classifyDtcStatus } from "./text-normalization.js";
 
 interface CompletedAnalysis {
   status: "completed";
@@ -16,7 +17,15 @@ function createDtc(
   descriptionOriginal: string,
   status: ParsedDtc["status"],
 ): ParsedDtc {
-  return { code, moduleCode, moduleName, descriptionOriginal, status, statusOriginal: "estado documental" };
+  return {
+    code,
+    moduleCode,
+    moduleName,
+    descriptionOriginal,
+    status,
+    statusOriginal: "estado documental",
+    classification: classifyDtcStatus(status),
+  };
 }
 
 function createExtraction(): AutelExtraction {
@@ -54,7 +63,7 @@ function createCompletedAnalysis(): CompletedAnalysis {
       technicalSummary: "Resumen técnico sintético",
       findings: [
         {
-          relatedDtcCode: "P0300",
+          relatedDtc: { code: "P0300", moduleCode: "PCM", moduleName: "Módulo motriz" },
           priority: "high",
           simpleExplanation: "Explicación del primer hallazgo",
           possibleCauses: ["Primera causa", "Segunda causa"],
@@ -63,7 +72,7 @@ function createCompletedAnalysis(): CompletedAnalysis {
           confidence: "high",
         },
         {
-          relatedDtcCode: "B1000",
+          relatedDtc: { code: "B1000", moduleCode: "BCM", moduleName: "Módulo de carrocería" },
           priority: "low",
           simpleExplanation: "Explicación del segundo hallazgo",
           possibleCauses: ["Tercera causa"],
@@ -128,7 +137,7 @@ function createMaximumAnalysis(): CompletedAnalysis {
     analysis: {
       technicalSummary: "o".repeat(1_500),
       findings: Array.from({ length: 20 }, () => ({
-        relatedDtcCode: null,
+        relatedDtc: null,
         priority: "critical" as const,
         simpleExplanation: "o".repeat(1_000),
         possibleCauses: Array.from({ length: 8 }, () => text500),
@@ -171,11 +180,11 @@ describe("buildDiagnosticPersistenceRecord", () => {
       { code: "P0171", position: 1 },
     ]);
     expect(record.modules[1]?.dtcs.map(({ code, position }) => ({ code, position }))).toEqual([
-      { code: "B1000", position: 0 },
+      { code: "B1000", position: 2 },
     ]);
-    expect(record.analysis.findings.map(({ relatedDtcCode, position }) => ({ relatedDtcCode, position }))).toEqual([
-      { relatedDtcCode: "P0300", position: 0 },
-      { relatedDtcCode: "B1000", position: 1 },
+    expect(record.analysis.findings.map(({ relatedDtc, position }) => ({ relatedDtc, position }))).toEqual([
+      { relatedDtc: { code: "P0300", modulePosition: 0, dtcPosition: 0 }, position: 0 },
+      { relatedDtc: { code: "B1000", modulePosition: 1, dtcPosition: 2 }, position: 1 },
     ]);
     expect(record.analysis.findings[0]?.possibleCauses).toEqual([
       { value: "Primera causa", position: 0 },
@@ -213,11 +222,43 @@ describe("buildDiagnosticPersistenceRecord", () => {
       "apiKey",
       "prompt",
       "provider",
-      "estado documental",
       "advertencia documental excluida",
     ]) {
       expect(serialized.toLowerCase()).not.toContain(forbidden.toLowerCase());
     }
+    expect(getRecord().modules[0]?.dtcs[0]).toMatchObject({
+      status: "current",
+      statusOriginal: "estado documental",
+      classification: "actionable",
+    });
+  });
+
+  it("conserva todas las filas actuales e históricas en orden sin duplicar hallazgos", () => {
+    const extraction = createExtraction();
+    extraction.systems[0]!.dtcCount = 3;
+    extraction.dtcs.splice(
+      2,
+      0,
+      createDtc("P0300", "PCM", "Módulo motriz", "Fallo de encendido sintético", "history"),
+    );
+    extraction.scanSummary.declaredDtcs = 4;
+    extraction.scanSummary.parsedDtcs = 4;
+
+    const record = getRecord(extraction, createCompletedAnalysis());
+
+    expect(record.modules[0]?.dtcs.map(({ code, status, classification, position }) => ({
+      code,
+      status,
+      classification,
+      position,
+    }))).toEqual([
+      { code: "P0300", status: "current", classification: "actionable", position: 0 },
+      { code: "P0171", status: "pending", classification: "actionable", position: 1 },
+      { code: "P0300", status: "history", classification: "historical", position: 2 },
+    ]);
+    expect(record.analysis.findings.filter((finding) => finding.relatedDtc?.code === "P0300")).toHaveLength(1);
+    expect(record.analysis.findings[0]?.relatedDtc).toEqual({ code: "P0300", modulePosition: 0, dtcPosition: 0 });
+    expect(record.modules.flatMap((module) => module.dtcs).map((dtc) => dtc.position).sort((a, b) => a - b)).toEqual([0, 1, 2, 3]);
   });
 
   it("rechaza extracciones parciales o que requieren revisión manual", () => {
@@ -267,18 +308,21 @@ describe("buildDiagnosticPersistenceRecord", () => {
     });
   });
 
-  it("rechaza referencias inexistentes o ambiguas a DTC", () => {
+  it("rechaza referencias inexistentes o hallazgos duplicados para el mismo DTC", () => {
     const missing = createCompletedAnalysis();
-    missing.analysis.findings[0]!.relatedDtcCode = "U9999";
+    missing.analysis.findings[0]!.relatedDtc = {
+      code: "U9999",
+      moduleCode: "PCM",
+      moduleName: "Módulo motriz",
+    };
     expect(buildDiagnosticPersistenceRecord(createExtraction(), missing)).toMatchObject({
       persistable: false,
       code: "DTC_REFERENCE_INVALID",
     });
 
-    const ambiguousExtraction = createExtraction();
-    ambiguousExtraction.dtcs[2]!.code = "P0300";
-    const ambiguous = createCompletedAnalysis();
-    expect(buildDiagnosticPersistenceRecord(ambiguousExtraction, ambiguous)).toMatchObject({
+    const duplicated = createCompletedAnalysis();
+    duplicated.analysis.findings.push(structuredClone(duplicated.analysis.findings[0]!));
+    expect(buildDiagnosticPersistenceRecord(createExtraction(), duplicated)).toMatchObject({
       persistable: false,
       code: "DTC_REFERENCE_INVALID",
     });
@@ -299,7 +343,7 @@ describe("buildDiagnosticPersistenceRecord", () => {
     }],
     ["código DTC", (extraction: AutelExtraction, analysis: CompletedAnalysis, vin: string) => {
       extraction.dtcs[0]!.code = vin;
-      analysis.analysis.findings[0]!.relatedDtcCode = vin;
+      analysis.analysis.findings[0]!.relatedDtc!.code = vin;
     }],
     ["descripción DTC", (extraction: AutelExtraction, analysis: CompletedAnalysis, vin: string) => {
       extraction.dtcs[0]!.descriptionOriginal = `Descripción ${vin}`;

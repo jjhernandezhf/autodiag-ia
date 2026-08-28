@@ -17,7 +17,17 @@ export interface ExtractedPdfPage {
   lines: ExtractedTextLine[];
 }
 
-export type DtcStatus = "current" | "stored" | "pending" | "permanent" | "history" | "unknown";
+export type DtcStatus =
+  | "current"
+  | "confirmed"
+  | "stored"
+  | "pending"
+  | "permanent"
+  | "intermittent"
+  | "history"
+  | "unknown";
+
+export type DtcClassification = "actionable" | "historical" | "unknown";
 
 export interface ExtractionWarning {
   code: string;
@@ -46,6 +56,7 @@ export interface ParsedDtc {
   moduleName: string;
   status: DtcStatus;
   statusOriginal: string | null;
+  classification: DtcClassification;
   descriptionOriginal: string;
 }
 
@@ -75,6 +86,10 @@ export type AiAnalysisAvailabilityReasonCode =
   | "NO_VALID_DTCS"
   | "MODULE_DATA_INVALID"
   | "DTC_DATA_INVALID"
+  | "UNKNOWN_DTC_STATUS"
+  | "ONLY_HISTORICAL_DTCS"
+  | "DTC_DESCRIPTION_CONFLICT"
+  | "DTC_STATUS_CONFLICT"
   | "DTC_MODULE_MISMATCH"
   | "SENSITIVE_CONTENT_DETECTED"
   | "ANALYSIS_LIMIT_EXCEEDED";
@@ -87,6 +102,11 @@ export interface AiAnalysisAvailabilityReason {
 interface AiAnalysisPreparationBase {
   reasons: AiAnalysisAvailabilityReason[];
   warnings: string[];
+  counts: {
+    detected: number;
+    actionable: number;
+    historical: number;
+  };
 }
 
 export interface AvailableAiAnalysisPreparation extends AiAnalysisPreparationBase {

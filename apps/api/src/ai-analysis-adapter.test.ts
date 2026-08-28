@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { prepareAiAnalysis } from "./ai-analysis-adapter.js";
 import type { AutelExtraction, ParsedDtc, ScannedSystem } from "./report-types.js";
+import { classifyDtcStatus } from "./text-normalization.js";
 
 function createExtraction(): AutelExtraction {
   return {
@@ -38,7 +39,47 @@ function createDtc(
   descriptionOriginal: string,
   status: ParsedDtc["status"],
 ): ParsedDtc {
-  return { code, moduleCode, moduleName, descriptionOriginal, status, statusOriginal: "Estado original" };
+  return {
+    code,
+    moduleCode,
+    moduleName,
+    descriptionOriginal,
+    status,
+    statusOriginal: "Estado original",
+    classification: classifyDtcStatus(status),
+  };
+}
+
+function createToyotaDuplicateExtraction(): AutelExtraction {
+  const airbagCodes = [
+    "B1613", "B1801", "B1811", "B1831", "B1836", "B1861",
+    "B1901", "B1906", "B1921", "B1926", "B1941",
+  ];
+  const systems: ScannedSystem[] = [
+    { code: null, name: "Airbag SRS", dtcCount: 22 },
+    { code: null, name: "Carrocería principal", dtcCount: 2 },
+    { code: null, name: "Aire acondicionado", dtcCount: 2 },
+    { code: null, name: "Sistema telemático", dtcCount: 1 },
+    ...Array.from({ length: 32 }, (_, index) => ({ code: `M${index}`, name: `Módulo sin DTC ${index}`, dtcCount: 0 })),
+  ];
+  const airbagRows = ["current", "history"].flatMap((status) =>
+    airbagCodes.map((code) => createDtc(code, null, "Airbag SRS", `Descripción ${code}`, status as "current" | "history")),
+  );
+  const dtcs = [
+    ...airbagRows,
+    createDtc("U1117", null, "Carrocería principal", "Descripción U1117", "current"),
+    createDtc("U1117", null, "Carrocería principal", "Descripción U1117", "history"),
+    createDtc("B1442", null, "Aire acondicionado", "Descripción B1442", "current"),
+    createDtc("B1442", null, "Aire acondicionado", "Descripción B1442", "history"),
+    createDtc("B15C464", null, "Sistema telemático", "Descripción B15C464", "confirmed"),
+  ];
+
+  return {
+    ...createExtraction(),
+    systems,
+    dtcs,
+    scanSummary: { declaredSystems: 36, parsedSystems: 36, declaredDtcs: 27, parsedDtcs: 27 },
+  };
 }
 
 describe("prepareAiAnalysis", () => {
@@ -54,14 +95,14 @@ describe("prepareAiAnalysis", () => {
           code: "PCM",
           name: "Módulo motriz",
           dtcs: [
-            { code: "P0300", description: "Fallo de encendido sintético", status: "current" },
-            { code: "P0171", description: "Mezcla pobre sintética", status: "pending" },
+            { code: "P0300", description: "Fallo de encendido sintético", status: "current", alsoHistorical: false },
+            { code: "P0171", description: "Mezcla pobre sintética", status: "pending", alsoHistorical: false },
           ],
         },
         {
           code: "BCM",
           name: "Módulo de carrocería",
-          dtcs: [{ code: "B1000", description: "Señal de prueba", status: "stored" }],
+          dtcs: [{ code: "B1000", description: "Señal de prueba", status: "stored", alsoHistorical: false }],
         },
       ],
     });
@@ -82,7 +123,12 @@ describe("prepareAiAnalysis", () => {
     expect(Object.keys(result.input)).toEqual(["vehicle", "modules"]);
     expect(Object.keys(result.input.vehicle)).toEqual(["make", "model", "year"]);
     expect(Object.keys(result.input.modules[0] ?? {})).toEqual(["code", "name", "dtcs"]);
-    expect(Object.keys(result.input.modules[0]?.dtcs[0] ?? {})).toEqual(["code", "description", "status"]);
+    expect(Object.keys(result.input.modules[0]?.dtcs[0] ?? {})).toEqual([
+      "code",
+      "description",
+      "status",
+      "alsoHistorical",
+    ]);
 
     const serialized = JSON.stringify(result.input);
     for (const forbidden of ["vin", "odometer", "engine", "originalName", "sha256", "pdf", "customer", "report-id"]) {
@@ -186,5 +232,79 @@ describe("prepareAiAnalysis", () => {
     expect(result.available).toBe(false);
     expect(result).not.toHaveProperty("input");
     expect(result.reasons).toContainEqual(expect.objectContaining({ code: "ANALYSIS_LIMIT_EXCEEDED" }));
+  });
+
+  it("agrupa 27 filas Toyota en 14 DTC accionables y conserva 13 antecedentes históricos", () => {
+    const result = prepareAiAnalysis(createToyotaDuplicateExtraction());
+
+    expect(result.available).toBe(true);
+    expect(result.counts).toEqual({ detected: 27, actionable: 14, historical: 13 });
+    if (!result.available) throw new Error("La preparación Toyota debía estar disponible.");
+    expect(result.input.modules[0]?.dtcs).toHaveLength(11);
+    expect(result.input.modules[0]?.dtcs.every((dtc) => dtc.alsoHistorical)).toBe(true);
+    expect(result.input.modules.flatMap((module) => module.dtcs)).toHaveLength(14);
+    expect(result.input.modules.flatMap((module) => module.dtcs).filter((dtc) => dtc.code === "B1613")).toHaveLength(1);
+  });
+
+  it("conserva un histórico único como antecedente sin enviarlo al análisis", () => {
+    const extraction = createExtraction();
+    extraction.systems[0]!.dtcCount = 3;
+    extraction.systems[1]!.dtcCount = 1;
+    extraction.dtcs.push(createDtc("P0999", "PCM", "Módulo motriz", "Antecedente", "history"));
+    extraction.scanSummary.declaredDtcs = 4;
+    extraction.scanSummary.parsedDtcs = 4;
+
+    const result = prepareAiAnalysis(extraction);
+
+    expect(result.available).toBe(true);
+    expect(result.counts).toEqual({ detected: 4, actionable: 3, historical: 1 });
+    if (!result.available) throw new Error("La preparación mixta debía estar disponible.");
+    expect(result.input.modules.flatMap((module) => module.dtcs).some((dtc) => dtc.code === "P0999")).toBe(false);
+  });
+
+  it("no prepara un reporte compuesto únicamente por antecedentes históricos", () => {
+    const extraction = createExtraction();
+    extraction.systems = [{ code: "PCM", name: "Módulo motriz", dtcCount: 1 }];
+    extraction.dtcs = [createDtc("P0300", "PCM", "Módulo motriz", "Antecedente", "history")];
+    extraction.scanSummary = { declaredSystems: 1, parsedSystems: 1, declaredDtcs: 1, parsedDtcs: 1 };
+
+    const result = prepareAiAnalysis(extraction);
+
+    expect(result.available).toBe(false);
+    expect(result.counts).toEqual({ detected: 1, actionable: 0, historical: 1 });
+    expect(result.reasons).toContainEqual(expect.objectContaining({ code: "ONLY_HISTORICAL_DTCS" }));
+  });
+
+  it("requiere revisión si las descripciones actual e histórica se contradicen", () => {
+    const extraction = createExtraction();
+    extraction.systems = [{ code: "PCM", name: "Módulo motriz", dtcCount: 2 }];
+    extraction.dtcs = [
+      createDtc("P0300", "PCM", "Módulo motriz", "Descripción actual", "current"),
+      createDtc("P0300", "PCM", "Módulo motriz", "Descripción histórica distinta", "history"),
+    ];
+    extraction.scanSummary = { declaredSystems: 1, parsedSystems: 1, declaredDtcs: 2, parsedDtcs: 2 };
+
+    const result = prepareAiAnalysis(extraction);
+
+    expect(result.available).toBe(false);
+    expect(result.reasons).toContainEqual(expect.objectContaining({ code: "DTC_DESCRIPTION_CONFLICT" }));
+  });
+
+  it("acepta estados confirmed, permanente e intermitente y rechaza uno desconocido con razón precisa", () => {
+    const extraction = createExtraction();
+    extraction.systems = [{ code: "PCM", name: "Módulo motriz", dtcCount: 3 }];
+    extraction.dtcs = [
+      createDtc("P0001", "PCM", "Módulo motriz", "Confirmado", "confirmed"),
+      createDtc("P0002", "PCM", "Módulo motriz", "Permanente", "permanent"),
+      createDtc("P0003", "PCM", "Módulo motriz", "Intermitente", "intermittent"),
+    ];
+    extraction.scanSummary = { declaredSystems: 1, parsedSystems: 1, declaredDtcs: 3, parsedDtcs: 3 };
+
+    expect(prepareAiAnalysis(extraction)).toMatchObject({ available: true, counts: { actionable: 3 } });
+
+    extraction.dtcs[2] = createDtc("P0003", "PCM", "Módulo motriz", "Desconocido", "unknown");
+    const unknown = prepareAiAnalysis(extraction);
+    expect(unknown.available).toBe(false);
+    expect(unknown.reasons).toContainEqual(expect.objectContaining({ code: "UNKNOWN_DTC_STATUS" }));
   });
 });

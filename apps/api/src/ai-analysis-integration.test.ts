@@ -11,7 +11,12 @@ const validInput = {
     {
       code: "PCM",
       name: "Módulo sintético",
-      dtcs: [{ code: "P0001", description: "Descripción completamente sintética", status: "current" }],
+      dtcs: [{
+        code: "P0001",
+        description: "Descripción completamente sintética",
+        status: "current",
+        alsoHistorical: false,
+      }],
     },
   ],
 };
@@ -19,7 +24,7 @@ const validOutput = {
   technicalSummary: "Resumen sintético que requiere verificación.",
   findings: [
     {
-      relatedDtcCode: "P0001",
+      relatedDtc: { code: "P0001", moduleCode: "PCM", moduleName: "Módulo sintético" },
       priority: "medium",
       simpleExplanation: "Existe una condición que requiere comprobación.",
       possibleCauses: ["Una causa posible completamente sintética."],
@@ -78,7 +83,7 @@ describe("POST /api/reports/analyze", () => {
     const tooManyModules = Array.from({ length: 41 }, (_, index) => ({
       code: `M${index}`,
       name: "Módulo sintético",
-      dtcs: [],
+      dtcs: [{ code: `P${index}`, description: "Descripción sintética", status: "current", alsoHistorical: false }],
     }));
     const response = await request(appWithClient({ generate: async () => JSON.stringify(validOutput) }))
       .post("/api/reports/analyze")
@@ -101,22 +106,25 @@ describe("POST /api/reports/analyze", () => {
     const modules = Array.from({ length: 40 }, (_, moduleIndex) => ({
       code: `M${String(moduleIndex).padStart(2, "0")}${"X".repeat(29)}`,
       name: `M${moduleIndex}${"n".repeat(159 - String(moduleIndex).length)}`,
-      dtcs: moduleIndex < 5
-        ? Array.from({ length: 20 }, (_, dtcIndex) => ({
-            code: `P${String(moduleIndex * 20 + dtcIndex).padStart(3, "0")}${"C".repeat(28)}`,
+      dtcs: Array.from({ length: moduleIndex < 20 ? 3 : 2 }, (_, dtcIndex) => ({
+            code: `P${String(moduleIndex * 3 + dtcIndex).padStart(3, "0")}${"C".repeat(28)}`,
             description: "d".repeat(1_000),
             status: "current" as const,
-          }))
-        : [],
+            alsoHistorical: false,
+          })),
     }));
     const maximumInput = {
       vehicle: { make: "m".repeat(80), model: "v".repeat(120), year: 2024 },
       modules,
     };
-    const relatedDtcCode = modules[0]!.dtcs[0]!.code;
+    const relatedDtc = {
+      code: modules[0]!.dtcs[0]!.code,
+      moduleCode: modules[0]!.code,
+      moduleName: modules[0]!.name,
+    };
     const generate = vi.fn(async () => JSON.stringify({
       ...validOutput,
-      findings: [{ ...validOutput.findings[0]!, relatedDtcCode }],
+      findings: [{ ...validOutput.findings[0]!, relatedDtc }],
     }));
 
     const response = await request(appWithClient({ generate }))

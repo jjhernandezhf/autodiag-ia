@@ -7,6 +7,7 @@ import type {
   ScannedSystem,
 } from "./report-types.js";
 import {
+  classifyDtcStatus,
   cleanText,
   normalizeDtcStatus,
   normalizeForMatch,
@@ -33,10 +34,12 @@ interface DtcDraft {
   moduleName: string;
   description: string[];
   statusOriginal: string | null;
+  anchorIndex: number;
 }
 
 const DTC_CODE_PATTERN = /^[A-Z][A-Z0-9:-]{2,}$/iu;
-const STATUS_PATTERN = /(Corriente|Actual|Presente|Almacenado|Guardado|Pendiente|Permanente|Historial|Histórico|Current|Stored|Pending|Permanent|History)$/iu;
+const BMW_HEXADECIMAL_DTC_PATTERN = /^[A-F0-9]{6}$/iu;
+const STATUS_PATTERN = /(Confirmed\s*\/\s*Test\s*Failed|Corriente|Actual|Presente|Almacenado|Guardado|Pendiente|Permanente|Intermitente|Historial|Histórico|Current|Stored|Pending|Permanent|Intermittent|History)$/iu;
 
 const WARNING_MESSAGES: Record<string, string> = {
   VEHICLE_SECTION_MISSING: "No se pudo procesar la sección de información del vehículo.",
@@ -247,6 +250,19 @@ function extractVehicle(lines: LocatedLine[], startIndex: number, endIndex: numb
       make = nullIfMissing(segments[1]);
       model = nullIfMissing(segments[2]);
       if (!engine) engine = nullIfMissing(segments[3]);
+
+      const bmwDescriptor = segments[3];
+      if (
+        normalizeForMatch(make ?? "") === "bmw" &&
+        /^[a-z]'$/iu.test(model ?? "") &&
+        bmwDescriptor
+      ) {
+        const descriptorMatch = bmwDescriptor.match(/^([A-Z]\d[A-Z0-9-]*)\s+(.+?)_([A-Z0-9-]+)$/iu);
+        if (descriptorMatch?.[1] && descriptorMatch[2] && descriptorMatch[3]) {
+          model = cleanText(descriptorMatch[1]);
+          engine = `${cleanText(descriptorMatch[2])} / ${cleanText(descriptorMatch[3])}`;
+        }
+      }
     }
   }
 
@@ -322,15 +338,22 @@ function findColumnX(line: LocatedLine, name: string) {
   return fragment?.x ?? null;
 }
 
-function parseDtcRow(line: LocatedLine, descriptionColumnX: number | null, statusColumnX: number | null) {
+function parseDtcRow(
+  line: LocatedLine,
+  descriptionColumnX: number | null,
+  statusColumnX: number | null,
+  allowBmwHexadecimal: boolean,
+) {
   const fragments = line.fragments.filter((fragment) => fragment.text.trim() !== "").sort((left, right) => left.x - right.x);
   const firstText = cleanText(fragments[0]?.text ?? "");
   const beginsInCodeColumn = descriptionColumnX === null || (fragments[0]?.x ?? Number.POSITIVE_INFINITY) < descriptionColumnX - 4;
-  let code: string | null = beginsInCodeColumn && DTC_CODE_PATTERN.test(firstText) ? firstText.toUpperCase() : null;
+  const isContextualDtcCode = (value: string) =>
+    DTC_CODE_PATTERN.test(value) || (allowBmwHexadecimal && BMW_HEXADECIMAL_DTC_PATTERN.test(value));
+  let code: string | null = beginsInCodeColumn && isContextualDtcCode(firstText) ? firstText.toUpperCase() : null;
 
   if (!code && beginsInCodeColumn) {
-    const match = line.text.match(/^([A-Z][A-Z0-9:-]{2,})\s+(.+)$/iu);
-    if (!match?.[1]) return null;
+    const match = line.text.match(/^(\S+)\s+(.+)$/u);
+    if (!match?.[1] || !isContextualDtcCode(match[1])) return null;
     code = match[1].toUpperCase();
   }
   if (!code) return null;
@@ -367,6 +390,7 @@ function parseDtcs(lines: LocatedLine[], startIndex: number, markCritical: (code
   let descriptionColumnX: number | null = null;
   let statusColumnX: number | null = null;
   const pendingModuleParts: string[] = [];
+  let pendingDescriptions: Array<{ text: string; lineIndex: number }> = [];
 
   const finalizeDtc = () => {
     if (!currentDtc) return;
@@ -380,17 +404,27 @@ function parseDtcs(lines: LocatedLine[], startIndex: number, markCritical: (code
       moduleName: currentDtc.moduleName,
       status,
       statusOriginal: currentDtc.statusOriginal,
+      classification: classifyDtcStatus(status),
       descriptionOriginal,
     });
     currentDtc = null;
   };
 
-  for (const line of lines.slice(startIndex + 1)) {
+  const appendPendingToCurrent = () => {
+    if (currentDtc) currentDtc.description.push(...pendingDescriptions.map(({ text }) => text));
+    else if (pendingDescriptions.length > 0) markCritical("DTC_ROW_UNPARSED");
+    pendingDescriptions = [];
+  };
+
+  const sectionLines = lines.slice(startIndex + 1);
+  for (let lineIndex = 0; lineIndex < sectionLines.length; lineIndex += 1) {
+    const line = sectionLines[lineIndex]!;
     if (isNoise(line)) continue;
     if (line.normalized.startsWith("numero informe")) break;
 
     const moduleMatch = line.text.match(/^(.*)\(\s*(\d+)\s*DTC\s*\)\s*$/iu);
     if (moduleMatch?.[1] && moduleMatch[2] !== undefined) {
+      appendPendingToCurrent();
       finalizeDtc();
       const moduleLabel = cleanText([...pendingModuleParts, moduleMatch[1]].join(" "));
       pendingModuleParts.length = 0;
@@ -410,37 +444,65 @@ function parseDtcs(lines: LocatedLine[], startIndex: number, markCritical: (code
       continue;
     }
 
-    const parsedRow = parseDtcRow(line, descriptionColumnX, statusColumnX);
+    const parsedRow = parseDtcRow(
+      line,
+      descriptionColumnX,
+      statusColumnX,
+      currentModule !== null && descriptionColumnX !== null && statusColumnX !== null,
+    );
     if (parsedRow) {
-      finalizeDtc();
+      const descriptionForNewDtc: string[] = [];
+      if (currentDtc) {
+        for (const pending of pendingDescriptions) {
+          const previousDistance = Math.abs(pending.lineIndex - currentDtc.anchorIndex);
+          const nextDistance = Math.abs(pending.lineIndex - lineIndex);
+          if (previousDistance <= nextDistance) currentDtc.description.push(pending.text);
+          else descriptionForNewDtc.push(pending.text);
+        }
+        finalizeDtc();
+      } else {
+        descriptionForNewDtc.push(...pendingDescriptions.map(({ text }) => text));
+      }
+      pendingDescriptions = [];
       if (!currentModule) markCritical("DTC_ROW_UNPARSED");
+      const moduleForRow = currentModule as ModuleDeclaration | null;
       currentDtc = {
         code: parsedRow.code,
-        moduleCode: currentModule?.code ?? null,
-        moduleName: currentModule?.name ?? "Módulo no identificado",
-        description: parsedRow.description ? [parsedRow.description] : [],
+        moduleCode: moduleForRow?.code ?? null,
+        moduleName: moduleForRow?.name ?? "Módulo no identificado",
+        description: [...descriptionForNewDtc, ...(parsedRow.description ? [parsedRow.description] : [])],
         statusOriginal: parsedRow.statusOriginal,
+        anchorIndex: lineIndex,
       };
       continue;
     }
 
     const firstFragmentX = Math.min(...line.fragments.map((fragment) => fragment.x));
     const beginsBeforeDescription = descriptionColumnX !== null && firstFragmentX < descriptionColumnX - 4;
-    if ((!currentDtc && line.text.trim()) || beginsBeforeDescription) {
+    const descriptionContinuation = cleanText(
+      line.fragments
+        .filter(
+          (fragment) =>
+            (descriptionColumnX === null || fragment.x >= descriptionColumnX - 4) &&
+            (statusColumnX === null || fragment.x < statusColumnX - 4),
+        )
+        .map((fragment) => fragment.text)
+        .join(" "),
+    );
+
+    if (descriptionContinuation && !beginsBeforeDescription) {
+      pendingDescriptions.push({ text: descriptionContinuation, lineIndex });
+    } else if (beginsBeforeDescription) {
+      appendPendingToCurrent();
       finalizeDtc();
       pendingModuleParts.push(line.text);
-    } else if (currentDtc) {
-      const continuation = cleanText(
-        line.fragments
-          .filter((fragment) => (descriptionColumnX === null || fragment.x >= descriptionColumnX - 4) && (statusColumnX === null || fragment.x < statusColumnX - 4))
-          .map((fragment) => fragment.text)
-          .join(" ") || line.text,
-      );
-      if (continuation) currentDtc.description.push(continuation);
+    } else if (!currentDtc && line.text.trim()) {
+      pendingModuleParts.push(line.text);
     } else if (line.text.trim()) {
       markCritical("DTC_ROW_UNPARSED");
     }
   }
+  appendPendingToCurrent();
   finalizeDtc();
   if (pendingModuleParts.length > 0) markCritical("DTC_ROW_UNPARSED");
 

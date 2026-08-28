@@ -118,10 +118,15 @@ La respuesta usa HTTP `201` y conserva los metadatos del archivo junto con el re
     "reasons": [
       {
         "code": "NO_VALID_DTCS",
-        "message": "El reporte no contiene DTC válidos para analizar."
+        "message": "El reporte no contiene DTC accionables válidos para analizar."
       }
     ],
-    "warnings": []
+    "warnings": [],
+    "counts": {
+      "detected": 0,
+      "actionable": 0,
+      "historical": 0
+    }
   }
 }
 ```
@@ -132,7 +137,7 @@ El VIN completo nunca forma parte de la respuesta. `vinMasked` revela como máxi
 
 La API conserva las descripciones y estados originales de los DTC sin traducirlos ni generar diagnósticos, causas, reparaciones o recomendaciones.
 
-`analysisPreparation` indica si la extracción está preparada para solicitar orientación por IA. Cuando `available` es `true`, también incluye `input`, un DTO sanitizado que contiene exclusivamente marca, modelo, año, módulos y DTC. Cuando no está disponible, `input` se omite por completo y `reasons` explica la causa de forma controlada.
+`analysisPreparation` indica si la extracción está preparada para solicitar orientación por IA y siempre incluye los conteos detectados, accionables e históricos. Cuando `available` es `true`, también incluye `input`, un DTO sanitizado que contiene exclusivamente marca, modelo, año, módulos y DTC accionables. Cuando no está disponible, `input` se omite por completo y `reasons` explica únicamente las causas activas de forma controlada.
 
 El DTO sanitizado nunca contiene VIN protegido o seudonimizado, odómetro, motor, PDF, nombre de archivo, SHA-256, identificador del reporte ni datos del cliente. Tampoco se truncan módulos o DTC para ajustarlos silenciosamente a los límites.
 
@@ -182,7 +187,8 @@ Entrada resumida:
         {
           "code": "P0001",
           "description": "Descripción técnica de ejemplo",
-          "status": "current"
+          "status": "current",
+          "alsoHistorical": false
         }
       ]
     }
@@ -190,11 +196,13 @@ Entrada resumida:
 }
 ```
 
-La entrada admite como máximo 40 módulos, 20 DTC por módulo y 100 DTC totales. También aplica límites de longitud a todos los textos y rechaza propiedades desconocidas.
+La extracción conserva todas las filas y sus estados originales. Para análisis, los registros se agrupan por módulo+código: un DTC accionable que también aparece como histórico se envía una sola vez con `alsoHistorical: true`; un registro exclusivamente histórico permanece como antecedente documental y no se envía para generar un hallazgo. Los estados accionables aceptados son `current`, `confirmed`, `stored`, `pending`, `permanent` e `intermittent`; `history` se clasifica como antecedente y un estado desconocido exige revisión manual.
+
+La entrada admite como máximo 40 módulos con DTC accionables, 20 DTC accionables por módulo y 100 DTC accionables totales. Los límites se aplican después de la agrupación, nunca truncando las filas extraídas. También aplica límites de longitud a todos los textos y rechaza propiedades desconocidas.
 
 El cuerpo JSON tiene un límite acotado de **256 KiB**. Este tamaño cubre el peor DTO actualmente válido (40 módulos, 100 DTC y todos los textos en sus longitudes máximas), pero rechaza cuerpos ajenos o sobredimensionados con HTTP `413`. El límite multipart del PDF es independiente.
 
-La respuesta contiene un resumen técnico, hallazgos priorizados, DTC relacionado, explicación sencilla, causas posibles, comprobaciones recomendadas, advertencias de seguridad, confianza y la indicación obligatoria de que requiere confirmación del técnico. Es una orientación sugerida, no un diagnóstico definitivo.
+La respuesta contiene un resumen técnico, hallazgos priorizados, una referencia `relatedDtc` con código, código de módulo y nombre de módulo, explicación sencilla, causas posibles, comprobaciones recomendadas, advertencias de seguridad, confianza y la indicación obligatoria de que requiere confirmación del técnico. El backend rechaza referencias ajenas a los DTC accionables y hallazgos duplicados para la misma combinación módulo+código. Es una orientación sugerida, no un diagnóstico definitivo.
 
 La integración usa el SDK oficial `openai` 6.49.0 y Responses API con Structured Outputs. Las solicitudes usan `store: false`, un timeout configurable y no incluyen herramientas externas.
 
@@ -250,7 +258,7 @@ $body = @{
       code = "PCM"
       name = "Módulo de control"
       dtcs = @(
-        @{ code = "P0001"; description = "Descripción técnica de ejemplo"; status = "current" }
+        @{ code = "P0001"; description = "Descripción técnica de ejemplo"; status = "current"; alsoHistorical = $false }
       )
     }
   )
@@ -267,7 +275,7 @@ Para probar el flujo manualmente, inicia API y frontend, carga un reporte Autel 
 
 La migración versionada de `supabase/migrations` prepara un historial diagnóstico normalizado, pero todavía no existe una conexión ni una escritura real a Supabase. El modelo separa reportes, módulos, DTC, análisis de IA, hallazgos, causas posibles, comprobaciones, advertencias por hallazgo y advertencias generales. Las posiciones originales se conservan en cada relación ordenada.
 
-Solo se contempla persistir marca, modelo, año, módulos, DTC y la orientación estructurada completada. El constructor del backend acepta únicamente extracciones completas y análisis válidos, comprueba que cada DTC relacionado pertenezca inequívocamente al reporte y produce solo campos de esas tablas.
+Solo se contempla persistir marca, modelo, año, módulos, todas las filas DTC y la orientación estructurada completada. Cada fila conserva su orden, estado original, estado normalizado y clasificación accionable, histórica o desconocida. Los hallazgos se relacionan por separado con una fila accionable inequívoca y no se duplican por la existencia de un antecedente histórico equivalente.
 
 Nunca se contempla almacenar VIN original, protegido o seudonimizado; odómetro; motor; PDF o texto completo extraído; contenido binario; nombre, hash o identificador del archivo; datos del cliente; claves o tokens; prompts; identificadores del proveedor; métricas ni respuestas crudas de OpenAI.
 
@@ -288,6 +296,7 @@ Las pruebas generan contenido completamente sintético en memoria. El PDF real d
 ## Limitaciones actuales
 
 - Solo se admite la estructura observada en reportes Autel de diagnóstico de vehículo, con tolerancia a variaciones razonables de espacios, acentos, saltos y paginación.
+- Los códigos BMW hexadecimales de seis caracteres, incluso si comienzan con números, solo se reconocen dentro de una sección DTC, un módulo declarado y la columna estructural de código; números de metadatos fuera de ese contexto no se interpretan como DTC.
 - No existe OCR; un PDF escaneado como imagen devuelve `PDF_NO_USABLE_TEXT`.
 - La extracción estructura datos presentes, pero no interpreta fallas ni recomienda reparaciones.
 - Un escaneo con cero DTC no demuestra que el vehículo esté libre de fallas.

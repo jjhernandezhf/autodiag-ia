@@ -90,6 +90,7 @@ describe("POST /api/reports/upload", () => {
       }),
       analysisPreparation: expect.objectContaining({
         available: false,
+        counts: { detected: 0, actionable: 0, historical: 0 },
         reasons: expect.arrayContaining([expect.objectContaining({ code: "NO_VALID_DTCS" })]),
       }),
     });
@@ -110,19 +111,25 @@ describe("POST /api/reports/upload", () => {
           {
             code: "PCM",
             name: "Módulo sintético",
-            dtcs: [{ code: "P0300", description: "Fallo sintético", status: "current" }],
+            dtcs: [{
+              code: "P0300",
+              description: "Fallo sintético",
+              status: "current",
+              alsoHistorical: false,
+            }],
           },
         ],
       },
       reasons: [],
       warnings: [],
+      counts: { detected: 1, actionable: 1, historical: 0 },
     });
 
     const sanitized = response.body.analysisPreparation.input;
     expect(Object.keys(sanitized)).toEqual(["vehicle", "modules"]);
     expect(Object.keys(sanitized.vehicle)).toEqual(["make", "model", "year"]);
     expect(Object.keys(sanitized.modules[0])).toEqual(["code", "name", "dtcs"]);
-    expect(Object.keys(sanitized.modules[0].dtcs[0])).toEqual(["code", "description", "status"]);
+    expect(Object.keys(sanitized.modules[0].dtcs[0])).toEqual(["code", "description", "status", "alsoHistorical"]);
     const serialized = JSON.stringify(sanitized).toLowerCase();
     for (const forbidden of ["vin", "odometer", "originalname", "sha256", "pdf", "cliente-autel", "1abcd23efgh456789"]) {
       expect(serialized).not.toContain(forbidden);

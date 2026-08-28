@@ -25,7 +25,7 @@ describe("migración de historial diagnóstico", () => {
       expect(migration).toContain(`create table public.${table}`);
     }
     expect(migration.match(/id uuid primary key default gen_random_uuid\(\)/gu)).toHaveLength(TABLES.length);
-    expect(migration.match(/foreign key \([^)]+\) references public\.[^(]+ \([^)]+\) on delete cascade/gu)).toHaveLength(8);
+    expect(migration.match(/foreign key \([^)]+\) references public\.[^(]+ \([^)]+\) on delete cascade/gu)).toHaveLength(9);
     expect(migration).toContain("created_at timestamptz not null default now()");
   });
 
@@ -33,6 +33,7 @@ describe("migración de historial diagnóstico", () => {
     for (const constraint of [
       "diagnostic_reports_year_range",
       "diagnostic_dtcs_status_allowed",
+      "diagnostic_dtcs_classification_allowed",
       "diagnostic_findings_priority_allowed",
       "diagnostic_findings_confidence_allowed",
       "diagnostic_ai_analyses_confirmation_required",
@@ -46,12 +47,19 @@ describe("migración de historial diagnóstico", () => {
       "diagnostic_reports_model_idx",
       "diagnostic_reports_year_idx",
       "diagnostic_dtcs_code_idx",
+      "diagnostic_dtcs_classification_idx",
+      "diagnostic_dtcs_position_idx",
+      "diagnostic_findings_related_dtc_idx",
       "diagnostic_findings_priority_idx",
       "diagnostic_findings_confidence_idx",
     ]) {
       expect(migration).toContain(`create index ${index}`);
     }
     expect(migration).not.toContain("if not exists");
+    expect(migration).toContain("status_original varchar(120)");
+    expect(migration).toContain("classification varchar(12) not null");
+    expect(migration).toContain("related_dtc_id uuid");
+    expect(migration).toContain("foreign key (related_dtc_id) references public.diagnostic_dtcs (id) on delete cascade");
   });
 
   it("habilita RLS en cada tabla sin crear políticas públicas", () => {

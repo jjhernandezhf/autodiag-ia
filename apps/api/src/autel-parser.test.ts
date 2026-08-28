@@ -83,6 +83,105 @@ function zeroDtcPages(): ExtractedPdfPage[] {
   ];
 }
 
+function codeAndStatus(code: string, status: string) {
+  return line(`${code} ${status}`, [
+    { text: code, x: 20, width: 70 },
+    { text: status, x: 480, width: 90 },
+  ]);
+}
+
+function dtcTableHeader() {
+  return line("DTC Descripción Estado", [
+    { text: "DTC", x: 20, width: 50 },
+    { text: "Descripción", x: 130, width: 100 },
+    { text: "Estado", x: 480, width: 60 },
+  ]);
+}
+
+function bmwPages(): ExtractedPdfPage[] {
+  const activeSystems = [
+    ["DME", "Electrónica de motor digital", 1],
+    ["DSC", "Control de Estabilidad Dinámico", 1],
+    ["KOMBI", "Grupo de instrumentos", 1],
+    ["BDC", "Controlador de dominio corporal", 3],
+    ["ICM", "Gestión del Chasis Integrada", 2],
+    ["KAFAS", "Sistemas de asistencia basados en cámara", 1],
+    ["IHKA", "Control de A/C", 1],
+  ] as const;
+  const systems = [
+    ...activeSystems.map(([code, name, count]) => line(`${code}(${name}) ${count}`)),
+    ...Array.from({ length: 23 }, (_, index) => line(`Z${index}(Módulo sintético ${index}) 0`)),
+  ];
+  const description = (text: string) => line(text, [{ text, x: 130, width: 280 }]);
+
+  return [
+    {
+      pageNumber: 1,
+      lines: [
+        line("Informe de diagnóstico de vehículo"),
+        line("Información del vehículo"),
+        line("2015_10/BMW/X'/X5 sDrive35i_N55/"),
+        line("Lectura del odómetro: 180001 km"),
+        line(`VIN: ${SYNTHETIC_VIN}`),
+        line("Número de serie: 030343"),
+        line("Orden de reparación: 480004"),
+        line("ID del informe: 800A07"),
+        line("Sistema/s escaneado/s (30)"),
+        line("Sistema Estado/DTC"),
+        ...systems,
+      ],
+    },
+    {
+      pageNumber: 2,
+      lines: [
+        line("DTC (10)"),
+        line("DME(Electrónica de motor digital) (1 DTC)"),
+        dtcTableHeader(),
+        description("Convertidor catalítico: rendimiento por debajo"),
+        codeAndStatus("180001", "Intermitente"),
+        description("del valor límite"),
+        line("DSC(Control de Estabilidad Dinámico) (1 DTC)"),
+        dtcTableHeader(),
+        description("Sensor de desgaste de freno trasero"),
+        codeAndStatus("480A12", "Permanente"),
+        description("requiere comprobación"),
+        line("KOMBI(Grupo de instrumentos) (1 DTC)"),
+        dtcTableHeader(),
+        description("Señal de operación de columna"),
+        codeAndStatus("E12C35", "Intermitente"),
+        description("no válida"),
+        line("BDC(Controlador de dominio corporal) (3 DTC)"),
+        dtcTableHeader(),
+        columns("030343", "Botón sintético atascado", "Intermitente"),
+        description("Actuador sintético"),
+        codeAndStatus("030488", "Intermitente"),
+        description("cortocircuito a masa"),
+        description("Indicador delantero"),
+        codeAndStatus("80418B", "Intermitente"),
+      ],
+    },
+    {
+      pageNumber: 3,
+      lines: [
+        description("derecho defectuoso"),
+        line("ICM(Gestión del Chasis Integrada) (2 DTC)"),
+        dtcTableHeader(),
+        columns("480004", "Interfaz de cámara con señal inválida", "Intermitente"),
+        columns("48004A", "Interfaz de volante con señal inválida", "Intermitente"),
+        line("KAFAS(Sistemas de asistencia basados en cámara) (1 DTC)"),
+        dtcTableHeader(),
+        columns("800A07", "Motor de vibración defectuoso", "Intermitente"),
+        line("IHKA(Control de A/C) (1 DTC)"),
+        dtcTableHeader(),
+        description("Motor de trampilla trasera"),
+        codeAndStatus("8011A3", "Permanente"),
+        description("bloqueo detectado"),
+        line("Número informe"),
+      ],
+    },
+  ];
+}
+
 describe("parseAutelReport", () => {
   it("estructura un reporte multipágina con módulos y DTC complejos", () => {
     const result = parseAutelReport(completePages(), TEST_SECRET);
@@ -111,6 +210,7 @@ describe("parseAutelReport", () => {
       moduleName: "Control Unit (Primary)",
       status: "current",
       statusOriginal: "Corriente",
+      classification: "actionable",
       descriptionOriginal: "Señal sintética dividida Sensor adicional en segunda línea",
     });
   });
@@ -143,6 +243,40 @@ describe("parseAutelReport", () => {
     expect(result.systems).toEqual([{ code: "MOD_A", name: "Control Unit / Nested (Section)", dtcCount: 0 }]);
   });
 
+  it("interpreta diez DTC BMW contextuales, descripciones multilínea y continuidad entre páginas", () => {
+    const result = parseAutelReport(bmwPages(), TEST_SECRET);
+    const expectedCodes = ["180001", "480A12", "E12C35", "030343", "030488", "80418B", "480004", "48004A", "800A07", "8011A3"];
+
+    expect(result.status).toBe("completed");
+    expect(result.requiresManualReview).toBe(false);
+    expect(result.vehicle).toMatchObject({ year: 2015, make: "BMW", model: "X5", engine: "sDrive35i / N55" });
+    expect(result.scanSummary).toEqual({ declaredSystems: 30, parsedSystems: 30, declaredDtcs: 10, parsedDtcs: 10 });
+    expect(result.dtcs.map((dtc) => dtc.code)).toEqual(expectedCodes);
+    expect(result.dtcs.map((dtc) => dtc.moduleCode)).toEqual([
+      "DME", "DSC", "KOMBI", "BDC", "BDC", "BDC", "ICM", "ICM", "KAFAS", "IHKA",
+    ]);
+    expect(result.dtcs[0]).toMatchObject({
+      status: "intermittent",
+      classification: "actionable",
+      descriptionOriginal: "Convertidor catalítico: rendimiento por debajo del valor límite",
+    });
+    expect(result.dtcs[1]).toMatchObject({ status: "permanent", classification: "actionable" });
+    expect(result.dtcs[5]?.descriptionOriginal).toBe("Indicador delantero derecho defectuoso");
+    expect(result.dtcs.every((dtc) => dtc.descriptionOriginal.length > 0)).toBe(true);
+    expect(result.warnings).toEqual([]);
+    expect(result.dtcs).toHaveLength(10);
+  });
+
+  it("no acepta un número hexadecimal de seis caracteres sin módulo y columnas DTC", () => {
+    const pages = zeroDtcPages();
+    pages[0]!.lines.push(line("180001"));
+
+    const result = parseAutelReport(pages, TEST_SECRET);
+
+    expect(result.dtcs).toEqual([]);
+    expect(result.scanSummary.parsedDtcs).toBe(0);
+  });
+
   it("marca como parcial los totales inconsistentes", () => {
     const pages = zeroDtcPages();
     pages[0]!.lines[5] = line("Sistema/s escaneado/s (2)");
@@ -157,14 +291,33 @@ describe("parseAutelReport", () => {
     );
   });
 
-  it("conserva un estado desconocido y genera una advertencia segura", () => {
+  it("normaliza Intermitente como accionable sin convertirlo en historial", () => {
     const pages = completePages();
     pages[1]!.lines[5] = columns("U1000:87-AB", "Señal sintética dividida", "Intermitente");
 
     const result = parseAutelReport(pages, TEST_SECRET);
 
+    expect(result.status).toBe("completed");
+    expect(result.dtcs[0]).toMatchObject({
+      status: "intermittent",
+      statusOriginal: "Intermitente",
+      classification: "actionable",
+    });
+    expect(result.warnings).not.toContainEqual(expect.objectContaining({ code: "UNKNOWN_DTC_STATUS" }));
+  });
+
+  it("conserva un estado realmente desconocido y genera una advertencia segura", () => {
+    const pages = completePages();
+    pages[1]!.lines[5] = columns("U1000:87-AB", "Señal sintética dividida", "Estado no definido");
+
+    const result = parseAutelReport(pages, TEST_SECRET);
+
     expect(result.status).toBe("partial");
-    expect(result.dtcs[0]).toMatchObject({ status: "unknown", statusOriginal: "Intermitente" });
+    expect(result.dtcs[0]).toMatchObject({
+      status: "unknown",
+      statusOriginal: "Estado no definido",
+      classification: "unknown",
+    });
     expect(result.warnings).toContainEqual({
       code: "UNKNOWN_DTC_STATUS",
       message: "Al menos un estado DTC no pudo normalizarse.",

@@ -1,6 +1,6 @@
 import { createHmac } from "node:crypto";
 
-import type { DtcStatus } from "./report-types.js";
+import type { DtcClassification, DtcStatus } from "./report-types.js";
 
 export function cleanText(value: string) {
   return value.replace(/\s+/gu, " ").trim();
@@ -23,11 +23,21 @@ export function normalizeDtcStatus(value: string | null): DtcStatus {
   if (!value) return "unknown";
   const normalized = normalizeForMatch(value);
   if (["corriente", "actual", "current", "presente"].includes(normalized)) return "current";
+  if (/^confirmed\s*\/\s*test\s*failed$/u.test(normalized) || /^confirmed\s*\/\s*testfailed$/u.test(normalized)) {
+    return "confirmed";
+  }
   if (["almacenado", "guardado", "stored"].includes(normalized)) return "stored";
   if (["pendiente", "pending"].includes(normalized)) return "pending";
   if (["permanente", "permanent"].includes(normalized)) return "permanent";
+  if (["intermitente", "intermittent"].includes(normalized)) return "intermittent";
   if (["historial", "historico", "history"].includes(normalized)) return "history";
   return "unknown";
+}
+
+export function classifyDtcStatus(status: DtcStatus): DtcClassification {
+  if (status === "history") return "historical";
+  if (status === "unknown") return "unknown";
+  return "actionable";
 }
 
 export function normalizeVin(value: string) {

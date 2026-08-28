@@ -36,6 +36,8 @@ create table public.diagnostic_dtcs (
   code varchar(32) not null,
   description varchar(1000) not null,
   status varchar(16) not null,
+  status_original varchar(120),
+  classification varchar(12) not null,
   position integer not null,
   constraint diagnostic_dtcs_module_fk
     foreign key (module_id) references public.diagnostic_modules (id) on delete cascade,
@@ -43,7 +45,11 @@ create table public.diagnostic_dtcs (
   constraint diagnostic_dtcs_description_length
     check (char_length(description) <= 1000 and description ~ '[^[:space:]]'),
   constraint diagnostic_dtcs_status_allowed
-    check (status in ('current', 'stored', 'pending', 'permanent', 'history', 'unknown')),
+    check (status in ('current', 'confirmed', 'stored', 'pending', 'permanent', 'intermittent', 'history', 'unknown')),
+  constraint diagnostic_dtcs_status_original_length
+    check (status_original is null or (char_length(status_original) <= 120 and status_original ~ '[^[:space:]]')),
+  constraint diagnostic_dtcs_classification_allowed
+    check (classification in ('actionable', 'historical', 'unknown')),
   constraint diagnostic_dtcs_position_nonnegative check (position >= 0),
   constraint diagnostic_dtcs_module_position_unique unique (module_id, position)
 );
@@ -67,18 +73,15 @@ create table public.diagnostic_ai_analyses (
 create table public.diagnostic_findings (
   id uuid primary key default gen_random_uuid(),
   analysis_id uuid not null,
-  related_dtc_code varchar(32),
+  related_dtc_id uuid,
   priority varchar(8) not null,
   simple_explanation varchar(1000) not null,
   confidence varchar(8) not null,
   position integer not null,
   constraint diagnostic_findings_analysis_fk
     foreign key (analysis_id) references public.diagnostic_ai_analyses (id) on delete cascade,
-  constraint diagnostic_findings_related_dtc_length
-    check (
-      related_dtc_code is null
-      or (char_length(related_dtc_code) <= 32 and related_dtc_code ~ '[^[:space:]]')
-    ),
+  constraint diagnostic_findings_related_dtc_fk
+    foreign key (related_dtc_id) references public.diagnostic_dtcs (id) on delete cascade,
   constraint diagnostic_findings_priority_allowed check (priority in ('critical', 'high', 'medium', 'low')),
   constraint diagnostic_findings_explanation_length
     check (char_length(simple_explanation) <= 1000 and simple_explanation ~ '[^[:space:]]'),
@@ -140,7 +143,10 @@ create index diagnostic_reports_make_idx on public.diagnostic_reports (make);
 create index diagnostic_reports_model_idx on public.diagnostic_reports (model);
 create index diagnostic_reports_year_idx on public.diagnostic_reports (year);
 create index diagnostic_dtcs_code_idx on public.diagnostic_dtcs (code);
+create index diagnostic_dtcs_classification_idx on public.diagnostic_dtcs (classification);
+create index diagnostic_dtcs_position_idx on public.diagnostic_dtcs (position);
 create index diagnostic_ai_analyses_confidence_idx on public.diagnostic_ai_analyses (confidence);
+create index diagnostic_findings_related_dtc_idx on public.diagnostic_findings (related_dtc_id);
 create index diagnostic_findings_priority_idx on public.diagnostic_findings (priority);
 create index diagnostic_findings_confidence_idx on public.diagnostic_findings (confidence);
 

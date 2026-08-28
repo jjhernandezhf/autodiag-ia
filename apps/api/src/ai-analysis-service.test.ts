@@ -15,7 +15,12 @@ const validInput = {
     {
       code: "PCM",
       name: "Módulo de control sintético",
-      dtcs: [{ code: "P0001", description: "Descripción técnica sintética", status: "current" as const }],
+      dtcs: [{
+        code: "P0001",
+        description: "Descripción técnica sintética",
+        status: "current" as const,
+        alsoHistorical: false,
+      }],
     },
   ],
 };
@@ -24,7 +29,7 @@ const validOutput = {
   technicalSummary: "Resumen técnico sujeto a verificación.",
   findings: [
     {
-      relatedDtcCode: "P0001",
+      relatedDtc: { code: "P0001", moduleCode: "PCM", moduleName: "Módulo de control sintético" },
       priority: "high" as const,
       simpleExplanation: "El código indica una condición que debe comprobarse.",
       possibleCauses: ["Una conexión podría presentar una anomalía."],
@@ -102,7 +107,10 @@ describe("DiagnosticAnalysisService", () => {
   it("rechaza un hallazgo relacionado con un DTC que no estaba en la entrada", async () => {
     const incompatibleOutput = {
       ...validOutput,
-      findings: [{ ...validOutput.findings[0]!, relatedDtcCode: "P9999" }],
+      findings: [{
+        ...validOutput.findings[0]!,
+        relatedDtc: { code: "P9999", moduleCode: "PCM", moduleName: "Módulo de control sintético" },
+      }],
     };
     const service = new DiagnosticAnalysisService(
       { generate: async () => JSON.stringify(incompatibleOutput) },
@@ -125,8 +133,10 @@ describe("DiagnosticAnalysisService", () => {
   });
 });
 
-describe("contrato de relatedDtcCode", () => {
-  const relatedDtcCodeSchema = DIAGNOSTIC_ANALYSIS_JSON_SCHEMA.properties.findings.items.properties.relatedDtcCode;
+describe("contrato de relatedDtc", () => {
+  const relatedDtcSchema = DIAGNOSTIC_ANALYSIS_JSON_SCHEMA.properties.findings.items.properties.relatedDtc;
+  const objectSchema = relatedDtcSchema.anyOf[0];
+  const codeSchema = objectSchema.properties.code;
 
   it.each([
     ["cadena vacía", "", false],
@@ -136,14 +146,28 @@ describe("contrato de relatedDtcCode", () => {
   ])("mantiene Zod y JSON Schema alineados para %s", (_case, value, expected) => {
     const zodAccepts = diagnosticAnalysisOutputSchema.safeParse({
       ...validOutput,
-      findings: [{ ...validOutput.findings[0]!, relatedDtcCode: value }],
+      findings: [{
+        ...validOutput.findings[0]!,
+        relatedDtc: { ...validOutput.findings[0]!.relatedDtc, code: value },
+      }],
     }).success;
-    const jsonSchemaAccepts = value.length >= relatedDtcCodeSchema.minLength
-      && value.length <= relatedDtcCodeSchema.maxLength
-      && new RegExp(relatedDtcCodeSchema.pattern, "u").test(value);
+    const jsonSchemaAccepts = value.length >= codeSchema.minLength
+      && value.length <= codeSchema.maxLength
+      && new RegExp(codeSchema.pattern, "u").test(value);
 
     expect(zodAccepts).toBe(expected);
     expect(jsonSchemaAccepts).toBe(expected);
+  });
+
+  it("rechaza dos hallazgos para la misma combinación módulo+código", async () => {
+    const duplicatedOutput = { ...validOutput, findings: [validOutput.findings[0], validOutput.findings[0]] };
+    const service = new DiagnosticAnalysisService(
+      { generate: async () => JSON.stringify(duplicatedOutput) },
+      "modelo-sintetico",
+      4_000,
+    );
+
+    await expect(service.analyze(validInput)).rejects.toMatchObject({ code: "OPENAI_RESPONSE_INVALID" });
   });
 });
 
