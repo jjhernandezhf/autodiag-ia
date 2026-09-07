@@ -81,6 +81,11 @@ function createCompletedAnalysis(): CompletedAnalysis {
           confidence: "medium",
         },
       ],
+      observationCorrelation: {
+        status: "not_provided",
+        summary: "No se proporcionaron observaciones del vehículo.",
+        matches: [],
+      },
       safetyWarnings: ["Advertencia general uno", "Advertencia general dos"],
       confidence: "medium",
       requiresTechnicianConfirmation: true,
@@ -145,6 +150,11 @@ function createMaximumAnalysis(): CompletedAnalysis {
         safetyWarnings: Array.from({ length: 8 }, () => text500),
         confidence: "low" as const,
       })),
+      observationCorrelation: {
+        status: "not_provided",
+        summary: "No se proporcionaron observaciones del vehículo.",
+        matches: [],
+      },
       safetyWarnings: Array.from({ length: 10 }, () => text500),
       confidence: "low",
       requiresTechnicianConfirmation: true,
@@ -231,6 +241,27 @@ describe("buildDiagnosticPersistenceRecord", () => {
       statusOriginal: "estado documental",
       classification: "actionable",
     });
+  });
+
+  it("no incorpora observaciones ni su correlación al registro persistible preparado", () => {
+    const completed = createCompletedAnalysis();
+    completed.analysis.observationCorrelation = {
+      status: "matches_found",
+      summary: "Resumen de correlación que no debe persistirse",
+      matches: [{
+        relatedDtc: { code: "P0300", moduleCode: "PCM", moduleName: "Módulo motriz" },
+        observation: "Síntoma privado que no debe persistirse",
+        possibleRelation: "Relación orientativa que no debe persistirse",
+        confidence: "low",
+      }],
+    };
+
+    const serialized = JSON.stringify(getRecord(createExtraction(), completed));
+
+    expect(serialized).not.toContain("Síntoma privado");
+    expect(serialized).not.toContain("Resumen de correlación");
+    expect(serialized).not.toContain("Relación orientativa");
+    expect(serialized).not.toContain("observationCorrelation");
   });
 
   it("conserva todas las filas actuales e históricas en orden sin duplicar hallazgos", () => {

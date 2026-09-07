@@ -1,6 +1,7 @@
 import { type ChangeEvent, type DragEvent, type FormEvent, useEffect, useRef, useState } from "react";
 
 const PDF_MIME_TYPE = "application/pdf";
+const MAX_VEHICLE_OBSERVATIONS_LENGTH = 1_000;
 
 type UploadStatus = "idle" | "uploading" | "success" | "error";
 type AnalysisStatus = "unavailable" | "ready" | "confirming" | "analyzing" | "completed" | "error" | "cancelled";
@@ -56,6 +57,7 @@ interface DiagnosticAnalysisInput {
     name: string;
     dtcs: Array<{ code: string; description: string; status: ActionableDtcStatus; alsoHistorical: boolean }>;
   }>;
+  observations?: string;
 }
 
 interface AnalysisCounts {
@@ -89,6 +91,16 @@ interface DiagnosticFinding {
 interface DiagnosticAnalysis {
   technicalSummary: string;
   findings: DiagnosticFinding[];
+  observationCorrelation: {
+    status: "not_provided" | "no_clear_match" | "matches_found";
+    summary: string;
+    matches: Array<{
+      relatedDtc: NonNullable<DiagnosticFinding["relatedDtc"]>;
+      observation: string;
+      possibleRelation: string;
+      confidence: AnalysisConfidence;
+    }>;
+  };
   safetyWarnings: string[];
   confidence: AnalysisConfidence;
   requiresTechnicianConfirmation: true;
@@ -103,6 +115,7 @@ interface AnalysisUiState {
   status: AnalysisStatus;
   analysis?: DiagnosticAnalysis;
   message?: string;
+  submittedObservations?: string;
 }
 
 interface UploadResponse {
@@ -186,6 +199,30 @@ function isDiagnosticAnalysis(value: unknown): value is DiagnosticAnalysis {
         isStringArray(finding.safetyWarnings) &&
         confidences.has(finding.confidence),
     ) &&
+    candidate.observationCorrelation !== undefined &&
+    candidate.observationCorrelation !== null &&
+    typeof candidate.observationCorrelation === "object" &&
+    ["not_provided", "no_clear_match", "matches_found"].includes(candidate.observationCorrelation.status) &&
+    typeof candidate.observationCorrelation.summary === "string" &&
+    candidate.observationCorrelation.summary.trim().length > 0 &&
+    candidate.observationCorrelation.summary.length <= 1_000 &&
+    Array.isArray(candidate.observationCorrelation.matches) &&
+    candidate.observationCorrelation.matches.length <= 20 &&
+    candidate.observationCorrelation.matches.every((match) =>
+      match !== null &&
+      typeof match === "object" &&
+      isRelatedDtc(match.relatedDtc) &&
+      typeof match.observation === "string" &&
+      match.observation.trim().length > 0 &&
+      match.observation.length <= 300 &&
+      typeof match.possibleRelation === "string" &&
+      match.possibleRelation.trim().length > 0 &&
+      match.possibleRelation.length <= 700 &&
+      confidences.has(match.confidence)
+    ) &&
+    (candidate.observationCorrelation.status === "matches_found"
+      ? candidate.observationCorrelation.matches.length > 0
+      : candidate.observationCorrelation.matches.length === 0) &&
     isStringArray(candidate.safetyWarnings) &&
     candidate.confidence !== undefined &&
     confidences.has(candidate.confidence) &&
@@ -212,6 +249,8 @@ const AI_ERROR_MESSAGES: Record<string, string> = {
   OPENAI_API_KEY_MISSING: "La orientación por IA no está configurada en el servidor.",
   OPENAI_MODEL_MISSING: "El modelo de orientación por IA no está configurado en el servidor.",
   AI_INPUT_INVALID: "Los datos extraídos no son compatibles con el análisis por IA.",
+  OBSERVATIONS_INVALID: "Las observaciones deben ser texto y no superar 1,000 caracteres.",
+  OBSERVATIONS_SENSITIVE_CONTENT: "Las observaciones parecen contener un VIN, una clave o un secreto. Retira ese dato antes de continuar.",
   OPENAI_TIMEOUT: "La solicitud de orientación agotó el tiempo disponible.",
   OPENAI_LIMIT_EXCEEDED: "El servicio de orientación alcanzó su límite de uso o saldo.",
   OPENAI_RESPONSE_INVALID: "El servicio devolvió una orientación que no pudo validarse.",
@@ -365,6 +404,39 @@ function AnalysisResult({ analysis }: { analysis: DiagnosticAnalysis }) {
         ))}
       </div>
 
+      <div className={`observation-correlation ${analysis.observationCorrelation.status}`}>
+        <h3>Relación con las observaciones del vehículo</h3>
+        {analysis.observationCorrelation.status === "not_provided" ? (
+          <p>No se proporcionaron observaciones adicionales. El análisis se realizó únicamente con los DTC extraídos del reporte.</p>
+        ) : (
+          <p>{analysis.observationCorrelation.summary}</p>
+        )}
+        {analysis.observationCorrelation.matches.length > 0 && (
+          <ul className="observation-matches">
+            {analysis.observationCorrelation.matches.map((match) => (
+              <li key={dtcIdentity(match.relatedDtc)}>
+                <div>
+                  <strong>{match.relatedDtc.code}</strong>
+                  <span>
+                    {match.relatedDtc.moduleCode
+                      ? `${match.relatedDtc.moduleCode} · ${match.relatedDtc.moduleName}`
+                      : match.relatedDtc.moduleName}
+                  </span>
+                </div>
+                <p><strong>Observación relacionada:</strong> {match.observation}</p>
+                <p>{match.possibleRelation}</p>
+                <span>Confianza de la relación: {CONFIDENCE_LABELS[match.confidence]}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+        {analysis.observationCorrelation.status !== "not_provided" && (
+          <p className="correlation-caution">
+            Una coincidencia es orientativa y debe verificarse mediante comprobaciones profesionales.
+          </p>
+        )}
+      </div>
+
       {analysis.safetyWarnings.length > 0 && (
         <div className="analysis-warning overall">
           <h3>Advertencias generales de seguridad</h3>
@@ -385,6 +457,12 @@ interface AiAnalysisSectionProps {
   onRequestConfirmation: () => void;
   onCancelConfirmation: () => void;
   onConfirm: () => void;
+  observationsProvided: boolean;
+  observationsChanged: boolean;
+}
+
+function normalizeObservations(value: string) {
+  return value.trim();
 }
 
 function AiAnalysisSection({
@@ -393,6 +471,8 @@ function AiAnalysisSection({
   onRequestConfirmation,
   onCancelConfirmation,
   onConfirm,
+  observationsProvided,
+  observationsChanged,
 }: AiAnalysisSectionProps) {
   const requestButtonRef = useRef<HTMLButtonElement>(null);
   const confirmationTitleRef = useRef<HTMLHeadingElement>(null);
@@ -400,7 +480,9 @@ function AiAnalysisSection({
 
   useEffect(() => {
     if (state.status === "confirming") confirmationTitleRef.current?.focus();
-    if (previousStatusRef.current === "confirming" && state.status === "ready") requestButtonRef.current?.focus();
+    if (previousStatusRef.current === "confirming" && ["ready", "completed"].includes(state.status)) {
+      requestButtonRef.current?.focus();
+    }
     previousStatusRef.current = state.status;
   }, [state.status]);
 
@@ -444,6 +526,7 @@ function AiAnalysisSection({
                 <li>Marca, modelo y año.</li>
                 <li>Nombres y códigos de módulos.</li>
                 <li>Códigos DTC, descripciones y estados.</li>
+                {observationsProvided && <li>Las observaciones del vehículo escritas en el formulario.</li>}
               </ul>
               <p className="data-exclusion"><strong>No se enviarán</strong> VIN, PDF, odómetro ni datos del cliente.</p>
               <div className="confirmation-actions">
@@ -469,7 +552,19 @@ function AiAnalysisSection({
             </div>
           )}
 
-          {state.status === "completed" && state.analysis && <AnalysisResult analysis={state.analysis} />}
+          {state.status === "completed" && state.analysis && (
+            <>
+              <AnalysisResult analysis={state.analysis} />
+              {observationsChanged && (
+                <div className="analysis-observations-changed" role="status">
+                  <p>Las observaciones cambiaron después de este resultado. La orientación mostrada no se actualizará automáticamente.</p>
+                  <button ref={requestButtonRef} className="analysis-button" type="button" onClick={onRequestConfirmation}>
+                    Volver a analizar con las observaciones actuales
+                  </button>
+                </div>
+              )}
+            </>
+          )}
         </>
       )}
     </section>
@@ -482,6 +577,8 @@ export function App() {
   const [message, setMessage] = useState("");
   const [uploadResult, setUploadResult] = useState<UploadResponse | null>(null);
   const [analysisState, setAnalysisState] = useState<AnalysisUiState>({ status: "unavailable" });
+  const [observations, setObservations] = useState("");
+  const [observationsError, setObservationsError] = useState("");
   const [isDragging, setIsDragging] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const uploadInProgressRef = useRef(false);
@@ -518,8 +615,13 @@ export function App() {
     if (!file || uploadInProgressRef.current) return false;
 
     const validationError = validateFile(file);
+    const replacesReport = selectedFile !== null || uploadResult !== null;
     resetAnalysisForReportChange(uploadResult !== null || activeAnalysisRef.current !== null);
     setUploadResult(null);
+    if (replacesReport) {
+      setObservations("");
+      setObservationsError("");
+    }
 
     if (validationError) {
       setSelectedFile(null);
@@ -554,6 +656,8 @@ export function App() {
       setSelectedFile(null);
       setStatus("error");
       setMessage("Selecciona solamente un archivo PDF.");
+      setObservations("");
+      setObservationsError("");
       if (inputRef.current) inputRef.current.value = "";
       return;
     }
@@ -571,6 +675,8 @@ export function App() {
     setStatus("idle");
     setMessage("");
     setUploadResult(null);
+    setObservations("");
+    setObservationsError("");
     if (inputRef.current) inputRef.current.value = "";
   }
 
@@ -646,17 +752,34 @@ export function App() {
 
   function requestAnalysisConfirmation() {
     if (!uploadResult?.analysisPreparation.available || analysisInProgressRef.current) return;
-    setAnalysisState({ status: "confirming" });
+    setAnalysisState((current) => ({
+      status: "confirming",
+      ...(current.analysis ? { analysis: current.analysis } : {}),
+      ...(current.submittedObservations !== undefined
+        ? { submittedObservations: current.submittedObservations }
+        : {}),
+    }));
   }
 
   function cancelAnalysisConfirmation() {
     if (analysisInProgressRef.current) return;
-    setAnalysisState({ status: "ready" });
+    setAnalysisState((current) => current.analysis
+      ? {
+          status: "completed",
+          analysis: current.analysis,
+          submittedObservations: current.submittedObservations ?? "",
+        }
+      : { status: "ready" });
   }
 
   async function confirmAnalysis() {
     const preparation = uploadResult?.analysisPreparation;
     if (!uploadResult || !preparation?.available || analysisInProgressRef.current) return;
+    const normalizedObservations = normalizeObservations(observations);
+    const requestInput: DiagnosticAnalysisInput = {
+      ...preparation.input,
+      ...(normalizedObservations.length === 0 ? {} : { observations: normalizedObservations }),
+    };
 
     analysisInProgressRef.current = true;
     const requestId = ++analysisSequenceRef.current;
@@ -675,7 +798,7 @@ export function App() {
       const response = await fetch("/api/reports/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(preparation.input),
+        body: JSON.stringify(requestInput),
         signal: controller.signal,
       });
 
@@ -699,21 +822,33 @@ export function App() {
 
       const result = parseAnalysisResponse(body);
       const inputDtcIdentities = new Set(
-        preparation.input.modules.flatMap((module) =>
+        requestInput.modules.flatMap((module) =>
           module.dtcs.map((dtc) => dtcIdentity({ code: dtc.code, moduleCode: module.code, moduleName: module.name })),
         ),
       );
       const relatedIdentities = result?.analysis.findings.flatMap((finding) =>
         finding.relatedDtc === null ? [] : [dtcIdentity(finding.relatedDtc)],
       ) ?? [];
+      const correlationIdentities = result?.analysis.observationCorrelation.matches.map((match) =>
+        dtcIdentity(match.relatedDtc)
+      ) ?? [];
+      const correlationStatusIsInvalid = normalizedObservations.length === 0
+        ? result?.analysis.observationCorrelation.status !== "not_provided"
+        : result?.analysis.observationCorrelation.status === "not_provided";
       const hasInvalidDtcReference = relatedIdentities.some((identity) => !inputDtcIdentities.has(identity))
-        || new Set(relatedIdentities).size !== relatedIdentities.length;
-      if (!result || hasInvalidDtcReference) {
+        || new Set(relatedIdentities).size !== relatedIdentities.length
+        || correlationIdentities.some((identity) => !inputDtcIdentities.has(identity))
+        || new Set(correlationIdentities).size !== correlationIdentities.length;
+      if (!result || hasInvalidDtcReference || correlationStatusIsInvalid) {
         setAnalysisState({ status: "error", message: AI_ERROR_MESSAGES.OPENAI_RESPONSE_INVALID });
         return;
       }
 
-      setAnalysisState({ status: "completed", analysis: result.analysis });
+      setAnalysisState({
+        status: "completed",
+        analysis: result.analysis,
+        submittedObservations: normalizedObservations,
+      });
     } catch (error) {
       if (!isActiveAnalysis()) return;
       if (error instanceof DOMException && error.name === "AbortError") return;
@@ -730,6 +865,12 @@ export function App() {
       }
     }
   }
+
+  const normalizedObservations = normalizeObservations(observations);
+  const observationsChanged = analysisState.status === "completed"
+    && analysisState.submittedObservations !== undefined
+    && analysisState.submittedObservations !== normalizedObservations;
+  const observationsDisabled = status === "uploading" || analysisState.status === "analyzing";
 
   return (
     <main className="app-shell">
@@ -817,6 +958,39 @@ export function App() {
             <span>El servidor validará el tamaño permitido</span>
           </div>
 
+          <div className="vehicle-observations">
+            <div className="observations-heading">
+              <label htmlFor="vehicle-observations">Observaciones del vehículo (opcional)</label>
+              <span aria-live="polite">{observations.length}/{MAX_VEHICLE_OBSERVATIONS_LENGTH}</span>
+            </div>
+            <textarea
+              id="vehicle-observations"
+              value={observations}
+              maxLength={MAX_VEHICLE_OBSERVATIONS_LENGTH}
+              rows={4}
+              disabled={observationsDisabled}
+              aria-describedby="vehicle-observations-help vehicle-observations-error"
+              aria-invalid={observationsError.length > 0}
+              onChange={(event) => {
+                if (uploadInProgressRef.current || analysisInProgressRef.current) return;
+                const nextValue = event.currentTarget.value;
+                if (nextValue.length > MAX_VEHICLE_OBSERVATIONS_LENGTH) {
+                  setObservationsError("Las observaciones no pueden superar 1,000 caracteres.");
+                  return;
+                }
+                setObservations(nextValue);
+                setObservationsError("");
+              }}
+              placeholder="Ej.: vibración al acelerar, ruido en frío o pérdida intermitente de potencia."
+            />
+            <p id="vehicle-observations-help">
+              Describe solo síntomas observables. No incluyas VIN, nombres, teléfonos, claves ni datos del cliente.
+            </p>
+            <p id="vehicle-observations-error" className="observations-error" role={observationsError ? "alert" : undefined}>
+              {observationsError}
+            </p>
+          </div>
+
           <div className="status-region" aria-live="polite" aria-atomic="true">
             {message && (
               <div className={`status-message ${status}`} role={status === "error" ? "alert" : "status"}>
@@ -847,6 +1021,8 @@ export function App() {
               onRequestConfirmation={requestAnalysisConfirmation}
               onCancelConfirmation={cancelAnalysisConfirmation}
               onConfirm={() => void confirmAnalysis()}
+              observationsProvided={normalizedObservations.length > 0}
+              observationsChanged={observationsChanged}
             />
           </>
         )}
