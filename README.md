@@ -168,7 +168,7 @@ Los mensajes no incluyen texto del reporte, VIN, datos del cliente, rutas locale
 
 ## Orientación diagnóstica con OpenAI
 
-`POST /api/reports/analyze` es una operación separada de la carga y extracción. Recibe exclusivamente JSON estructurado y no acepta PDF, VIN, odómetro, nombres de archivo, hashes ni identificadores del reporte.
+`POST /api/reports/analyze` es una operación separada de la carga y extracción. Recibe JSON estructurado y admite observaciones técnicas opcionales del vehículo. No acepta PDF, VIN, odómetro, nombres de archivo, hashes ni identificadores del reporte.
 
 Entrada resumida:
 
@@ -192,9 +192,12 @@ Entrada resumida:
         }
       ]
     }
-  ]
+  ],
+  "observations": "Vibración intermitente al acelerar con el motor caliente."
 }
 ```
+
+`observations` es opcional, debe ser texto de hasta 1,000 caracteres y se normaliza recortando solo los espacios exteriores. Si se omite, es `null`, está vacío o contiene solo espacios, se trata como ausente. No debe incluir VIN, nombres, teléfonos, claves, tokens ni datos del cliente. El backend es la autoridad final y rechaza tipos, longitudes, propiedades desconocidas y patrones sensibles mediante errores controlados.
 
 La extracción conserva todas las filas y sus estados originales. Para análisis, los registros se agrupan por módulo+código: un DTC accionable que también aparece como histórico se envía una sola vez con `alsoHistorical: true`; un registro exclusivamente histórico permanece como antecedente documental y no se envía para generar un hallazgo. Los estados accionables aceptados son `current`, `confirmed`, `stored`, `pending`, `permanent` e `intermittent`; `history` se clasifica como antecedente y un estado desconocido exige revisión manual.
 
@@ -202,9 +205,11 @@ La entrada admite como máximo 40 módulos con DTC accionables, 20 DTC accionabl
 
 El cuerpo JSON tiene un límite acotado de **256 KiB**. Este tamaño cubre el peor DTO actualmente válido (40 módulos, 100 DTC y todos los textos en sus longitudes máximas), pero rechaza cuerpos ajenos o sobredimensionados con HTTP `413`. El límite multipart del PDF es independiente.
 
-La respuesta contiene un resumen técnico, hallazgos priorizados, una referencia `relatedDtc` con código, código de módulo y nombre de módulo, explicación sencilla, causas posibles, comprobaciones recomendadas, advertencias de seguridad, confianza y la indicación obligatoria de que requiere confirmación del técnico. El backend rechaza referencias ajenas a los DTC accionables y hallazgos duplicados para la misma combinación módulo+código. Es una orientación sugerida, no un diagnóstico definitivo.
+La respuesta contiene un resumen técnico, hallazgos priorizados, una referencia `relatedDtc` con código, código de módulo y nombre de módulo, explicación sencilla, causas posibles, comprobaciones recomendadas, advertencias de seguridad, confianza y la indicación obligatoria de que requiere confirmación del técnico. También incluye `observationCorrelation` con un estado `not_provided`, `no_clear_match` o `matches_found`, un resumen y asociaciones prudentes a DTC accionables. Una coincidencia no confirma causalidad y siempre requiere comprobación profesional.
 
-La integración usa el SDK oficial `openai` 6.49.0 y Responses API con Structured Outputs. Las solicitudes usan `store: false`, un timeout configurable y no incluyen herramientas externas.
+El backend exige cero asociaciones para `not_provided` y `no_clear_match`, al menos una para `matches_found`, referencias existentes y no duplicadas, y coherencia entre la presencia de observaciones y el estado. Rechaza referencias ajenas a los DTC accionables y hallazgos duplicados para la misma combinación módulo+código. Es una orientación sugerida, no un diagnóstico definitivo.
+
+La integración usa el SDK oficial `openai` 6.49.0 y Responses API con Structured Outputs. El reporte estructurado y las observaciones se envían en mensajes separados; las observaciones se marcan como entrada no confiable y nunca pueden alterar el reporte ni agregar DTC. Las solicitudes usan `store: false`, cero reintentos, un timeout configurable y no incluyen herramientas externas.
 
 Variables necesarias:
 
@@ -217,6 +222,8 @@ Los errores seguros incluyen:
 - `OPENAI_API_KEY_MISSING` (`503`).
 - `OPENAI_MODEL_MISSING` (`503`).
 - `AI_INPUT_INVALID` (`400`, o `413` para un cuerpo excesivo).
+- `OBSERVATIONS_INVALID` (`400`): tipo o longitud inválidos.
+- `OBSERVATIONS_SENSITIVE_CONTENT` (`400`): posible VIN, clave, token o secreto.
 - `OPENAI_TIMEOUT` (`504`).
 - `OPENAI_LIMIT_EXCEEDED` (`429`).
 - `OPENAI_RESPONSE_INVALID` (`502`).
@@ -230,9 +237,11 @@ La carga del PDF nunca solicita orientación automáticamente. Después de una e
 
 1. La interfaz muestra los datos documentales extraídos.
 2. La sección **Orientación asistida por IA** habilita **Analizar DTC con IA**.
-3. Una confirmación enumera exactamente los datos técnicos que se enviarán y aclara que no se enviarán VIN, PDF, odómetro ni datos del cliente.
-4. Solo **Confirmar y analizar** ejecuta `POST /api/reports/analyze` mediante el proxy de Vite.
-5. La orientación se presenta separada de la extracción y siempre muestra que requiere confirmación del técnico.
+3. El técnico puede escribir observaciones opcionales; el campo se bloquea durante solicitudes activas y se limpia al reemplazar o eliminar el reporte.
+4. Una confirmación enumera exactamente los datos técnicos y, cuando corresponda, las observaciones que se enviarán. También aclara que no se enviarán VIN, PDF, odómetro ni datos del cliente.
+5. Solo **Confirmar y analizar** ejecuta `POST /api/reports/analyze` mediante el proxy de Vite.
+6. La orientación se presenta separada de la extracción y siempre muestra que requiere confirmación del técnico.
+7. Si las observaciones cambian después de obtener un resultado, este permanece visible y solo una acción explícita inicia una nueva confirmación y análisis.
 
 Si se cambia el reporte mientras existe una solicitud pendiente, el navegador la cancela con `AbortController`, limpia la orientación anterior e ignora cualquier respuesta tardía. Los reintentos requieren una acción explícita.
 
@@ -262,6 +271,7 @@ $body = @{
       )
     }
   )
+  observations = "Vibración intermitente al acelerar."
 } | ConvertTo-Json -Depth 6
 
 Invoke-RestMethod -Method Post -Uri "http://localhost:3000/api/reports/analyze" -ContentType "application/json" -Body $body
@@ -277,7 +287,7 @@ La migración versionada de `supabase/migrations` prepara un historial diagnóst
 
 Solo se contempla persistir marca, modelo, año, módulos, todas las filas DTC y la orientación estructurada completada. Cada fila conserva su orden, estado original, estado normalizado y clasificación accionable, histórica o desconocida. Los hallazgos se relacionan por separado con una fila accionable inequívoca y no se duplican por la existencia de un antecedente histórico equivalente.
 
-Nunca se contempla almacenar VIN original, protegido o seudonimizado; odómetro; motor; PDF o texto completo extraído; contenido binario; nombre, hash o identificador del archivo; datos del cliente; claves o tokens; prompts; identificadores del proveedor; métricas ni respuestas crudas de OpenAI.
+Nunca se contempla almacenar VIN original, protegido o seudonimizado; odómetro; motor; observaciones libres del vehículo ni su correlación; PDF o texto completo extraído; contenido binario; nombre, hash o identificador del archivo; datos del cliente; claves o tokens; prompts; identificadores del proveedor; métricas ni respuestas crudas de OpenAI.
 
 Todas las tablas tienen RLS habilitado, no incluyen políticas públicas para `anon` o `authenticated` y reservan sus privilegios al rol de servicio del backend. Esas credenciales deberán permanecer exclusivamente en el servidor. La configuración del cliente, la ejecución de la migración contra un proyecto y las escrituras reales quedan pendientes para la FASE 3.2.
 

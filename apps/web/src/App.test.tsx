@@ -150,7 +150,11 @@ function readyAnalysisUpload(file: File) {
   );
 }
 
-function successfulAnalysis() {
+function successfulAnalysis(observationCorrelation: Record<string, unknown> = {
+  status: "not_provided",
+  summary: "No se proporcionaron observaciones del vehículo.",
+  matches: [],
+}) {
   return createJsonResponse(true, {
     status: "completed",
     analysis: {
@@ -164,6 +168,7 @@ function successfulAnalysis() {
         safetyWarnings: ["Trabajar con el motor frío cuando corresponda"],
         confidence: "medium",
       }],
+      observationCorrelation,
       safetyWarnings: ["No sustituir piezas sin realizar comprobaciones"],
       confidence: "medium",
       requiresTechnicianConfirmation: true,
@@ -177,6 +182,23 @@ afterEach(() => {
 });
 
 describe("carga de reportes", () => {
+  it("muestra observaciones opcionales con ayuda, contador y límite anticipado", () => {
+    render(<App />);
+    const textarea = screen.getByRole("textbox", { name: "Observaciones del vehículo (opcional)" }) as HTMLTextAreaElement;
+
+    expect(textarea.maxLength).toBe(1_000);
+    expect(screen.getByText(/No incluyas VIN, nombres, teléfonos, claves ni datos del cliente/)).toBeTruthy();
+    expect(screen.getByText("0/1000")).toBeTruthy();
+
+    fireEvent.change(textarea, { target: { value: "x".repeat(1_000) } });
+    expect(textarea.value).toHaveLength(1_000);
+    expect(screen.getByText("1000/1000")).toBeTruthy();
+
+    fireEvent.change(textarea, { target: { value: "x".repeat(1_001) } });
+    expect(textarea.value).toHaveLength(1_000);
+    expect(screen.getByRole("alert").textContent).toContain("no pueden superar 1,000 caracteres");
+  });
+
   it("aborta una carga al desmontar e ignora su respuesta tardía", async () => {
     const file = createPdf("desmontaje-carga.pdf");
     const pendingUpload = createDeferred<Response>();
@@ -450,6 +472,138 @@ describe("carga de reportes", () => {
 });
 
 describe("orientación asistida por IA", () => {
+  it("envía observaciones normalizadas solo tras la confirmación explícita", async () => {
+    const file = createPdf("observaciones.pdf");
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(readyAnalysisUpload(file))
+      .mockResolvedValueOnce(successfulAnalysis({
+        status: "no_clear_match",
+        summary: "No se encontró una relación clara.",
+        matches: [],
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const { container } = render(<App />);
+    const { input } = getUploadElements(container);
+
+    await user.upload(input, file);
+    await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+    const textarea = screen.getByRole("textbox", { name: "Observaciones del vehículo (opcional)" });
+    fireEvent.change(textarea, { target: { value: "  Vibración al acelerar\ncon motor caliente.  " } });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("button", { name: "Analizar DTC con IA" }));
+    expect(screen.getByText("Las observaciones del vehículo escritas en el formulario.")).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole("button", { name: "Confirmar y analizar" }));
+    expect(await screen.findByText("No se encontró una relación clara.")).toBeTruthy();
+    const analysisCalls = fetchMock.mock.calls.filter(([url]) => url === "/api/reports/analyze");
+    expect(analysisCalls).toHaveLength(1);
+    const requestBody = JSON.parse(String((analysisCalls[0]?.[1] as RequestInit).body)) as Record<string, unknown>;
+    expect(requestBody).toEqual({
+      vehicle: { make: "Marca Sintética", model: "Modelo Académico", year: 2024 },
+      modules: [{
+        code: "PCM",
+        name: "Módulo motriz",
+        dtcs: [{
+          code: "P0300",
+          description: "Fallo de encendido sintético",
+          status: "current",
+          alsoHistorical: false,
+        }],
+      }],
+      observations: "Vibración al acelerar\ncon motor caliente.",
+    });
+    expect(JSON.stringify(requestBody)).not.toMatch(/vin|odometer|pdf|sha256|originalName|cliente/iu);
+  });
+
+  it("deshabilita las observaciones durante cada solicitud activa", async () => {
+    const file = createPdf("observaciones-bloqueadas.pdf");
+    const pendingUpload = createDeferred<Response>();
+    const pendingAnalysis = createDeferred<Response>();
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockReturnValueOnce(pendingUpload.promise)
+      .mockReturnValueOnce(pendingAnalysis.promise);
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const { container } = render(<App />);
+    const { input } = getUploadElements(container);
+    const textarea = screen.getByRole("textbox", { name: "Observaciones del vehículo (opcional)" }) as HTMLTextAreaElement;
+
+    await user.upload(input, file);
+    await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+    expect(textarea.disabled).toBe(true);
+    await act(async () => {
+      pendingUpload.resolve(readyAnalysisUpload(file));
+      await pendingUpload.promise;
+    });
+    await screen.findByRole("button", { name: "Analizar DTC con IA" });
+    expect(textarea.disabled).toBe(false);
+
+    await user.click(screen.getByRole("button", { name: "Analizar DTC con IA" }));
+    await user.click(screen.getByRole("button", { name: "Confirmar y analizar" }));
+    expect(textarea.disabled).toBe(true);
+    await act(async () => {
+      pendingAnalysis.resolve(successfulAnalysis());
+      await pendingAnalysis.promise;
+    });
+    await screen.findByText("Requiere confirmación del técnico");
+    expect(textarea.disabled).toBe(false);
+  });
+
+  it("conserva el resultado hasta solicitar explícitamente un nuevo análisis de observaciones editadas", async () => {
+    const file = createPdf("reanalisis-observaciones.pdf");
+    const firstSummary = "La vibración podría relacionarse con el DTC.";
+    const secondSummary = "No se encontró una relación clara con el ruido.";
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(readyAnalysisUpload(file))
+      .mockResolvedValueOnce(successfulAnalysis({
+        status: "matches_found",
+        summary: firstSummary,
+        matches: [{
+          relatedDtc: { code: "P0300", moduleCode: "PCM", moduleName: "Módulo motriz" },
+          observation: "Vibración al acelerar.",
+          possibleRelation: "Podría guardar relación, pero requiere comprobación.",
+          confidence: "low",
+        }],
+      }))
+      .mockResolvedValueOnce(successfulAnalysis({ status: "no_clear_match", summary: secondSummary, matches: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const { container } = render(<App />);
+    const { input } = getUploadElements(container);
+
+    await user.upload(input, file);
+    await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+    const textarea = screen.getByRole("textbox", { name: "Observaciones del vehículo (opcional)" });
+    await user.type(textarea, "Vibración al acelerar");
+    await user.click(screen.getByRole("button", { name: "Analizar DTC con IA" }));
+    await user.click(screen.getByRole("button", { name: "Confirmar y analizar" }));
+    expect(await screen.findByText(firstSummary)).toBeTruthy();
+    expect(container.querySelector(".observation-matches")?.textContent).toContain("P0300");
+    expect(container.querySelector(".observation-matches")?.textContent).toContain("PCM · Módulo motriz");
+    expect(screen.getByText("Observación relacionada:").parentElement?.textContent).toContain("Vibración al acelerar");
+    expect(screen.getByText("Confianza de la relación: Baja")).toBeTruthy();
+    expect(screen.getByText(/debe verificarse mediante comprobaciones profesionales/)).toBeTruthy();
+
+    await user.clear(textarea);
+    await user.type(textarea, "Ruido breve en frío");
+    expect(screen.getByText(firstSummary)).toBeTruthy();
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/reports/analyze")).toHaveLength(1);
+
+    await user.click(screen.getByRole("button", { name: "Volver a analizar con las observaciones actuales" }));
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/reports/analyze")).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: "Confirmar y analizar" }));
+    expect(await screen.findByText(secondSummary)).toBeTruthy();
+    expect(container.querySelector(".observation-matches")).toBeNull();
+    expect(screen.getByRole("heading", { name: "Resumen técnico" })).toBeTruthy();
+    expect(screen.getByText(/debe verificarse mediante comprobaciones profesionales/)).toBeTruthy();
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/reports/analyze")).toHaveLength(2);
+  });
   it("gestiona el foco al abrir y cancelar la confirmación", async () => {
     const file = createPdf("foco-confirmacion.pdf");
     vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValueOnce(readyAnalysisUpload(file)));
@@ -582,10 +736,11 @@ describe("orientación asistida por IA", () => {
 
   it("presenta la orientación separada con prioridades, causas, comprobaciones, advertencias y confianza", async () => {
     const file = createPdf("resultado-ia.pdf");
-    vi.stubGlobal(
-      "fetch",
-      vi.fn<typeof fetch>().mockResolvedValueOnce(readyAnalysisUpload(file)).mockResolvedValueOnce(successfulAnalysis()),
-    );
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(readyAnalysisUpload(file))
+      .mockResolvedValueOnce(successfulAnalysis());
+    vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
     const { container } = render(<App />);
     const { input } = getUploadElements(container);
@@ -604,6 +759,38 @@ describe("orientación asistida por IA", () => {
     expect(screen.getAllByText("PCM · Módulo motriz")).toHaveLength(2);
     expect(screen.getByText("Requiere confirmación del técnico")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Datos del reporte" })).toBeTruthy();
+    const noObservationsMessage = "No se proporcionaron observaciones adicionales. El análisis se realizó únicamente con los DTC extraídos del reporte.";
+    expect(screen.getAllByText(noObservationsMessage)).toHaveLength(1);
+    expect(screen.queryByText("No se proporcionaron observaciones del vehículo.")).toBeNull();
+    expect(screen.queryByText("No se incluyeron observaciones adicionales en esta solicitud.")).toBeNull();
+    expect(screen.queryByText(/Una coincidencia es orientativa/)).toBeNull();
+    expect(container.querySelector(".observation-matches")).toBeNull();
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/reports/analyze")).toHaveLength(1);
+  });
+
+  it("presenta de forma segura el rechazo de observaciones sin ocultar la extracción", async () => {
+    const file = createPdf("observaciones-rechazadas.pdf");
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(readyAnalysisUpload(file))
+      .mockResolvedValueOnce(createJsonResponse(false, {
+        error: { code: "OBSERVATIONS_SENSITIVE_CONTENT", message: "detalle interno" },
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const { container } = render(<App />);
+    const { input } = getUploadElements(container);
+
+    await user.upload(input, file);
+    await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+    await user.type(screen.getByRole("textbox", { name: "Observaciones del vehículo (opcional)" }), "Texto sintético");
+    await user.click(screen.getByRole("button", { name: "Analizar DTC con IA" }));
+    await user.click(screen.getByRole("button", { name: "Confirmar y analizar" }));
+
+    expect(await screen.findByText(/parecen contener un VIN, una clave o un secreto/)).toBeTruthy();
+    expect(screen.queryByText("detalle interno")).toBeNull();
+    expect(screen.getByRole("heading", { name: "Datos del reporte" })).toBeTruthy();
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/reports/analyze")).toHaveLength(1);
   });
 
   it("traduce errores controlados y requiere una acción explícita para reintentar", async () => {
@@ -672,6 +859,8 @@ describe("orientación asistida por IA", () => {
 
     await user.upload(input, firstFile);
     await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+    const textarea = screen.getByRole("textbox", { name: "Observaciones del vehículo (opcional)" }) as HTMLTextAreaElement;
+    await user.type(textarea, "Vibración del reporte anterior");
     await user.click(await screen.findByRole("button", { name: "Analizar DTC con IA" }));
     await user.click(screen.getByRole("button", { name: "Confirmar y analizar" }));
 
@@ -683,6 +872,7 @@ describe("orientación asistida por IA", () => {
 
     expect(signal.aborted).toBe(true);
     expect(screen.getByText(nextFile.name)).toBeTruthy();
+    expect(textarea.value).toBe("");
     expect(screen.getByText("La orientación anterior se canceló al cambiar de reporte.")).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Orientación asistida por IA" })).toBeNull();
 

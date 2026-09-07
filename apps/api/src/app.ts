@@ -38,6 +38,8 @@ type ErrorCode =
   | "OPENAI_API_KEY_MISSING"
   | "OPENAI_MODEL_MISSING"
   | "AI_INPUT_INVALID"
+  | "OBSERVATIONS_INVALID"
+  | "OBSERVATIONS_SENSITIVE_CONTENT"
   | "OPENAI_TIMEOUT"
   | "OPENAI_LIMIT_EXCEEDED"
   | "OPENAI_RESPONSE_INVALID"
@@ -206,6 +208,8 @@ export function createApp(options: AppOptions) {
     if (error instanceof AiAnalysisError) {
       const statusByCode: Record<typeof error.code, number> = {
         AI_INPUT_INVALID: 400,
+        OBSERVATIONS_INVALID: 400,
+        OBSERVATIONS_SENSITIVE_CONTENT: 400,
         OPENAI_TIMEOUT: 504,
         OPENAI_LIMIT_EXCEEDED: 429,
         OPENAI_RESPONSE_INVALID: 502,

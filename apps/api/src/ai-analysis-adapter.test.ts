@@ -106,6 +106,7 @@ describe("prepareAiAnalysis", () => {
         },
       ],
     });
+    expect(result.input).not.toHaveProperty("observations");
   });
 
   it("excluye datos sensibles, metadatos del archivo y propiedades desconocidas", () => {
