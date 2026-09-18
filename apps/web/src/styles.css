@@ -28,28 +28,19 @@ button, label { -webkit-tap-highlight-color: transparent; }
 .brand {
   display: flex;
   align-items: center;
-  gap: 10px;
+  justify-content: center;
+  width: min(100%, 820px);
+  min-height: 72px;
   margin-bottom: 30px;
-  color: #17243a;
-  font-size: 1.25rem;
-  font-weight: 650;
-  letter-spacing: -0.025em;
 }
 
-.brand strong { color: #ec5b32; }
-
-.brand-mark {
-  display: grid;
-  width: 37px;
-  height: 37px;
-  place-items: center;
-  border-radius: 10px;
-  background: #173c54;
-  box-shadow: 0 5px 12px rgb(23 60 84 / 20%);
+.brand-logo {
+  display: block;
+  width: min(100%, 340px);
+  height: auto;
+  aspect-ratio: 3 / 1;
+  object-fit: contain;
 }
-
-.brand-mark svg { width: 29px; fill: #f8fbfc; }
-.brand-mark .brand-pulse { fill: none; stroke: #ec5b32; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; }
 
 .upload-card {
   width: min(100%, 820px);
@@ -335,6 +326,15 @@ td code { color: #c34628; font-family: ui-monospace, SFMono-Regular, Consolas, m
 .analysis-observations-changed p { margin: 0 0 11px; color: #6e5636; font-size: .78rem; line-height: 1.5; }
 .technician-confirmation { margin: 16px 0 0; padding: 12px; border: 1px solid #efc58f; border-radius: 8px; color: #744617; background: #fff7eb; font-size: .82rem; font-weight: 800; text-align: center; }
 .analysis-cancelled { margin-top: 18px; padding: 12px 14px; border-radius: 8px; color: #526474; background: #f1f4f6; font-size: .8rem; }
+.pdf-download { display: flex; align-items: center; gap: 14px; margin-top: 18px; padding: 15px 16px; border: 1px solid #d7e3e9; border-radius: 10px; background: #f5f9fb; }
+.pdf-download-button { display: inline-flex; min-height: 42px; flex: 0 0 auto; cursor: pointer; align-items: center; justify-content: center; gap: 8px; padding: 10px 16px; border: 0; border-radius: 8px; color: #fff; background: #173c54; box-shadow: 0 4px 11px rgb(23 60 84 / 18%); font: inherit; font-size: .8rem; font-weight: 750; }
+.pdf-download-button:hover:not(:disabled) { background: #102f44; }
+.pdf-download-button:disabled { cursor: not-allowed; box-shadow: none; opacity: .56; }
+.pdf-download-button:focus-visible { outline: 3px solid rgb(29 183 211 / 28%); outline-offset: 2px; }
+.pdf-download-button svg { width: 19px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
+.pdf-download > p { margin: 0; color: #607181; font-size: .75rem; line-height: 1.45; overflow-wrap: anywhere; }
+.pdf-download > .pdf-error { color: #9f3522; }
+.pdf-download > .pdf-success { color: #236541; }
 
 .privacy-note { display: flex; align-items: flex-start; gap: 10px; margin-top: 24px; padding-top: 21px; border-top: 1px solid #edf0f3; color: #748193; }
 .privacy-note svg { width: 19px; flex: 0 0 auto; margin-top: 1px; fill: none; stroke: #5d7182; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.6; }
@@ -345,7 +345,8 @@ footer { margin-top: auto; padding-top: 28px; color: #929dab; font-size: .7rem; 
 
 @media (max-width: 560px) {
   .app-shell { padding: 22px 13px 17px; }
-  .brand { margin-bottom: 20px; }
+  .brand { min-height: 57px; margin-bottom: 20px; }
+  .brand-logo { width: min(88vw, 285px); }
   .upload-card { padding: 29px 20px 24px; border-radius: 16px; }
   .intro p { margin-bottom: 22px; }
   .file-guidance { align-items: flex-start; gap: 6px; flex-direction: column; }
@@ -358,6 +359,8 @@ footer { margin-top: auto; padding-top: 28px; color: #929dab; font-size: .7rem; 
   .confirmation-actions { flex-direction: column; }
   .guidance-grid { grid-template-columns: 1fr; }
   .analysis-finding header { flex-direction: column; }
+  .pdf-download { align-items: stretch; flex-direction: column; }
+  .pdf-download-button { width: 100%; }
 }
 
 @media (prefers-reduced-motion: reduce) {

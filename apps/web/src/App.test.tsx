@@ -1,10 +1,20 @@
 // @vitest-environment jsdom
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { downloadReportPdf } from "./report-pdf";
 import { App } from "./App";
+
+vi.mock("./report-pdf", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./report-pdf")>();
+  return { ...actual, downloadReportPdf: vi.fn() };
+});
+
+const downloadReportPdfMock = vi.mocked(downloadReportPdf);
 
 function createPdf(name: string) {
   return new File(["%PDF-1.7\n%%EOF"], name, { type: "application/pdf" });
@@ -178,7 +188,24 @@ function successfulAnalysis(observationCorrelation: Record<string, unknown> = {
 
 afterEach(() => {
   cleanup();
+  downloadReportPdfMock.mockReset();
   vi.unstubAllGlobals();
+});
+
+describe("identidad visual", () => {
+  it("renderiza el logo oficial como recurso local, accesible y con proporción reservada", () => {
+    render(<App />);
+    const logo = screen.getByRole("img", { name: "AutoDiag IA" }) as HTMLImageElement;
+
+    expect(logo.getAttribute("src")).toMatch(/autodiag-ia-logo\.png$/u);
+    expect(logo.getAttribute("src")).not.toMatch(/^https?:|^data:/iu);
+    expect(logo.width / logo.height).toBe(3);
+    expect(logo.className).toBe("brand-logo");
+    expect(screen.getAllByRole("img", { name: "AutoDiag IA" })).toHaveLength(1);
+    const styles = readFileSync(resolve(process.cwd(), "src/styles.css"), "utf8");
+    expect(styles).toMatch(/\.brand-logo\s*\{[^}]*width:\s*min\(100%,\s*340px\)[^}]*height:\s*auto[^}]*aspect-ratio:\s*3\s*\/\s*1[^}]*object-fit:\s*contain/isu);
+    expect(styles).toMatch(/@media\s*\(max-width:\s*560px\)[\s\S]*\.brand-logo\s*\{[^}]*width:\s*min\(88vw,\s*285px\)/iu);
+  });
 });
 
 describe("carga de reportes", () => {
@@ -546,6 +573,7 @@ describe("orientación asistida por IA", () => {
     await user.click(screen.getByRole("button", { name: "Analizar DTC con IA" }));
     await user.click(screen.getByRole("button", { name: "Confirmar y analizar" }));
     expect(textarea.disabled).toBe(true);
+    expect(screen.queryByRole("button", { name: "Descargar informe PDF" })).toBeNull();
     await act(async () => {
       pendingAnalysis.resolve(successfulAnalysis());
       await pendingAnalysis.promise;
@@ -813,6 +841,7 @@ describe("orientación asistida por IA", () => {
     expect(await screen.findByText("La solicitud de orientación agotó el tiempo disponible.")).toBeTruthy();
     expect(screen.queryByText(rawMessage)).toBeNull();
     expect(screen.getByRole("button", { name: "Intentar de nuevo" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Descargar informe PDF" })).toBeNull();
     expect(fetchMock.mock.calls.filter(([url]) => url === "/api/reports/analyze")).toHaveLength(1);
     expect(screen.getByRole("heading", { name: "Datos del reporte" })).toBeTruthy();
     expect(screen.getByText("P0300")).toBeTruthy();
@@ -881,5 +910,170 @@ describe("orientación asistida por IA", () => {
       await pendingAnalysis.promise;
     });
     expect(screen.queryByText("Orientación sintética sobre una falla de encendido que debe comprobarse.")).toBeNull();
+  });
+});
+
+describe("descarga local del informe PDF", () => {
+  it("solo queda disponible después de un análisis completado y no realiza solicitudes adicionales", async () => {
+    const file = createPdf("informe-local.pdf");
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(readyAnalysisUpload(file))
+      .mockResolvedValueOnce(successfulAnalysis());
+    vi.stubGlobal("fetch", fetchMock);
+    downloadReportPdfMock.mockResolvedValue("AutoDiagIA_Informe_2026-09-07_10-15.pdf");
+    const user = userEvent.setup();
+    const { container } = render(<App />);
+    const { input } = getUploadElements(container);
+
+    expect(screen.queryByRole("button", { name: "Descargar informe PDF" })).toBeNull();
+    await user.upload(input, file);
+    await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+    expect(screen.queryByRole("button", { name: "Descargar informe PDF" })).toBeNull();
+    await user.click(await screen.findByRole("button", { name: "Analizar DTC con IA" }));
+    expect(screen.queryByRole("button", { name: "Descargar informe PDF" })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Confirmar y analizar" }));
+
+    const downloadButton = await screen.findByRole("button", { name: "Descargar informe PDF" });
+    const requestsBeforeDownload = fetchMock.mock.calls.length;
+    await user.click(downloadButton);
+
+    expect(downloadReportPdfMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(requestsBeforeDownload);
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/reports/analyze")).toHaveLength(1);
+    expect(await screen.findByText("Informe PDF descargado correctamente.")).toBeTruthy();
+    const exported = downloadReportPdfMock.mock.calls[0]?.[0];
+    expect(exported?.observations.used).toBeNull();
+    expect(JSON.stringify(exported)).not.toMatch(/vin|odometer|Motor privado|originalName|sha256|vin_v1_private/iu);
+  });
+
+  it("usa un bloqueo síncrono para impedir dos descargas por doble clic", async () => {
+    const file = createPdf("doble-descarga.pdf");
+    const pendingDownload = createDeferred<string>();
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(readyAnalysisUpload(file))
+      .mockResolvedValueOnce(successfulAnalysis());
+    vi.stubGlobal("fetch", fetchMock);
+    downloadReportPdfMock.mockReturnValue(pendingDownload.promise);
+    const user = userEvent.setup();
+    const { container } = render(<App />);
+    const { input } = getUploadElements(container);
+
+    await user.upload(input, file);
+    await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+    await user.click(await screen.findByRole("button", { name: "Analizar DTC con IA" }));
+    await user.click(screen.getByRole("button", { name: "Confirmar y analizar" }));
+    const downloadButton = await screen.findByRole("button", { name: "Descargar informe PDF" });
+
+    fireEvent.click(downloadButton);
+    fireEvent.click(downloadButton);
+
+    expect(downloadReportPdfMock).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: "Creando informe…" })).toHaveProperty("disabled", true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    await act(async () => {
+      pendingDownload.resolve("AutoDiagIA_Informe_2026-09-07_10-15.pdf");
+      await pendingDownload.promise;
+    });
+    expect(screen.getByRole("button", { name: "Descargar informe PDF" })).toHaveProperty("disabled", false);
+  });
+
+  it("conserva el análisis, muestra un error controlado y permite reintentar", async () => {
+    const file = createPdf("reintento-pdf.pdf");
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(readyAnalysisUpload(file))
+      .mockResolvedValueOnce(successfulAnalysis());
+    vi.stubGlobal("fetch", fetchMock);
+    downloadReportPdfMock
+      .mockRejectedValueOnce(new Error("traza-interna-privada"))
+      .mockResolvedValueOnce("AutoDiagIA_Informe_2026-09-07_10-15.pdf");
+    const user = userEvent.setup();
+    const { container } = render(<App />);
+    const { input } = getUploadElements(container);
+
+    await user.upload(input, file);
+    await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+    await user.click(await screen.findByRole("button", { name: "Analizar DTC con IA" }));
+    await user.click(screen.getByRole("button", { name: "Confirmar y analizar" }));
+    const downloadButton = await screen.findByRole("button", { name: "Descargar informe PDF" });
+    await user.click(downloadButton);
+
+    expect(await screen.findByText("No fue posible crear el informe PDF. Puedes intentarlo de nuevo.")).toBeTruthy();
+    expect(screen.queryByText("traza-interna-privada")).toBeNull();
+    expect(screen.getByRole("heading", { name: "Resumen técnico" })).toBeTruthy();
+    expect(downloadButton).toHaveProperty("disabled", false);
+
+    await user.click(downloadButton);
+    expect(downloadReportPdfMock).toHaveBeenCalledTimes(2);
+    expect(await screen.findByText("Informe PDF descargado correctamente.")).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("invalida el informe cuando cambian las observaciones y conserva la instantánea usada", async () => {
+    const file = createPdf("instantanea-observaciones.pdf");
+    const usedObservation = "Vibración al acelerar.";
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(readyAnalysisUpload(file))
+      .mockResolvedValueOnce(successfulAnalysis({
+        status: "matches_found",
+        summary: "Existe una relación posible que debe comprobarse.",
+        matches: [{
+          relatedDtc: { code: "P0300", moduleCode: "PCM", moduleName: "Módulo motriz" },
+          observation: usedObservation,
+          possibleRelation: "La vibración podría corresponder a la combustión irregular.",
+          confidence: "low",
+        }],
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+    downloadReportPdfMock.mockResolvedValue("AutoDiagIA_Informe_2026-09-07_10-15.pdf");
+    const user = userEvent.setup();
+    const { container } = render(<App />);
+    const { input } = getUploadElements(container);
+
+    await user.upload(input, file);
+    await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+    const textarea = screen.getByRole("textbox", { name: "Observaciones del vehículo (opcional)" });
+    await user.type(textarea, `  ${usedObservation}  `);
+    await user.click(screen.getByRole("button", { name: "Analizar DTC con IA" }));
+    await user.click(screen.getByRole("button", { name: "Confirmar y analizar" }));
+
+    const downloadButton = await screen.findByRole("button", { name: "Descargar informe PDF" });
+    await user.click(downloadButton);
+    expect(downloadReportPdfMock.mock.calls[0]?.[0].observations.used).toBe(usedObservation);
+
+    await user.clear(textarea);
+    await user.type(textarea, "Ruido posterior que no fue analizado");
+    expect(downloadButton).toHaveProperty("disabled", true);
+    fireEvent.click(downloadButton);
+    expect(downloadReportPdfMock).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/Vuelve a analizar las observaciones actuales/iu)).toBeTruthy();
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/reports/analyze")).toHaveLength(1);
+  });
+
+  it("elimina el resultado descargable al reemplazar el reporte", async () => {
+    const firstFile = createPdf("primero.pdf");
+    const nextFile = createPdf("segundo.pdf");
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(readyAnalysisUpload(firstFile))
+      .mockResolvedValueOnce(successfulAnalysis());
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const { container } = render(<App />);
+    const { input } = getUploadElements(container);
+
+    await user.upload(input, firstFile);
+    await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+    await user.click(await screen.findByRole("button", { name: "Analizar DTC con IA" }));
+    await user.click(screen.getByRole("button", { name: "Confirmar y analizar" }));
+    expect(await screen.findByRole("button", { name: "Descargar informe PDF" })).toBeTruthy();
+
+    await user.upload(input, nextFile);
+    expect(screen.queryByRole("button", { name: "Descargar informe PDF" })).toBeNull();
+    expect(downloadReportPdfMock).not.toHaveBeenCalled();
   });
 });

@@ -245,6 +245,14 @@ La carga del PDF nunca solicita orientación automáticamente. Después de una e
 
 Si se cambia el reporte mientras existe una solicitud pendiente, el navegador la cancela con `AbortController`, limpia la orientación anterior e ignora cualquier respuesta tardía. Los reintentos requieren una acción explícita.
 
+### Identidad visual y descarga local del informe
+
+El encabezado utiliza el logo oficial de AutoDiag IA como recurso local. Después de completar y validar una orientación, **Descargar informe PDF** construye en el navegador un documento A4 con vehículo (marca, modelo y año), contadores documentales, DTC accionables e históricos, observaciones realmente utilizadas, correlaciones validadas, resumen técnico, hallazgos, causas, comprobaciones, advertencias, confianza y confirmación obligatoria del técnico.
+
+La exportación usa únicamente una instantánea explícita de campos autorizados. Excluye VIN y sus derivados, odómetro, motor, datos del cliente, identificadores, nombre y hash del archivo, PDF y texto originales, prompts, claves, tokens y respuestas crudas. Si las observaciones cambian, la descarga queda inhabilitada hasta que el técnico solicite expresamente un nuevo análisis.
+
+El PDF se genera localmente con texto seleccionable y no realiza otra llamada a OpenAI, no consume tokens adicionales y no se envía a Supabase. Se necesita conexión para solicitar un análisis nuevo; una vez descargado, el documento puede conservarse y consultarse sin conexión. Su contenido es orientación técnica, no un diagnóstico definitivo, y siempre requiere confirmación profesional.
+
 ### Inicio y prueba manual en PowerShell
 
 Configura las variables solo en la terminal local:

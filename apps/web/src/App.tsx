@@ -1,10 +1,13 @@
 import { type ChangeEvent, type DragEvent, type FormEvent, useEffect, useRef, useState } from "react";
+import autodiagLogoUrl from "./assets/autodiag-ia-logo.png";
+import { buildReportExportModel, downloadReportPdf } from "./report-pdf";
 
 const PDF_MIME_TYPE = "application/pdf";
 const MAX_VEHICLE_OBSERVATIONS_LENGTH = 1_000;
 
 type UploadStatus = "idle" | "uploading" | "success" | "error";
 type AnalysisStatus = "unavailable" | "ready" | "confirming" | "analyzing" | "completed" | "error" | "cancelled";
+type PdfStatus = "idle" | "generating" | "success" | "error";
 
 type DtcStatus =
   | "current"
@@ -459,6 +462,9 @@ interface AiAnalysisSectionProps {
   onConfirm: () => void;
   observationsProvided: boolean;
   observationsChanged: boolean;
+  pdfStatus: PdfStatus;
+  pdfMessage: string;
+  onDownloadPdf: () => void;
 }
 
 function normalizeObservations(value: string) {
@@ -473,6 +479,9 @@ function AiAnalysisSection({
   onConfirm,
   observationsProvided,
   observationsChanged,
+  pdfStatus,
+  pdfMessage,
+  onDownloadPdf,
 }: AiAnalysisSectionProps) {
   const requestButtonRef = useRef<HTMLButtonElement>(null);
   const confirmationTitleRef = useRef<HTMLHeadingElement>(null);
@@ -555,6 +564,30 @@ function AiAnalysisSection({
           {state.status === "completed" && state.analysis && (
             <>
               <AnalysisResult analysis={state.analysis} />
+              <div className="pdf-download" aria-live="polite">
+                <button
+                  className="pdf-download-button"
+                  type="button"
+                  onClick={onDownloadPdf}
+                  disabled={observationsChanged || pdfStatus === "generating"}
+                >
+                  {pdfStatus === "generating" ? <span className="spinner" aria-hidden="true" /> : (
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M12 4v11m0 0 4-4m-4 4-4-4M5 18v2h14v-2" />
+                    </svg>
+                  )}
+                  {pdfStatus === "generating" ? "Creando informe…" : "Descargar informe PDF"}
+                </button>
+                {observationsChanged ? (
+                  <p>Vuelve a analizar las observaciones actuales antes de descargar un informe actualizado.</p>
+                ) : pdfMessage ? (
+                  <p className={pdfStatus === "error" ? "pdf-error" : "pdf-success"} role={pdfStatus === "error" ? "alert" : "status"}>
+                    {pdfMessage}
+                  </p>
+                ) : (
+                  <p>Se genera localmente sin otra llamada a OpenAI ni consumo adicional de tokens.</p>
+                )}
+              </div>
               {observationsChanged && (
                 <div className="analysis-observations-changed" role="status">
                   <p>Las observaciones cambiaron después de este resultado. La orientación mostrada no se actualizará automáticamente.</p>
@@ -580,26 +613,44 @@ export function App() {
   const [observations, setObservations] = useState("");
   const [observationsError, setObservationsError] = useState("");
   const [isDragging, setIsDragging] = useState(false);
+  const [pdfStatus, setPdfStatus] = useState<PdfStatus>("idle");
+  const [pdfMessage, setPdfMessage] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const logoRef = useRef<HTMLImageElement>(null);
   const uploadInProgressRef = useRef(false);
   const uploadSequenceRef = useRef(0);
   const activeUploadRef = useRef<{ id: number; file: File; controller: AbortController } | null>(null);
   const analysisInProgressRef = useRef(false);
   const analysisSequenceRef = useRef(0);
   const activeAnalysisRef = useRef<{ id: number; reportId: string; controller: AbortController } | null>(null);
+  const pdfGenerationInProgressRef = useRef(false);
+  const pdfSequenceRef = useRef(0);
+  const activePdfGenerationRef = useRef<{ id: number; reportId: string } | null>(null);
 
   useEffect(() => () => {
     uploadSequenceRef.current += 1;
     analysisSequenceRef.current += 1;
+    pdfSequenceRef.current += 1;
     activeUploadRef.current?.controller.abort();
     activeAnalysisRef.current?.controller.abort();
     activeUploadRef.current = null;
     activeAnalysisRef.current = null;
     uploadInProgressRef.current = false;
     analysisInProgressRef.current = false;
+    pdfGenerationInProgressRef.current = false;
+    activePdfGenerationRef.current = null;
   }, []);
 
+  function resetPdfGeneration() {
+    pdfSequenceRef.current += 1;
+    activePdfGenerationRef.current = null;
+    pdfGenerationInProgressRef.current = false;
+    setPdfStatus("idle");
+    setPdfMessage("");
+  }
+
   function resetAnalysisForReportChange(showCancellation: boolean) {
+    resetPdfGeneration();
     analysisSequenceRef.current += 1;
     activeAnalysisRef.current?.controller.abort();
     activeAnalysisRef.current = null;
@@ -782,6 +833,7 @@ export function App() {
     };
 
     analysisInProgressRef.current = true;
+    resetPdfGeneration();
     const requestId = ++analysisSequenceRef.current;
     const reportId = uploadResult.id;
     const controller = new AbortController();
@@ -866,6 +918,114 @@ export function App() {
     }
   }
 
+  async function handleDownloadPdf() {
+    const preparation = uploadResult?.analysisPreparation;
+    const analysis = analysisState.analysis;
+    const submittedObservations = analysisState.submittedObservations;
+    if (
+      pdfGenerationInProgressRef.current ||
+      analysisState.status !== "completed" ||
+      !analysis ||
+      submittedObservations === undefined ||
+      observationsChanged ||
+      !uploadResult ||
+      !preparation?.available ||
+      !logoRef.current
+    ) return;
+
+    pdfGenerationInProgressRef.current = true;
+    const generationId = ++pdfSequenceRef.current;
+    const reportId = uploadResult.id;
+    activePdfGenerationRef.current = { id: generationId, reportId };
+    const isActiveGeneration = () => {
+      const active = activePdfGenerationRef.current;
+      return active?.id === generationId && active.reportId === reportId;
+    };
+    setPdfStatus("generating");
+    setPdfMessage("Creando el informe de forma local…");
+
+    try {
+      const exportModel = buildReportExportModel({
+        vehicle: {
+          make: uploadResult.extraction.vehicle.make,
+          model: uploadResult.extraction.vehicle.model,
+          year: uploadResult.extraction.vehicle.year,
+        },
+        counts: {
+          systems: uploadResult.extraction.scanSummary.parsedSystems,
+          detected: preparation.counts.detected,
+          actionable: preparation.counts.actionable,
+          historical: preparation.counts.historical,
+        },
+        actionableModules: preparation.input.modules.map((module) => ({
+          code: module.code,
+          name: module.name,
+          dtcs: module.dtcs.map((dtc) => ({
+            code: dtc.code,
+            description: dtc.description,
+            status: dtc.status,
+            alsoHistorical: dtc.alsoHistorical,
+          })),
+        })),
+        documentaryDtcs: uploadResult.extraction.dtcs.map((dtc) => ({
+          code: dtc.code,
+          moduleCode: dtc.moduleCode,
+          moduleName: dtc.moduleName,
+          description: dtc.descriptionOriginal,
+          originalStatus: dtc.statusOriginal,
+          normalizedClassification: dtc.classification,
+        })),
+        analysis: {
+          technicalSummary: analysis.technicalSummary,
+          findings: analysis.findings.map((finding) => ({
+            relatedDtc: finding.relatedDtc === null ? null : {
+              code: finding.relatedDtc.code,
+              moduleCode: finding.relatedDtc.moduleCode,
+              moduleName: finding.relatedDtc.moduleName,
+            },
+            priority: finding.priority,
+            simpleExplanation: finding.simpleExplanation,
+            possibleCauses: [...finding.possibleCauses],
+            recommendedChecks: [...finding.recommendedChecks],
+            safetyWarnings: [...finding.safetyWarnings],
+            confidence: finding.confidence,
+          })),
+          observationCorrelation: {
+            status: analysis.observationCorrelation.status,
+            summary: analysis.observationCorrelation.summary,
+            matches: analysis.observationCorrelation.matches.map((match) => ({
+              relatedDtc: {
+                code: match.relatedDtc.code,
+                moduleCode: match.relatedDtc.moduleCode,
+                moduleName: match.relatedDtc.moduleName,
+              },
+              observation: match.observation,
+              possibleRelation: match.possibleRelation,
+              confidence: match.confidence,
+            })),
+          },
+          safetyWarnings: [...analysis.safetyWarnings],
+          confidence: analysis.confidence,
+          requiresTechnicianConfirmation: analysis.requiresTechnicianConfirmation,
+        },
+        submittedObservations,
+      });
+      await downloadReportPdf(exportModel, new Date(), logoRef.current);
+      if (!isActiveGeneration()) return;
+      setPdfStatus("success");
+      setPdfMessage("Informe PDF descargado correctamente.");
+    } catch {
+      if (!isActiveGeneration()) return;
+      setPdfStatus("error");
+      setPdfMessage("No fue posible crear el informe PDF. Puedes intentarlo de nuevo.");
+    } finally {
+      if (isActiveGeneration()) {
+        activePdfGenerationRef.current = null;
+        pdfGenerationInProgressRef.current = false;
+      }
+    }
+  }
+
   const normalizedObservations = normalizeObservations(observations);
   const observationsChanged = analysisState.status === "completed"
     && analysisState.submittedObservations !== undefined
@@ -874,17 +1034,8 @@ export function App() {
 
   return (
     <main className="app-shell">
-      <header className="brand" aria-label="AutoDiag IA">
-        <span className="brand-mark" aria-hidden="true">
-          <svg viewBox="0 0 32 32" role="img">
-            <path d="M7 19h18l-2.1-7.2A4 4 0 0 0 19 9h-6a4 4 0 0 0-3.9 2.8L7 19Z" />
-            <path d="M5 19h22v5a2 2 0 0 1-2 2h-2v-2H9v2H7a2 2 0 0 1-2-2v-5Z" />
-            <circle cx="10" cy="20.5" r="1.5" />
-            <circle cx="22" cy="20.5" r="1.5" />
-            <path className="brand-pulse" d="m12 15 2-2 2.1 4 2-3H21" />
-          </svg>
-        </span>
-        <span>AutoDiag <strong>IA</strong></span>
+      <header className="brand">
+        <img ref={logoRef} className="brand-logo" src={autodiagLogoUrl} alt="AutoDiag IA" width="2172" height="724" />
       </header>
 
       <section className="upload-card" aria-labelledby="upload-title">
@@ -980,6 +1131,7 @@ export function App() {
                 }
                 setObservations(nextValue);
                 setObservationsError("");
+                resetPdfGeneration();
               }}
               placeholder="Ej.: vibración al acelerar, ruido en frío o pérdida intermitente de potencia."
             />
@@ -1023,6 +1175,9 @@ export function App() {
               onConfirm={() => void confirmAnalysis()}
               observationsProvided={normalizedObservations.length > 0}
               observationsChanged={observationsChanged}
+              pdfStatus={pdfStatus}
+              pdfMessage={pdfMessage}
+              onDownloadPdf={() => void handleDownloadPdf()}
             />
           </>
         )}
