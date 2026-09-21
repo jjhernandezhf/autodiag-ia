@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import request from "supertest";
 import { describe, expect, it } from "vitest";
 
@@ -188,5 +189,65 @@ describe("POST /api/reports/upload", () => {
         message: "El archivo excede el límite permitido de 16 bytes.",
       },
     });
+  });
+
+  it.each([
+    ["simple", "comment"],
+    ["anidado", "metadata[vehicle][make]"],
+    ["indice de arreglo", "items[1]"],
+  ])("rechaza un campo de texto %s de forma controlada", async (_case, fieldName) => {
+    const response = await request(createTestApp())
+      .post("/api/reports/upload")
+      .field(fieldName, "synthetic")
+      .attach("report", validPdf, { filename: "reporte.pdf", contentType: "application/pdf" });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: {
+        code: "INVALID_UPLOAD",
+        message: 'Envía un único archivo en el campo "report".',
+      },
+    });
+  });
+
+  it("rechaza un segundo archivo y conserva un solo archivo esperado", async () => {
+    const response = await request(createTestApp())
+      .post("/api/reports/upload")
+      .attach("report", validPdf, { filename: "primero.pdf", contentType: "application/pdf" })
+      .attach("report", validPdf, { filename: "segundo.pdf", contentType: "application/pdf" });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe("INVALID_UPLOAD");
+  });
+
+  it("rechaza un multipart truncado sin exponer el error interno ni tumbar la API", async () => {
+    const app = createTestApp();
+    const response = await request(app)
+      .post("/api/reports/upload")
+      .set("Content-Type", "multipart/form-data; boundary=autodiag-boundary")
+      .send([
+        "--autodiag-boundary",
+        'Content-Disposition: form-data; name="report"; filename="reporte.pdf"',
+        "Content-Type: application/pdf",
+        "",
+        "%PDF-truncated",
+      ].join("\r\n"));
+
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({
+      error: {
+        code: "INVALID_UPLOAD",
+        message: 'Envía un único archivo en el campo "report".',
+      },
+    });
+    expect((await request(app).get("/health")).status).toBe(200);
+  });
+
+  it("mantiene el archivo en memoria y los límites multipart mínimos", () => {
+    const source = readFileSync(new URL("./app.ts", import.meta.url), "utf8");
+    expect(source).toContain("storage: multer.memoryStorage()");
+    expect(source).toContain("fieldNestingDepth: 0");
+    expect(source).toContain("fieldArrayIndexLimit: 0");
+    expect(source).not.toMatch(/multer\.diskStorage|\bdest\s*:/u);
   });
 });
