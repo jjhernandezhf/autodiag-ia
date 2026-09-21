@@ -11,7 +11,7 @@ export default tseslint.config(
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    files: ["apps/web/**/*.{ts,tsx}"],
+    files: ["apps/web/**/*.{js,jsx,ts,tsx,mts,cts}"],
     languageOptions: {
       globals: globals.browser,
     },
@@ -21,6 +21,23 @@ export default tseslint.config(
     },
     rules: {
       ...reactHooks.configs.recommended.rules,
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            {
+              name: "@autodiag/api",
+              message: "El frontend no puede depender del workspace privado del API.",
+            },
+          ],
+          patterns: [
+            {
+              group: ["@autodiag/api/*"],
+              message: "El frontend no puede depender del workspace privado del API.",
+            },
+          ],
+        },
+      ],
       "react-refresh/only-export-components": ["warn", { "allowConstantExport": true }],
     },
   },
@@ -31,4 +48,3 @@ export default tseslint.config(
     },
   },
 );
-

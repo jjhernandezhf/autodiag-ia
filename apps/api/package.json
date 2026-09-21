@@ -11,6 +11,7 @@
     "lint": "eslint ."
   },
   "dependencies": {
+    "@supabase/supabase-js": "2.109.0",
     "express": "^5.2.1",
     "multer": "^2.0.2",
     "openai": "6.49.0",
