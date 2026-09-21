@@ -90,13 +90,19 @@ export function createApp(options: AppOptions) {
   }
   const app = express();
 
+  // Multer 2.4 supports fieldArrayIndexLimit at runtime, while the current
+  // @types/multer declaration has not added it yet. This upload accepts no
+  // text fields, nesting or array indexes, so zero is the minimum valid limit.
+  const uploadLimits: NonNullable<multer.Options["limits"]> & { fieldArrayIndexLimit: number } = {
+    fileSize: maxFileSizeBytes,
+    files: 1,
+    fields: 0,
+    fieldNestingDepth: 0,
+    fieldArrayIndexLimit: 0,
+  };
   const upload = multer({
     storage: multer.memoryStorage(),
-    limits: {
-      fileSize: maxFileSizeBytes,
-      files: 1,
-      fields: 0,
-    },
+    limits: uploadLimits,
     fileFilter: (_request, file, callback) => {
       const hasPdfExtension = file.originalname.toLowerCase().endsWith(".pdf");
       const hasPdfMimeType = file.mimetype.toLowerCase() === PDF_MIME_TYPE;
@@ -115,6 +121,16 @@ export function createApp(options: AppOptions) {
       callback(null, true);
     },
   });
+  const receiveReport = upload.single("report");
+  const validateReportUpload = (request: Request, response: Response, next: NextFunction) => {
+    receiveReport(request, response, (error) => {
+      if (error && !(error instanceof multer.MulterError) && !(error instanceof UploadValidationError)) {
+        next(new UploadValidationError("INVALID_UPLOAD", 'Envía un único archivo en el campo "report".', 400));
+        return;
+      }
+      next(error);
+    });
+  };
 
   app.disable("x-powered-by");
   // The largest contract-valid analysis DTO (40 modules, 100 DTC and all text
@@ -126,7 +142,7 @@ export function createApp(options: AppOptions) {
     response.json({ status: "ok", service: "AutoDiag IA" });
   });
 
-  app.post("/api/reports/upload", upload.single("report"), async (request, response) => {
+  app.post("/api/reports/upload", validateReportUpload, async (request, response) => {
     const file = request.file;
 
     if (!file) {
