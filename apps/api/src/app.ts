@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import express, { type NextFunction, type Request, type Response } from "express";
+import { rateLimit } from "express-rate-limit";
 import multer from "multer";
 
 import {
@@ -17,6 +18,11 @@ import {
   type PdfExtractionLimits,
 } from "./config.js";
 import { extractPdfPages, PdfExtractionError } from "./pdf-extractor.js";
+import {
+  AuthenticationError,
+  createAuthenticationService,
+  type AuthenticationService,
+} from "./auth-service.js";
 
 const PDF_MIME_TYPE = "application/pdf";
 const PDF_SIGNATURE = Buffer.from("%PDF-");
@@ -43,7 +49,14 @@ type ErrorCode =
   | "OPENAI_TIMEOUT"
   | "OPENAI_LIMIT_EXCEEDED"
   | "OPENAI_RESPONSE_INVALID"
-  | "OPENAI_UNAVAILABLE";
+  | "OPENAI_UNAVAILABLE"
+  | "AUTH_REQUEST_INVALID"
+  | "AUTH_CREDENTIALS_INVALID"
+  | "AUTH_SESSION_INVALID"
+  | "AUTH_PROFILE_FORBIDDEN"
+  | "AUTH_CONFIGURATION_UNAVAILABLE"
+  | "AUTH_PROVIDER_UNAVAILABLE"
+  | "AUTH_RATE_LIMITED";
 
 interface ApiErrorBody {
   error: {
@@ -52,7 +65,7 @@ interface ApiErrorBody {
   };
 }
 
-interface AppOptions {
+export interface AppOptions {
   maxFileSizeBytes?: number;
   pdfExtractionLimits?: Partial<PdfExtractionLimits>;
   vinHmacSecret: string;
@@ -61,6 +74,7 @@ interface AppOptions {
   openAiModel?: string;
   openAiTimeoutMs?: number;
   analysisService?: DiagnosticAnalysisService;
+  authenticationService?: AuthenticationService;
 }
 
 class UploadValidationError extends Error {
@@ -84,6 +98,7 @@ export function createApp(options: AppOptions) {
   const pageExtractor = options.extractPdfPages ?? ((buffer: Buffer) => extractPdfPages(buffer, pdfExtractionLimits));
   const openAiApiKey = options.openAiApiKey?.trim();
   const openAiModel = options.openAiModel?.trim();
+  const authenticationService = options.authenticationService ?? createAuthenticationService();
   let analysisService = options.analysisService;
   if (Buffer.byteLength(options.vinHmacSecret, "utf8") < 32) {
     throw new Error("VIN_HMAC_SECRET debe contener al menos 32 bytes.");
@@ -136,13 +151,63 @@ export function createApp(options: AppOptions) {
   // The largest contract-valid analysis DTO (40 modules, 100 DTC and all text
   // fields at their maxima) stays below 256 KiB; the bounded margin rejects
   // unrelated oversized JSON without changing Multer's multipart file limit.
-  app.use(express.json({ limit: ANALYSIS_JSON_LIMIT_BYTES }));
+  const jsonParser = express.json({ limit: ANALYSIS_JSON_LIMIT_BYTES });
+
+  // The in-memory store is appropriate only for this local prototype. A
+  // distributed deployment must replace it with a shared rate-limit store.
+  const loginRateLimiter = rateLimit({
+    windowMs: 15 * 60 * 1_000,
+    limit: 10,
+    skipSuccessfulRequests: true,
+    standardHeaders: true,
+    legacyHeaders: false,
+    handler: (_request, response) => {
+      sendError(response, 429, "AUTH_RATE_LIMITED", "Demasiados intentos. Intenta nuevamente más tarde.");
+    },
+  });
+
+  const requireAuthentication = async (request: Request, response: Response, next: NextFunction) => {
+    const authorization = request.get("Authorization");
+    const match = authorization ? /^Bearer ([^\s]+)$/u.exec(authorization) : null;
+    if (!match?.[1]) {
+      sendError(response, 401, "AUTH_SESSION_INVALID", "La sesión no es válida.");
+      return;
+    }
+
+    try {
+      request.usuario = await authenticationService.authenticate(match[1]);
+      next();
+    } catch (error) {
+      next(error);
+    }
+  };
 
   app.get("/health", (_request, response) => {
     response.json({ status: "ok", service: "AutoDiag IA" });
   });
 
-  app.post("/api/reports/upload", validateReportUpload, async (request, response) => {
+  app.post(
+    "/api/auth/login",
+    (_request, response, next) => {
+      response.set("Cache-Control", "no-store");
+      response.set("Pragma", "no-cache");
+      next();
+    },
+    loginRateLimiter,
+    jsonParser,
+    async (request, response) => {
+      const tokens = await authenticationService.login(request.body);
+      response.json(tokens);
+    },
+  );
+
+  app.use(jsonParser);
+
+  app.get("/api/auth/me", requireAuthentication, (request, response) => {
+    response.json(request.usuario);
+  });
+
+  app.post("/api/reports/upload", requireAuthentication, validateReportUpload, async (request, response) => {
     const file = request.file;
 
     if (!file) {
@@ -170,7 +235,7 @@ export function createApp(options: AppOptions) {
     });
   });
 
-  app.post("/api/reports/analyze", async (request, response) => {
+  app.post("/api/reports/analyze", requireAuthentication, async (request, response) => {
     const input = validateDiagnosticAnalysisInput(request.body);
 
     if (!analysisService) {
@@ -198,6 +263,22 @@ export function createApp(options: AppOptions) {
 
     if (error instanceof UploadValidationError) {
       sendError(response, error.status, error.code, error.message);
+      return;
+    }
+
+    if (error instanceof AuthenticationError) {
+      sendError(response, error.status, error.code, error.message);
+      return;
+    }
+
+    if (request.path === "/api/auth/login" && error instanceof Error) {
+      const httpStatus = "status" in error && typeof error.status === "number" ? error.status : null;
+      sendError(
+        response,
+        httpStatus === 413 ? 413 : 400,
+        "AUTH_REQUEST_INVALID",
+        "La solicitud de inicio de sesión no es válida.",
+      );
       return;
     }
 

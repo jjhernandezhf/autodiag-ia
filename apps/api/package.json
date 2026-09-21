@@ -13,6 +13,7 @@
   "dependencies": {
     "@supabase/supabase-js": "2.109.0",
     "express": "^5.2.1",
+    "express-rate-limit": "8.6.1",
     "multer": "2.4.0",
     "openai": "6.49.0",
     "pdfjs-dist": "5.4.624",

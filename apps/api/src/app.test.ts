@@ -4,10 +4,16 @@ import request from "supertest";
 import { describe, expect, it } from "vitest";
 
 import { createApp } from "./app.js";
+import type { AuthenticationService } from "./auth-service.js";
 import type { ExtractedPdfPage, ExtractedTextFragment } from "./report-types.js";
 
 const validPdf = Buffer.from("%PDF-1.7\nAutoDiag test fixture\n%%EOF");
 const TEST_SECRET = "synthetic-test-secret-with-at-least-32-bytes";
+const AUTHORIZATION = "Bearer synthetic-access-token";
+const testAuthenticationService: AuthenticationService = {
+  login: async () => ({ access_token: "synthetic-access-token", refresh_token: "synthetic-refresh-token" }),
+  authenticate: async () => ({ id: "6a103df0-8e4d-4c51-89f5-7030c5443d89", username: "usuario.sintetico" }),
+};
 
 function line(text: string, fragments?: ExtractedTextFragment[]) {
   return { text, y: 0, fragments: fragments ?? [{ text, x: 0, width: text.length }] };
@@ -65,15 +71,19 @@ function createTestApp(options: { maxFileSizeBytes?: number; pages?: ExtractedPd
   const { pages = completedPages, ...appOptions } = options;
   return createApp({
     ...appOptions,
+    authenticationService: testAuthenticationService,
     vinHmacSecret: TEST_SECRET,
     extractPdfPages: async () => pages,
   });
 }
 
+function postUpload(app = createTestApp()) {
+  return request(app).post("/api/reports/upload").set("Authorization", AUTHORIZATION);
+}
+
 describe("POST /api/reports/upload", () => {
   it("recibe un PDF válido y devuelve sus metadatos", async () => {
-    const response = await request(createTestApp())
-      .post("/api/reports/upload")
+    const response = await postUpload()
       .attach("report", validPdf, { filename: "reporte-autel.pdf", contentType: "application/pdf" });
 
     expect(response.status).toBe(201);
@@ -99,8 +109,7 @@ describe("POST /api/reports/upload", () => {
   });
 
   it("incluye un DTO de análisis sanitizado sin datos sensibles ni propiedades desconocidas", async () => {
-    const response = await request(createTestApp({ pages: completedDtcPages }))
-      .post("/api/reports/upload")
+    const response = await postUpload(createTestApp({ pages: completedDtcPages }))
       .attach("report", validPdf, { filename: "cliente-autel.pdf", contentType: "application/pdf" });
 
     expect(response.status).toBe(201);
@@ -138,7 +147,7 @@ describe("POST /api/reports/upload", () => {
   });
 
   it("rechaza una solicitud sin archivo", async () => {
-    const response = await request(createTestApp()).post("/api/reports/upload");
+    const response = await postUpload();
 
     expect(response.status).toBe(400);
     expect(response.body).toEqual({
@@ -150,11 +159,9 @@ describe("POST /api/reports/upload", () => {
   });
 
   it("rechaza un archivo con tipo o extensión inválidos", async () => {
-    const invalidMimeResponse = await request(createTestApp())
-      .post("/api/reports/upload")
+    const invalidMimeResponse = await postUpload()
       .attach("report", validPdf, { filename: "reporte.pdf", contentType: "text/plain" });
-    const invalidExtensionResponse = await request(createTestApp())
-      .post("/api/reports/upload")
+    const invalidExtensionResponse = await postUpload()
       .attach("report", validPdf, { filename: "reporte.txt", contentType: "application/pdf" });
 
     expect(invalidMimeResponse.status).toBe(415);
@@ -164,8 +171,7 @@ describe("POST /api/reports/upload", () => {
   });
 
   it("rechaza un archivo que declara ser PDF pero tiene una firma falsa", async () => {
-    const response = await request(createTestApp())
-      .post("/api/reports/upload")
+    const response = await postUpload()
       .attach("report", Buffer.from("not really a PDF"), { filename: "reporte.pdf", contentType: "application/pdf" });
 
     expect(response.status).toBe(415);
@@ -178,8 +184,7 @@ describe("POST /api/reports/upload", () => {
   });
 
   it("rechaza un archivo que excede el límite configurado", async () => {
-    const response = await request(createTestApp({ maxFileSizeBytes: 16 }))
-      .post("/api/reports/upload")
+    const response = await postUpload(createTestApp({ maxFileSizeBytes: 16 }))
       .attach("report", validPdf, { filename: "reporte.pdf", contentType: "application/pdf" });
 
     expect(response.status).toBe(413);
@@ -196,8 +201,7 @@ describe("POST /api/reports/upload", () => {
     ["anidado", "metadata[vehicle][make]"],
     ["indice de arreglo", "items[1]"],
   ])("rechaza un campo de texto %s de forma controlada", async (_case, fieldName) => {
-    const response = await request(createTestApp())
-      .post("/api/reports/upload")
+    const response = await postUpload()
       .field(fieldName, "synthetic")
       .attach("report", validPdf, { filename: "reporte.pdf", contentType: "application/pdf" });
 
@@ -211,8 +215,7 @@ describe("POST /api/reports/upload", () => {
   });
 
   it("rechaza un segundo archivo y conserva un solo archivo esperado", async () => {
-    const response = await request(createTestApp())
-      .post("/api/reports/upload")
+    const response = await postUpload()
       .attach("report", validPdf, { filename: "primero.pdf", contentType: "application/pdf" })
       .attach("report", validPdf, { filename: "segundo.pdf", contentType: "application/pdf" });
 
@@ -222,8 +225,7 @@ describe("POST /api/reports/upload", () => {
 
   it("rechaza un multipart truncado sin exponer el error interno ni tumbar la API", async () => {
     const app = createTestApp();
-    const response = await request(app)
-      .post("/api/reports/upload")
+    const response = await postUpload(app)
       .set("Content-Type", "multipart/form-data; boundary=autodiag-boundary")
       .send([
         "--autodiag-boundary",

@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { downloadReportPdf } from "./report-pdf";
 import { App } from "./App";
+import type { BrowserAuthenticationService } from "./auth-service";
 
 vi.mock("./report-pdf", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./report-pdf")>();
@@ -15,6 +16,29 @@ vi.mock("./report-pdf", async (importOriginal) => {
 });
 
 const downloadReportPdfMock = vi.mocked(downloadReportPdf);
+const TEST_IDENTITY = { id: "6a103df0-8e4d-4c51-89f5-7030c5443d89", username: "usuario.sintetico" };
+
+function createTestAuthService(
+  overrides: Partial<BrowserAuthenticationService> = {},
+): BrowserAuthenticationService {
+  return {
+    initialize: overrides.initialize ?? (async () => TEST_IDENTITY),
+    login: overrides.login ?? (async () => TEST_IDENTITY),
+    validateCurrentSession: overrides.validateCurrentSession ?? (async () => TEST_IDENTITY),
+    authenticatedFetch: overrides.authenticatedFetch ?? (async (input, init = {}) => {
+      const headers = { ...(init.headers as Record<string, string> | undefined), Authorization: "Bearer synthetic-access-token" };
+      return fetch(input, { ...init, headers });
+    }),
+    subscribe: overrides.subscribe ?? (() => () => undefined),
+    signOutLocal: overrides.signOutLocal ?? (async () => undefined),
+  };
+}
+
+async function renderAuthenticatedApp(authService = createTestAuthService()) {
+  const rendered = render(<App authService={authService} />);
+  await screen.findByRole("heading", { name: "Carga tu reporte Autel" });
+  return rendered;
+}
 
 function createPdf(name: string) {
   return new File(["%PDF-1.7\n%%EOF"], name, { type: "application/pdf" });
@@ -193,8 +217,8 @@ afterEach(() => {
 });
 
 describe("identidad visual", () => {
-  it("renderiza el logo oficial como recurso local, accesible y con proporción reservada", () => {
-    render(<App />);
+  it("renderiza el logo oficial como recurso local, accesible y con proporción reservada", async () => {
+    await renderAuthenticatedApp();
     const logo = screen.getByRole("img", { name: "AutoDiag IA" }) as HTMLImageElement;
 
     expect(logo.getAttribute("src")).toMatch(/autodiag-ia-logo\.png$/u);
@@ -209,8 +233,8 @@ describe("identidad visual", () => {
 });
 
 describe("carga de reportes", () => {
-  it("muestra observaciones opcionales con ayuda, contador y límite anticipado", () => {
-    render(<App />);
+  it("muestra observaciones opcionales con ayuda, contador y límite anticipado", async () => {
+    await renderAuthenticatedApp();
     const textarea = screen.getByRole("textbox", { name: "Observaciones del vehículo (opcional)" }) as HTMLTextAreaElement;
 
     expect(textarea.maxLength).toBe(1_000);
@@ -232,7 +256,7 @@ describe("carga de reportes", () => {
     const fetchMock = vi.fn<typeof fetch>().mockReturnValue(pendingUpload.promise);
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
-    const { container, unmount } = render(<App />);
+    const { container, unmount } = await renderAuthenticatedApp();
     const { input } = getUploadElements(container);
 
     await user.upload(input, file);
@@ -258,7 +282,7 @@ describe("carga de reportes", () => {
     const fetchMock = vi.fn<typeof fetch>().mockReturnValue(pendingResponse.promise);
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
-    const { container } = render(<App />);
+    const { container } = await renderAuthenticatedApp();
     const { input, dropZone, form } = getUploadElements(container);
 
     await user.upload(input, firstFile);
@@ -284,7 +308,7 @@ describe("carga de reportes", () => {
     const fetchMock = vi.fn<typeof fetch>().mockReturnValue(pendingResponse.promise);
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
-    const { container } = render(<App />);
+    const { container } = await renderAuthenticatedApp();
     const { input } = getUploadElements(container);
 
     await user.upload(input, firstFile);
@@ -308,7 +332,7 @@ describe("carga de reportes", () => {
     const firstFile = createPdf("reporte-a.pdf");
     const secondFile = createPdf("reporte-b.pdf");
     const user = userEvent.setup();
-    const { container } = render(<App />);
+    const { container } = await renderAuthenticatedApp();
     const { input, dropZone } = getUploadElements(container);
 
     await user.upload(input, firstFile);
@@ -341,7 +365,7 @@ describe("carga de reportes", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
-    const { container } = render(<App />);
+    const { container } = await renderAuthenticatedApp();
     const { input } = getUploadElements(container);
 
     await user.upload(input, largeFile);
@@ -388,7 +412,7 @@ describe("carga de reportes", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
-    const { container } = render(<App />);
+    const { container } = await renderAuthenticatedApp();
     const { input } = getUploadElements(container);
 
     await user.upload(input, file);
@@ -430,7 +454,7 @@ describe("carga de reportes", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
-    const { container } = render(<App />);
+    const { container } = await renderAuthenticatedApp();
     const { input } = getUploadElements(container);
 
     await user.upload(input, file);
@@ -447,7 +471,7 @@ describe("carga de reportes", () => {
     const file = createPdf("sin-dtc.pdf");
     vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(successfulUpload(file)));
     const user = userEvent.setup();
-    const { container } = render(<App />);
+    const { container } = await renderAuthenticatedApp();
     const { input } = getUploadElements(container);
 
     await user.upload(input, file);
@@ -482,7 +506,7 @@ describe("carga de reportes", () => {
       },
     )));
     const user = userEvent.setup();
-    const { container } = render(<App />);
+    const { container } = await renderAuthenticatedApp();
     const { input } = getUploadElements(container);
 
     await user.upload(input, file);
@@ -511,7 +535,7 @@ describe("orientación asistida por IA", () => {
       }));
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
-    const { container } = render(<App />);
+    const { container } = await renderAuthenticatedApp();
     const { input } = getUploadElements(container);
 
     await user.upload(input, file);
@@ -556,7 +580,7 @@ describe("orientación asistida por IA", () => {
       .mockReturnValueOnce(pendingAnalysis.promise);
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
-    const { container } = render(<App />);
+    const { container } = await renderAuthenticatedApp();
     const { input } = getUploadElements(container);
     const textarea = screen.getByRole("textbox", { name: "Observaciones del vehículo (opcional)" }) as HTMLTextAreaElement;
 
@@ -602,7 +626,7 @@ describe("orientación asistida por IA", () => {
       .mockResolvedValueOnce(successfulAnalysis({ status: "no_clear_match", summary: secondSummary, matches: [] }));
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
-    const { container } = render(<App />);
+    const { container } = await renderAuthenticatedApp();
     const { input } = getUploadElements(container);
 
     await user.upload(input, file);
@@ -636,7 +660,7 @@ describe("orientación asistida por IA", () => {
     const file = createPdf("foco-confirmacion.pdf");
     vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValueOnce(readyAnalysisUpload(file)));
     const user = userEvent.setup();
-    const { container } = render(<App />);
+    const { container } = await renderAuthenticatedApp();
     const { input } = getUploadElements(container);
 
     await user.upload(input, file);
@@ -660,7 +684,7 @@ describe("orientación asistida por IA", () => {
       .mockReturnValueOnce(pendingAnalysis.promise);
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
-    const { container, unmount } = render(<App />);
+    const { container, unmount } = await renderAuthenticatedApp();
     const { input } = getUploadElements(container);
 
     await user.upload(input, file);
@@ -689,7 +713,7 @@ describe("orientación asistida por IA", () => {
       .mockResolvedValueOnce(successfulAnalysis());
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
-    const { container } = render(<App />);
+    const { container } = await renderAuthenticatedApp();
     const { input } = getUploadElements(container);
 
     await user.upload(input, file);
@@ -741,7 +765,7 @@ describe("orientación asistida por IA", () => {
       .mockReturnValueOnce(pendingAnalysis.promise);
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
-    const { container } = render(<App />);
+    const { container } = await renderAuthenticatedApp();
     const { input } = getUploadElements(container);
 
     await user.upload(input, file);
@@ -770,7 +794,7 @@ describe("orientación asistida por IA", () => {
       .mockResolvedValueOnce(successfulAnalysis());
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
-    const { container } = render(<App />);
+    const { container } = await renderAuthenticatedApp();
     const { input } = getUploadElements(container);
 
     await user.upload(input, file);
@@ -806,7 +830,7 @@ describe("orientación asistida por IA", () => {
       }));
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
-    const { container } = render(<App />);
+    const { container } = await renderAuthenticatedApp();
     const { input } = getUploadElements(container);
 
     await user.upload(input, file);
@@ -830,7 +854,7 @@ describe("orientación asistida por IA", () => {
       .mockResolvedValueOnce(createJsonResponse(false, { error: { code: "OPENAI_TIMEOUT", message: rawMessage } }));
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
-    const { container } = render(<App />);
+    const { container } = await renderAuthenticatedApp();
     const { input } = getUploadElements(container);
 
     await user.upload(input, file);
@@ -860,7 +884,7 @@ describe("orientación asistida por IA", () => {
       .mockResolvedValueOnce(createJsonResponse(true, body));
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
-    const { container } = render(<App />);
+    const { container } = await renderAuthenticatedApp();
     const { input } = getUploadElements(container);
 
     await user.upload(input, file);
@@ -883,7 +907,7 @@ describe("orientación asistida por IA", () => {
       .mockReturnValueOnce(pendingAnalysis.promise);
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
-    const { container } = render(<App />);
+    const { container } = await renderAuthenticatedApp();
     const { input } = getUploadElements(container);
 
     await user.upload(input, firstFile);
@@ -923,7 +947,7 @@ describe("descarga local del informe PDF", () => {
     vi.stubGlobal("fetch", fetchMock);
     downloadReportPdfMock.mockResolvedValue("AutoDiagIA_Informe_2026-09-07_10-15.pdf");
     const user = userEvent.setup();
-    const { container } = render(<App />);
+    const { container } = await renderAuthenticatedApp();
     const { input } = getUploadElements(container);
 
     expect(screen.queryByRole("button", { name: "Descargar informe PDF" })).toBeNull();
@@ -957,7 +981,7 @@ describe("descarga local del informe PDF", () => {
     vi.stubGlobal("fetch", fetchMock);
     downloadReportPdfMock.mockReturnValue(pendingDownload.promise);
     const user = userEvent.setup();
-    const { container } = render(<App />);
+    const { container } = await renderAuthenticatedApp();
     const { input } = getUploadElements(container);
 
     await user.upload(input, file);
@@ -991,7 +1015,7 @@ describe("descarga local del informe PDF", () => {
       .mockRejectedValueOnce(new Error("traza-interna-privada"))
       .mockResolvedValueOnce("AutoDiagIA_Informe_2026-09-07_10-15.pdf");
     const user = userEvent.setup();
-    const { container } = render(<App />);
+    const { container } = await renderAuthenticatedApp();
     const { input } = getUploadElements(container);
 
     await user.upload(input, file);
@@ -1031,7 +1055,7 @@ describe("descarga local del informe PDF", () => {
     vi.stubGlobal("fetch", fetchMock);
     downloadReportPdfMock.mockResolvedValue("AutoDiagIA_Informe_2026-09-07_10-15.pdf");
     const user = userEvent.setup();
-    const { container } = render(<App />);
+    const { container } = await renderAuthenticatedApp();
     const { input } = getUploadElements(container);
 
     await user.upload(input, file);
@@ -1063,7 +1087,7 @@ describe("descarga local del informe PDF", () => {
       .mockResolvedValueOnce(successfulAnalysis());
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
-    const { container } = render(<App />);
+    const { container } = await renderAuthenticatedApp();
     const { input } = getUploadElements(container);
 
     await user.upload(input, firstFile);
