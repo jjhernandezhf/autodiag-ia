@@ -2,11 +2,25 @@ import { PDFDocument, StandardFonts, type PDFPage, type PDFFont } from "pdf-lib"
 import request from "supertest";
 import { describe, expect, it, vi } from "vitest";
 
-import { createApp } from "./app.js";
+import { createApp, type AppOptions } from "./app.js";
+import type { AuthenticationService } from "./auth-service.js";
 import { PdfExtractionError } from "./pdf-extractor.js";
 
 const TEST_SECRET = "endpoint-integration-secret-at-least-32-bytes";
 const SYNTHETIC_VIN = "1ABCD23EFGH456789";
+const AUTHORIZATION = "Bearer synthetic-access-token";
+const testAuthenticationService: AuthenticationService = {
+  login: async () => ({ access_token: "synthetic-access-token", refresh_token: "synthetic-refresh-token" }),
+  authenticate: async () => ({ id: "6a103df0-8e4d-4c51-89f5-7030c5443d89", username: "usuario.sintetico" }),
+};
+
+function createTestApp(options: AppOptions) {
+  return createApp({ ...options, authenticationService: testAuthenticationService });
+}
+
+function postUpload(app: ReturnType<typeof createApp>) {
+  return request(app).post("/api/reports/upload").set("Authorization", AUTHORIZATION);
+}
 
 function draw(page: PDFPage, font: PDFFont, text: string, y: number, x = 30) {
   page.drawText(text, { x, y, size: 11, font });
@@ -52,14 +66,13 @@ async function buildTextPdf(text: string | null) {
 }
 
 function appWithRealExtractor() {
-  return createApp({ vinHmacSecret: TEST_SECRET });
+  return createTestApp({ vinHmacSecret: TEST_SECRET });
 }
 
 describe("integración de extracción PDF", () => {
   it("extrae un reporte Autel sintético sin exponer el VIN completo", async () => {
     const pdf = await buildAutelPdf();
-    const response = await request(appWithRealExtractor())
-      .post("/api/reports/upload")
+    const response = await postUpload(appWithRealExtractor())
       .attach("report", pdf, { filename: "autel-sintetico.pdf", contentType: "application/pdf" });
 
     expect(response.status).toBe(201);
@@ -73,8 +86,7 @@ describe("integración de extracción PDF", () => {
   });
 
   it("rechaza un PDF sin texto digital utilizable", async () => {
-    const response = await request(appWithRealExtractor())
-      .post("/api/reports/upload")
+    const response = await postUpload(appWithRealExtractor())
       .attach("report", await buildTextPdf(null), { filename: "sin-texto.pdf", contentType: "application/pdf" });
 
     expect(response.status).toBe(422);
@@ -82,8 +94,7 @@ describe("integración de extracción PDF", () => {
   });
 
   it("rechaza un PDF dañado con un error seguro", async () => {
-    const response = await request(appWithRealExtractor())
-      .post("/api/reports/upload")
+    const response = await postUpload(appWithRealExtractor())
       .attach("report", Buffer.from("%PDF-1.7\ncontenido dañado"), { filename: "danado.pdf", contentType: "application/pdf" });
 
     expect(response.status).toBe(422);
@@ -92,14 +103,13 @@ describe("integración de extracción PDF", () => {
   });
 
   it("rechaza un PDF cifrado mediante el código seguro de la biblioteca", async () => {
-    const app = createApp({
+    const app = createTestApp({
       vinHmacSecret: TEST_SECRET,
       extractPdfPages: async () => {
         throw new PdfExtractionError("PDF_ENCRYPTED");
       },
     });
-    const response = await request(app)
-      .post("/api/reports/upload")
+    const response = await postUpload(app)
       .attach("report", Buffer.from("%PDF-1.7\nsynthetic"), { filename: "cifrado.pdf", contentType: "application/pdf" });
 
     expect(response.status).toBe(422);
@@ -107,8 +117,7 @@ describe("integración de extracción PDF", () => {
   });
 
   it("rechaza un formato no reconocido", async () => {
-    const response = await request(appWithRealExtractor())
-      .post("/api/reports/upload")
+    const response = await postUpload(appWithRealExtractor())
       .attach("report", await buildTextPdf("Documento sintetico de otro formato"), {
         filename: "otro-formato.pdf",
         contentType: "application/pdf",
@@ -119,14 +128,12 @@ describe("integración de extracción PDF", () => {
   });
 
   it("rechaza por exceso de páginas con una respuesta HTTP segura", async () => {
-    const response = await request(
-      createApp({
+    const response = await postUpload(
+      createTestApp({
         vinHmacSecret: TEST_SECRET,
         pdfExtractionLimits: { maxPages: 1 },
       }),
-    )
-      .post("/api/reports/upload")
-      .attach("report", await buildAutelPdf(), {
+    ).attach("report", await buildAutelPdf(), {
         filename: "limite-sintetico.pdf",
         contentType: "application/pdf",
       });
@@ -145,7 +152,7 @@ describe("integración de extracción PDF", () => {
     ["PDF_EXTRACTION_TIMEOUT", "La extracción del PDF excedió el tiempo permitido."],
   ] as const)("no expone contenido sensible en el error %s", async (code, message) => {
     const sensitiveText = "VIN-SYNTHETIC-SHOULD-NOT-APPEAR";
-    const app = createApp({
+    const app = createTestApp({
       vinHmacSecret: TEST_SECRET,
       extractPdfPages: async () => {
         void sensitiveText;
@@ -153,8 +160,7 @@ describe("integración de extracción PDF", () => {
       },
     });
 
-    const response = await request(app)
-      .post("/api/reports/upload")
+    const response = await postUpload(app)
       .attach("report", Buffer.from(`%PDF-1.7\n${sensitiveText}`), {
         filename: "error-seguro.pdf",
         contentType: "application/pdf",
@@ -170,8 +176,7 @@ describe("integración de extracción PDF", () => {
     const pdf = await buildAutelPdf();
 
     try {
-      const response = await request(appWithRealExtractor())
-        .post("/api/reports/upload")
+      const response = await postUpload(appWithRealExtractor())
         .attach("report", pdf, { filename: "privacidad.pdf", contentType: "application/pdf" });
 
       expect(response.status).toBe(201);

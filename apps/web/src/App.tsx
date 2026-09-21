@@ -1,5 +1,11 @@
-import { type ChangeEvent, type DragEvent, type FormEvent, useEffect, useRef, useState } from "react";
+import { type ChangeEvent, type DragEvent, type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import autodiagLogoUrl from "./assets/autodiag-ia-logo.png";
+import {
+  browserAuthenticationService,
+  BrowserAuthenticationError,
+  type AuthIdentity,
+  type BrowserAuthenticationService,
+} from "./auth-service";
 import { buildReportExportModel, downloadReportPdf } from "./report-pdf";
 
 const PDF_MIME_TYPE = "application/pdf";
@@ -604,7 +610,23 @@ function AiAnalysisSection({
   );
 }
 
-export function App() {
+interface ReportWorkspaceProps {
+  authService: BrowserAuthenticationService;
+  identity: AuthIdentity;
+  isLoggingOut: boolean;
+  logoutError: string;
+  onLogout: () => void;
+  onSessionInvalid: () => void;
+}
+
+function ReportWorkspace({
+  authService,
+  identity,
+  isLoggingOut,
+  logoutError,
+  onLogout,
+  onSessionInvalid,
+}: ReportWorkspaceProps) {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [status, setStatus] = useState<UploadStatus>("idle");
   const [message, setMessage] = useState("");
@@ -640,6 +662,21 @@ export function App() {
     pdfGenerationInProgressRef.current = false;
     activePdfGenerationRef.current = null;
   }, []);
+
+  function invalidateActiveSession() {
+    uploadSequenceRef.current += 1;
+    analysisSequenceRef.current += 1;
+    pdfSequenceRef.current += 1;
+    activeUploadRef.current?.controller.abort();
+    activeAnalysisRef.current?.controller.abort();
+    activeUploadRef.current = null;
+    activeAnalysisRef.current = null;
+    activePdfGenerationRef.current = null;
+    uploadInProgressRef.current = false;
+    analysisInProgressRef.current = false;
+    pdfGenerationInProgressRef.current = false;
+    onSessionInvalid();
+  }
 
   function resetPdfGeneration() {
     pdfSequenceRef.current += 1;
@@ -757,11 +794,15 @@ export function App() {
     formData.append("report", fileBeingUploaded);
 
     try {
-      const response = await fetch("/api/reports/upload", {
+      const response = await authService.authenticatedFetch("/api/reports/upload", {
         method: "POST",
         body: formData,
         signal: controller.signal,
       });
+      if (response.status === 401) {
+        invalidateActiveSession();
+        return;
+      }
       let body: UploadResponse | ErrorResponse;
 
       try {
@@ -784,6 +825,10 @@ export function App() {
       setMessage("Reporte recibido correctamente.");
     } catch (error) {
       if (!isActiveUpload()) return;
+      if (error instanceof BrowserAuthenticationError && error.code === "AUTH_SESSION_INVALID") {
+        invalidateActiveSession();
+        return;
+      }
 
       setStatus("error");
       setMessage(
@@ -847,12 +892,16 @@ export function App() {
     setAnalysisState({ status: "analyzing" });
 
     try {
-      const response = await fetch("/api/reports/analyze", {
+      const response = await authService.authenticatedFetch("/api/reports/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(requestInput),
         signal: controller.signal,
       });
+      if (response.status === 401) {
+        invalidateActiveSession();
+        return;
+      }
 
       let body: unknown;
       try {
@@ -904,6 +953,10 @@ export function App() {
     } catch (error) {
       if (!isActiveAnalysis()) return;
       if (error instanceof DOMException && error.name === "AbortError") return;
+      if (error instanceof BrowserAuthenticationError && error.code === "AUTH_SESSION_INVALID") {
+        invalidateActiveSession();
+        return;
+      }
       setAnalysisState({
         status: "error",
         message: error instanceof TypeError
@@ -1036,7 +1089,22 @@ export function App() {
     <main className="app-shell">
       <header className="brand">
         <img ref={logoRef} className="brand-logo" src={autodiagLogoUrl} alt="AutoDiag IA" width="2172" height="724" />
+        <div className="session-controls">
+          <span className="session-username">{identity.username}</span>
+          <button
+            className="logout-button"
+            type="button"
+            aria-label="Cerrar sesión"
+            title="Cerrar sesión"
+            onClick={onLogout}
+            disabled={isLoggingOut}
+          >
+            {isLoggingOut ? "Cerrando sesión…" : "Cerrar sesión"}
+          </button>
+        </div>
       </header>
+
+      {logoutError && <div className="logout-error" role="alert">{logoutError}</div>}
 
       <section className="upload-card" aria-labelledby="upload-title">
         <div className="intro">
@@ -1194,5 +1262,342 @@ export function App() {
 
       <footer>AutoDiag IA · Recepción segura de reportes</footer>
     </main>
+  );
+}
+
+interface LoginScreenProps {
+  authService: BrowserAuthenticationService;
+  configurationUnavailable: boolean;
+  initialMessage: string;
+  onAuthenticated: (identity: AuthIdentity) => void;
+  onLoginActivity: (active: boolean) => void;
+}
+
+function LoginScreen({
+  authService,
+  configurationUnavailable,
+  initialMessage,
+  onAuthenticated,
+  onLoginActivity,
+}: LoginScreenProps) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [errorMessage, setErrorMessage] = useState(initialMessage);
+  const submittingRef = useRef(false);
+  const activeControllerRef = useRef<AbortController | null>(null);
+  const errorRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (errorMessage) errorRef.current?.focus();
+  }, [errorMessage]);
+
+  useEffect(() => () => {
+    activeControllerRef.current?.abort();
+    activeControllerRef.current = null;
+    submittingRef.current = false;
+    onLoginActivity(false);
+  }, [onLoginActivity]);
+
+  async function handleLogin(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (submittingRef.current || configurationUnavailable) return;
+
+    submittingRef.current = true;
+    setIsSubmitting(true);
+    setErrorMessage("");
+    onLoginActivity(true);
+    const controller = new AbortController();
+    activeControllerRef.current = controller;
+
+    try {
+      const identity = await authService.login(username, password, controller.signal);
+      if (activeControllerRef.current !== controller) return;
+      onAuthenticated(identity);
+    } catch (error) {
+      if (activeControllerRef.current !== controller) return;
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      setPassword("");
+      setErrorMessage(
+        error instanceof BrowserAuthenticationError
+          ? error.message
+          : "No fue posible iniciar sesión. Intenta nuevamente.",
+      );
+    } finally {
+      if (activeControllerRef.current === controller) {
+        activeControllerRef.current = null;
+        submittingRef.current = false;
+        setIsSubmitting(false);
+        onLoginActivity(false);
+      }
+    }
+  }
+
+  return (
+    <main className="auth-shell">
+      <section className="login-card" aria-labelledby="login-title">
+        <img className="login-logo" src={autodiagLogoUrl} alt="AutoDiag IA" width="2172" height="724" />
+        <div className="login-heading">
+          <span className="eyebrow">ACCESO PRIVADO</span>
+          <h1 id="login-title">Bienvenido a AutoDiag IA</h1>
+          <p>Inicia sesión para analizar reportes de diagnóstico de forma segura.</p>
+        </div>
+
+        {errorMessage && (
+          <div ref={errorRef} className="login-error" role="alert" aria-live="assertive" tabIndex={-1}>
+            {errorMessage}
+          </div>
+        )}
+
+        <form className="login-form" onSubmit={handleLogin}>
+          <label htmlFor="login-username">Usuario</label>
+          <input
+            id="login-username"
+            name="username"
+            type="text"
+            autoComplete="username"
+            value={username}
+            placeholder="Ej. usuario.apellido"
+            disabled={isSubmitting || configurationUnavailable}
+            required
+            onChange={(event) => setUsername(event.currentTarget.value)}
+          />
+
+          <label htmlFor="login-password">Contraseña</label>
+          <div className="password-field">
+            <input
+              id="login-password"
+              name="password"
+              type={showPassword ? "text" : "password"}
+              autoComplete="current-password"
+              value={password}
+              placeholder="Ingresa tu contraseña"
+              disabled={isSubmitting || configurationUnavailable}
+              required
+              onChange={(event) => setPassword(event.currentTarget.value)}
+            />
+            <button
+              type="button"
+              className="password-toggle"
+              aria-label={showPassword ? "Ocultar contraseña" : "Mostrar contraseña"}
+              aria-pressed={showPassword}
+              disabled={isSubmitting || configurationUnavailable}
+              onClick={() => setShowPassword((visible) => !visible)}
+            >
+              {showPassword ? "Ocultar" : "Mostrar"}
+            </button>
+          </div>
+
+          <button className="login-button" type="submit" disabled={isSubmitting || configurationUnavailable}>
+            {isSubmitting ? "Iniciando sesión..." : "Iniciar sesión"}
+          </button>
+        </form>
+      </section>
+    </main>
+  );
+}
+
+type AuthViewState =
+  | { status: "checking" }
+  | { status: "unauthenticated"; message: string; configurationUnavailable: boolean }
+  | { status: "authenticated"; identity: AuthIdentity };
+
+interface AppProps {
+  authService?: BrowserAuthenticationService;
+}
+
+export function App({ authService = browserAuthenticationService }: AppProps) {
+  const [authState, setAuthState] = useState<AuthViewState>({ status: "checking" });
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const [logoutError, setLogoutError] = useState("");
+  const identityRef = useRef<AuthIdentity | null>(null);
+  const loginInProgressRef = useRef(false);
+  const authValidationSequenceRef = useRef(0);
+  const authValidationControllerRef = useRef<AbortController | null>(null);
+  const invalidationInProgressRef = useRef(false);
+
+  const invalidateAuthenticationValidation = useCallback(() => {
+    authValidationSequenceRef.current += 1;
+    const controller = authValidationControllerRef.current;
+    authValidationControllerRef.current = null;
+    controller?.abort();
+    return authValidationSequenceRef.current;
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+
+    const showUnauthenticated = (message = "", configurationUnavailable = false) => {
+      if (!mounted) return;
+      identityRef.current = null;
+      setAuthState({ status: "unauthenticated", message, configurationUnavailable });
+    };
+
+    const applyIdentity = (identity: AuthIdentity) => {
+      if (!mounted) return;
+      identityRef.current = identity;
+      setLogoutError("");
+      setAuthState({ status: "authenticated", identity });
+    };
+
+    const handleAuthenticationError = (error: unknown) => {
+      if (!mounted || (error instanceof DOMException && error.name === "AbortError")) return;
+      invalidateAuthenticationValidation();
+      if (error instanceof BrowserAuthenticationError) {
+        if (error.code === "AUTH_SESSION_INVALID") {
+          void authService.signOutLocal().catch(() => undefined);
+          showUnauthenticated(error.message);
+          return;
+        }
+        showUnauthenticated(error.message, error.code === "AUTH_CONFIGURATION_UNAVAILABLE");
+        return;
+      }
+      showUnauthenticated("No fue posible validar la sesión. Intenta nuevamente.");
+    };
+
+    const validateCurrentSession = () => {
+      const validationId = invalidateAuthenticationValidation();
+      const controller = new AbortController();
+      authValidationControllerRef.current = controller;
+      void authService.validateCurrentSession(controller.signal).then((identity) => {
+        if (!mounted || validationId !== authValidationSequenceRef.current) return;
+        if (identity) applyIdentity(identity);
+        else {
+          invalidateAuthenticationValidation();
+          showUnauthenticated();
+        }
+      }).catch((error: unknown) => {
+        if (!mounted || validationId !== authValidationSequenceRef.current) return;
+        handleAuthenticationError(error);
+      }).finally(() => {
+        if (validationId === authValidationSequenceRef.current && authValidationControllerRef.current === controller) {
+          authValidationControllerRef.current = null;
+        }
+      });
+    };
+
+    let unsubscribe: () => void = () => undefined;
+    let subscriptionReady = true;
+    try {
+      unsubscribe = authService.subscribe((event) => {
+        if (event === "INITIAL_SESSION" || event === "PASSWORD_RECOVERY") return;
+        if (event === "SIGNED_OUT") {
+          invalidateAuthenticationValidation();
+          showUnauthenticated();
+          return;
+        }
+        if (event === "SIGNED_IN" && loginInProgressRef.current) return;
+        validateCurrentSession();
+      });
+    } catch (error) {
+      subscriptionReady = false;
+      handleAuthenticationError(error);
+    }
+
+    if (subscriptionReady) {
+      const initializationId = invalidateAuthenticationValidation();
+      const initialController = new AbortController();
+      authValidationControllerRef.current = initialController;
+      void authService.initialize(initialController.signal).then((identity) => {
+        if (!mounted || initializationId !== authValidationSequenceRef.current) return;
+        if (identity) applyIdentity(identity);
+        else {
+          invalidateAuthenticationValidation();
+          showUnauthenticated();
+        }
+      }).catch((error: unknown) => {
+        if (!mounted || initializationId !== authValidationSequenceRef.current) return;
+        handleAuthenticationError(error);
+      }).finally(() => {
+        if (
+          initializationId === authValidationSequenceRef.current &&
+          authValidationControllerRef.current === initialController
+        ) {
+          authValidationControllerRef.current = null;
+        }
+      });
+    }
+
+    return () => {
+      mounted = false;
+      invalidateAuthenticationValidation();
+      unsubscribe();
+    };
+  }, [authService, invalidateAuthenticationValidation]);
+
+  function handleAuthenticated(identity: AuthIdentity) {
+    invalidateAuthenticationValidation();
+    identityRef.current = identity;
+    setLogoutError("");
+    setAuthState({ status: "authenticated", identity });
+  }
+
+  function handleInvalidSession() {
+    if (invalidationInProgressRef.current) return;
+    invalidationInProgressRef.current = true;
+    invalidateAuthenticationValidation();
+    identityRef.current = null;
+    setAuthState({
+      status: "unauthenticated",
+      message: "Tu sesión ya no es válida. Inicia sesión nuevamente.",
+      configurationUnavailable: false,
+    });
+    void authService.signOutLocal().catch(() => undefined).finally(() => {
+      invalidationInProgressRef.current = false;
+    });
+  }
+
+  async function handleLogout() {
+    if (isLoggingOut) return;
+    setIsLoggingOut(true);
+    setLogoutError("");
+    try {
+      await authService.signOutLocal();
+      invalidateAuthenticationValidation();
+      identityRef.current = null;
+      setAuthState({ status: "unauthenticated", message: "", configurationUnavailable: false });
+    } catch {
+      setLogoutError("No fue posible cerrar la sesión. Intenta nuevamente.");
+    } finally {
+      setIsLoggingOut(false);
+    }
+  }
+
+  if (authState.status === "checking") {
+    return (
+      <main className="auth-shell">
+        <section className="login-card auth-checking" role="status" aria-live="polite">
+          <img className="login-logo" src={autodiagLogoUrl} alt="AutoDiag IA" width="2172" height="724" />
+          <span className="analysis-spinner" aria-hidden="true" />
+          <p>Verificando sesión segura…</p>
+        </section>
+      </main>
+    );
+  }
+
+  if (authState.status === "unauthenticated") {
+    return (
+      <LoginScreen
+        key={`${authState.configurationUnavailable}:${authState.message}`}
+        authService={authService}
+        configurationUnavailable={authState.configurationUnavailable}
+        initialMessage={authState.message}
+        onAuthenticated={handleAuthenticated}
+        onLoginActivity={(active) => { loginInProgressRef.current = active; }}
+      />
+    );
+  }
+
+  return (
+    <ReportWorkspace
+      key={authState.identity.id}
+      authService={authService}
+      identity={authState.identity}
+      isLoggingOut={isLoggingOut}
+      logoutError={logoutError}
+      onLogout={() => void handleLogout()}
+      onSessionInvalid={handleInvalidSession}
+    />
   );
 }

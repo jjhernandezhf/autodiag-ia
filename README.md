@@ -49,7 +49,7 @@ La aplicación web se sirve en `http://localhost:5173` y la API en `http://local
 
 ## Carga y extracción
 
-`POST /api/reports/upload` recibe `multipart/form-data` con un único archivo en el campo `report`.
+`POST /api/reports/upload` recibe `multipart/form-data` con un único archivo en el campo `report`. Es un endpoint privado y requiere `Authorization: Bearer <Supabase access token>`.
 
 La API valida:
 
@@ -74,7 +74,7 @@ La extracción también aplica estos límites conservadores, configurables media
 
 El número de páginas se comprueba antes de recorrer el documento. Los elementos y caracteres se contabilizan incrementalmente antes de conservar cada fragmento. PDF.js se ejecuta en un `worker_threads.Worker` con límite de memoria; al vencer el plazo, la API termina el Worker y espera su cierre, por lo que el trabajo subyacente no continúa en segundo plano.
 
-El PDF y el texto extraído existen únicamente en memoria durante la solicitud. No se guardan en disco, base de datos ni servicios externos. Tampoco se usa OCR, OpenAI, RAG, Supabase, n8n o almacenamiento permanente.
+El PDF y el texto extraído existen únicamente en memoria durante la solicitud. No se guardan en disco, base de datos ni servicios externos. Tampoco se usa OCR, RAG, n8n o almacenamiento permanente. Supabase se utiliza exclusivamente para autenticar y autorizar la solicitud; no recibe el PDF ni su extracción.
 
 La extracción utiliza `pdfjs-dist` 5.4.624. Esta versión requiere Node `>=20.16.0 || >=22.3.0`, compatible con todo el rango declarado por el proyecto.
 
@@ -168,7 +168,7 @@ Los mensajes no incluyen texto del reporte, VIN, datos del cliente, rutas locale
 
 ## Orientación diagnóstica con OpenAI
 
-`POST /api/reports/analyze` es una operación separada de la carga y extracción. Recibe JSON estructurado y admite observaciones técnicas opcionales del vehículo. No acepta PDF, VIN, odómetro, nombres de archivo, hashes ni identificadores del reporte.
+`POST /api/reports/analyze` es una operación privada separada de la carga y extracción. Requiere `Authorization: Bearer <Supabase access token>`, recibe JSON estructurado y admite observaciones técnicas opcionales del vehículo. No acepta PDF, VIN, odómetro, nombres de archivo, hashes ni identificadores del reporte.
 
 Entrada resumida:
 
@@ -282,7 +282,8 @@ $body = @{
   observations = "Vibración intermitente al acelerar."
 } | ConvertTo-Json -Depth 6
 
-Invoke-RestMethod -Method Post -Uri "http://localhost:3000/api/reports/analyze" -ContentType "application/json" -Body $body
+$headers = @{ Authorization = "Bearer token-de-sesion-local" }
+Invoke-RestMethod -Method Post -Uri "http://localhost:3000/api/reports/analyze" -Headers $headers -ContentType "application/json" -Body $body
 ```
 
 No pegues claves en solicitudes, archivos versionados, logs ni conversaciones.
@@ -299,21 +300,44 @@ Nunca se contempla almacenar VIN original, protegido o seudonimizado; odómetro;
 
 Todas las tablas del historial tienen RLS habilitado, no incluyen políticas públicas para `anon` o `authenticated` y reservan sus privilegios al rol de servicio del backend. Esas credenciales deben permanecer exclusivamente en el servidor. La ejecución de las migraciones contra un proyecto y las escrituras reales continúan pendientes.
 
-## Fundamentos de Supabase Auth (FASE 3.3A)
+## Login privado y Supabase Auth (FASE 3.3B)
 
-Supabase Auth está preparado, **no activado**: no hay login, sesiones iniciadas, middleware ni historial conectado. AutoDiag IA será privado, con usuarios y perfiles previamente autorizados mediante un proceso administrativo controlado; no hay registro público desde la aplicación. En esta fase se realizaron cero conexiones reales a Supabase y cero llamadas reales a OpenAI.
+AutoDiag IA es un sistema privado sin registro público. El usuario inicia sesión con `nombre_usuario` y contraseña mediante `POST /api/auth/login`. El backend normaliza el username, consulta un perfil existente y activo en `public.profiles`, obtiene internamente el correo del usuario de Supabase Auth y delega la comprobación de contraseña a `auth.signInWithPassword`. AutoDiag IA nunca almacena, compara ni devuelve contraseñas o correos.
 
-Se utiliza el SDK oficial `@supabase/supabase-js` fijado en `2.109.0` en ambos workspaces para conservar compatibilidad con todo el rango Node declarado (incluido Node 20); versiones posteriores requieren Node 22. La configuración Supabase se valida únicamente al solicitar un cliente. Importar los módulos o ejecutar el flujo actual no requiere credenciales Supabase, no inicializa clientes y no realiza operaciones externas.
+El login devuelve exclusivamente los tokens de sesión requeridos por el SDK. El frontend los entrega a `supabase.auth.setSession`; no los copia manualmente a `localStorage`, cookies propias ni estado global. `getSupabaseBrowserClient()` conserva una instancia por pestaña y configura `window.sessionStorage`, persistencia y renovación automática. Al recargar, la interfaz recupera la sesión con `getSession()` y exige además una validación protegida mediante `GET /api/auth/me` antes de mostrar datos diagnósticos.
 
-- Frontend: `apps/web/.env.example` prepara exclusivamente `VITE_SUPABASE_URL` y `VITE_SUPABASE_PUBLISHABLE_KEY`. `getSupabaseBrowserClient()` conserva una instancia por pestaña con persistencia, renovación y detección de sesión en URL preparadas; el almacenamiento es `window.sessionStorage`, nunca `localStorage` ni JWT guardados manualmente. El flujo implícito frente a PKCE se decidirá en la fase de recuperación de contraseña.
-- Backend: `.env.example` raíz prepara `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY` y `SUPABASE_SECRET_KEY`. `getSupabaseAdminClient()` es diferido y administrativo; `createSupabasePublicClient()` crea una instancia pública aislada por futuro intento. Ambos desactivan persistencia, renovación y detección de sesión en URL. Ninguno se importa en el arranque o endpoints actuales.
-- Los contratos aceptan claves modernas según su responsabilidad (`sb_publishable_` o `sb_secret_`), no claves JWT heredadas. Las URLs deben usar HTTPS; HTTP solo se admite para loopback local. Los errores son fijos y no reflejan valores ni errores internos del SDK. La clave secreta omite RLS: debe mantenerse exclusivamente en servidor y **nunca** utilizarse en Vite, un prefijo `VITE_*` o un bundle público.
+El navegador observa `INITIAL_SESSION`, `SIGNED_IN`, `SIGNED_OUT` y `TOKEN_REFRESHED`. Un cambio de UUID, un cierre de sesión o una sesión rechazada desmontan el área diagnóstica, cancelan upload/análisis pendientes y eliminan archivo, extracción, observaciones, orientación y estado PDF de memoria. Una renovación del mismo UUID conserva el trabajo. El cierre usa `signOut({ scope: "local" })`, por lo que no termina otras sesiones del usuario.
 
-La migración local `20260917000100_create_profiles.sql` define `profiles.id -> auth.users.id` como relación uno a uno con eliminación en cascada. Incluye únicamente usuario, actividad y timestamps: `username` debe guardarse en minúsculas, sin espacios, con 3–64 caracteres ASCII y separadores controlados (`usuario.apellido`); un índice único sobre minúsculas evita duplicados. No duplica correo ni almacena contraseñas o tokens. El trigger solo mantiene `updated_at`, sin crear usuarios ni perfiles automáticamente.
+### Endpoints de autenticación
 
-RLS y permisos revocan acceso de `PUBLIC` y `anon`; `authenticated` solo puede leer su propio perfil mediante `auth.uid() = id`, nunca crearlo, modificarlo o eliminarlo. La administración queda reservada al backend. No se modificó la migración del historial ni se aplicó ninguna migración. Las pruebas de migración son estáticas; comprobar permisos en PostgreSQL y configurar el proyecto privado sin registro público quedan pendientes antes de activar Auth.
+- `GET /health`: público.
+- `POST /api/auth/login`: público; body estricto `{ "nombre_usuario": "usuario.apellido", "password": "..." }`.
+- `GET /api/auth/me`: protegido; devuelve únicamente `{ "id": "uuid", "username": "usuario.apellido" }`.
+- `POST /api/reports/upload`: protegido con Bearer.
+- `POST /api/reports/analyze`: protegido con Bearer.
 
-Los `.env.example` contienen solamente nombres y valores vacíos, no son configuración ejecutable: omite variables opcionales para utilizar los valores predeterminados documentados. Los `.env` reales permanecen ignorados por Git. No copies credenciales del servidor al frontend. La próxima FASE 3.3B implementará login, sesión y middleware de autenticación; recuperación y OAuth quedan para fases posteriores.
+El backend valida cada access token con `supabase.auth.getUser(token)`; no confía en un JWT decodificado, `getSession()` del servidor ni datos enviados por el navegador. Después exige que el perfil asociado exista y tenga `is_active = true`. La identidad añadida a la solicitud contiene exclusivamente UUID y username.
+
+El login limita por IP diez intentos fallidos en una ventana de 15 minutos, utiliza headers estándar y no penaliza permanentemente respuestas exitosas. El almacén en memoria es suficiente para el prototipo local; un despliegue distribuido requerirá un almacén compartido. Credenciales inválidas, usuario inexistente y perfil inactivo producen el mismo mensaje genérico.
+
+### Configuración
+
+El backend utiliza las variables vacías documentadas en `.env.example`:
+
+- `SUPABASE_URL`
+- `SUPABASE_PUBLISHABLE_KEY`
+- `SUPABASE_SECRET_KEY`
+
+El frontend utiliza exclusivamente las variables públicas vacías de `apps/web/.env.example`:
+
+- `VITE_SUPABASE_URL`
+- `VITE_SUPABASE_PUBLISHABLE_KEY`
+
+La clave `SUPABASE_SECRET_KEY` permanece exclusivamente en el servidor y nunca debe usar prefijo `VITE_*`. Sin configuración pública válida, la aplicación muestra un error controlado y no permite acceder al área protegida. Los `.env` reales siguen ignorados por Git.
+
+La migración local `20260917000100_create_profiles.sql` define `profiles.id -> auth.users.id`, username normalizado y `is_active`. No crea usuarios automáticamente y todavía no se ha aplicado contra un proyecto real. Las pruebas de esta fase usan únicamente clientes simulados: no realizan conexiones reales a Supabase ni llamadas reales a OpenAI.
+
+La activación real del proyecto, aprovisionamiento administrativo de usuarios y comprobación de RLS quedan para la siguiente fase. Google OAuth, recuperación/restablecimiento de contraseña y Auth Hooks continúan pendientes.
 
 ## Verificación
 
