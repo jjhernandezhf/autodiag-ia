@@ -297,7 +297,23 @@ Solo se contempla persistir marca, modelo, año, módulos, todas las filas DTC y
 
 Nunca se contempla almacenar VIN original, protegido o seudonimizado; odómetro; motor; observaciones libres del vehículo ni su correlación; PDF o texto completo extraído; contenido binario; nombre, hash o identificador del archivo; datos del cliente; claves o tokens; prompts; identificadores del proveedor; métricas ni respuestas crudas de OpenAI.
 
-Todas las tablas tienen RLS habilitado, no incluyen políticas públicas para `anon` o `authenticated` y reservan sus privilegios al rol de servicio del backend. Esas credenciales deberán permanecer exclusivamente en el servidor. La configuración del cliente, la ejecución de la migración contra un proyecto y las escrituras reales quedan pendientes para la FASE 3.2.
+Todas las tablas del historial tienen RLS habilitado, no incluyen políticas públicas para `anon` o `authenticated` y reservan sus privilegios al rol de servicio del backend. Esas credenciales deben permanecer exclusivamente en el servidor. La ejecución de las migraciones contra un proyecto y las escrituras reales continúan pendientes.
+
+## Fundamentos de Supabase Auth (FASE 3.3A)
+
+Supabase Auth está preparado, **no activado**: no hay login, sesiones iniciadas, middleware ni historial conectado. AutoDiag IA será privado, con usuarios y perfiles previamente autorizados mediante un proceso administrativo controlado; no hay registro público desde la aplicación. En esta fase se realizaron cero conexiones reales a Supabase y cero llamadas reales a OpenAI.
+
+Se utiliza el SDK oficial `@supabase/supabase-js` fijado en `2.109.0` en ambos workspaces para conservar compatibilidad con todo el rango Node declarado (incluido Node 20); versiones posteriores requieren Node 22. La configuración Supabase se valida únicamente al solicitar un cliente. Importar los módulos o ejecutar el flujo actual no requiere credenciales Supabase, no inicializa clientes y no realiza operaciones externas.
+
+- Frontend: `apps/web/.env.example` prepara exclusivamente `VITE_SUPABASE_URL` y `VITE_SUPABASE_PUBLISHABLE_KEY`. `getSupabaseBrowserClient()` conserva una instancia por pestaña con persistencia, renovación y detección de sesión en URL preparadas; el almacenamiento es `window.sessionStorage`, nunca `localStorage` ni JWT guardados manualmente. El flujo implícito frente a PKCE se decidirá en la fase de recuperación de contraseña.
+- Backend: `.env.example` raíz prepara `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY` y `SUPABASE_SECRET_KEY`. `getSupabaseAdminClient()` es diferido y administrativo; `createSupabasePublicClient()` crea una instancia pública aislada por futuro intento. Ambos desactivan persistencia, renovación y detección de sesión en URL. Ninguno se importa en el arranque o endpoints actuales.
+- Los contratos aceptan claves modernas según su responsabilidad (`sb_publishable_` o `sb_secret_`), no claves JWT heredadas. Las URLs deben usar HTTPS; HTTP solo se admite para loopback local. Los errores son fijos y no reflejan valores ni errores internos del SDK. La clave secreta omite RLS: debe mantenerse exclusivamente en servidor y **nunca** utilizarse en Vite, un prefijo `VITE_*` o un bundle público.
+
+La migración local `20260917000100_create_profiles.sql` define `profiles.id -> auth.users.id` como relación uno a uno con eliminación en cascada. Incluye únicamente usuario, actividad y timestamps: `username` debe guardarse en minúsculas, sin espacios, con 3–64 caracteres ASCII y separadores controlados (`usuario.apellido`); un índice único sobre minúsculas evita duplicados. No duplica correo ni almacena contraseñas o tokens. El trigger solo mantiene `updated_at`, sin crear usuarios ni perfiles automáticamente.
+
+RLS y permisos revocan acceso de `PUBLIC` y `anon`; `authenticated` solo puede leer su propio perfil mediante `auth.uid() = id`, nunca crearlo, modificarlo o eliminarlo. La administración queda reservada al backend. No se modificó la migración del historial ni se aplicó ninguna migración. Las pruebas de migración son estáticas; comprobar permisos en PostgreSQL y configurar el proyecto privado sin registro público quedan pendientes antes de activar Auth.
+
+Los `.env.example` contienen solamente nombres y valores vacíos, no son configuración ejecutable: omite variables opcionales para utilizar los valores predeterminados documentados. Los `.env` reales permanecen ignorados por Git. No copies credenciales del servidor al frontend. La próxima FASE 3.3B implementará login, sesión y middleware de autenticación; recuperación y OAuth quedan para fases posteriores.
 
 ## Verificación
 
