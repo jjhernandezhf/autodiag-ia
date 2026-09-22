@@ -79,7 +79,17 @@ describe("POST /api/reports/analyze", () => {
       .send(validInput);
 
     expect(response.status).toBe(200);
-    expect(response.body).toEqual({ status: "completed", analysis: validOutput });
+    expect(response.body).toEqual({
+      status: "completed",
+      analysis: validOutput,
+      rag: {
+        enabled: false,
+        used: false,
+        status: "disabled",
+        querySummary: "La recuperación de conocimiento está desactivada.",
+        sources: [],
+      },
+    });
   });
 
   it.each([

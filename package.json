@@ -8,6 +8,7 @@
   ],
   "scripts": {
     "dev": "concurrently --kill-others --names web,api --prefix-colors cyan,magenta \"npm run dev --workspace @autodiag/web\" \"npm run dev --workspace @autodiag/api\"",
+    "rag:ingest": "npm run rag:ingest --workspace @autodiag/api --",
     "build": "npm run build --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present"

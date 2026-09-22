@@ -23,6 +23,12 @@ import {
   createAuthenticationService,
   type AuthenticationService,
 } from "./auth-service.js";
+import {
+  DISABLED_RAG_RESULT,
+  NOT_CONFIGURED_RAG_RESULT,
+  unavailableRagResult,
+  type RagRetrievalService,
+} from "./rag-service.js";
 
 const PDF_MIME_TYPE = "application/pdf";
 const PDF_SIGNATURE = Buffer.from("%PDF-");
@@ -74,6 +80,8 @@ export interface AppOptions {
   openAiModel?: string;
   openAiTimeoutMs?: number;
   analysisService?: DiagnosticAnalysisService;
+  ragEnabled?: boolean;
+  ragService?: Pick<RagRetrievalService, "retrieve">;
   authenticationService?: AuthenticationService;
 }
 
@@ -254,8 +262,17 @@ export function createApp(options: AppOptions) {
       );
     }
 
-    const analysis = await analysisService.analyze(input);
-    response.json({ status: "completed", analysis });
+    let ragResult = options.ragEnabled ? NOT_CONFIGURED_RAG_RESULT : DISABLED_RAG_RESULT;
+    if (options.ragEnabled && options.ragService) {
+      try {
+        ragResult = await options.ragService.retrieve(input);
+      } catch {
+        ragResult = unavailableRagResult();
+      }
+    }
+
+    const analysis = await analysisService.analyze(input, ragResult.evidence);
+    response.json({ status: "completed", analysis, rag: ragResult.metadata });
   });
 
   app.use((error: unknown, request: Request, response: Response, _next: NextFunction) => {

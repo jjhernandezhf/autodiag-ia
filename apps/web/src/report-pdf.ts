@@ -3,6 +3,7 @@ import { jsPDF } from "jspdf";
 export type ReportPriority = "critical" | "high" | "medium" | "low";
 export type ReportConfidence = "high" | "medium" | "low";
 export type ReportCorrelationStatus = "not_provided" | "no_clear_match" | "matches_found";
+export type ReportRagStatus = "used" | "disabled" | "not_configured" | "no_matches" | "unavailable";
 
 export interface ReportDtcReference {
   code: string;
@@ -51,6 +52,20 @@ export interface ReportExportSource {
     confidence: ReportConfidence;
     requiresTechnicianConfirmation: true;
   };
+  rag: {
+    enabled: boolean;
+    used: boolean;
+    status: ReportRagStatus;
+    querySummary: string;
+    sources: Array<{
+      id: string;
+      title: string;
+      label: string;
+      url?: string;
+      similarity: number;
+      excerpt: string;
+    }>;
+  };
   submittedObservations: string;
 }
 
@@ -98,6 +113,20 @@ export interface ReportExportModel {
       confidence: ReportConfidence;
     }>;
   };
+  rag: {
+    enabled: boolean;
+    used: boolean;
+    status: ReportRagStatus;
+    querySummary: string;
+    sources: Array<{
+      id: string;
+      title: string;
+      label: string;
+      url: string | null;
+      similarity: number;
+      excerpt: string;
+    }>;
+  };
 }
 
 export class ReportPdfValidationError extends Error {
@@ -114,17 +143,24 @@ const CORRELATION_STATUSES = new Set<ReportCorrelationStatus>([
   "no_clear_match",
   "matches_found",
 ]);
+const RAG_STATUSES = new Set<ReportRagStatus>(["used", "disabled", "not_configured", "no_matches", "unavailable"]);
+export type ReportSensitiveTextContext = "free_text" | "structured_identifier" | "source_text" | "url";
 const SENSITIVE_PATTERNS = [
   /\b[A-HJ-NPR-Z0-9]{17}\b/iu,
   /\b[A-F0-9]{64}\b/iu,
   /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/iu,
   /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/u,
-  /\bsk-[A-Za-z0-9_-]{12,}\b/u,
-  /(?:api[_ -]?key|secret|token|password|contraseña|clave)\s*[:=]\s*\S+/iu,
+  /\bsk-(?:proj-)?[A-Za-z0-9_-]{12,}\b/u,
+  new RegExp(String.raw`\bsb_` + String.raw`secret_[A-Za-z0-9_-]{12,}\b`, "u"),
+  /(?:api[_ -]?key|secret|token|password|authorization|contraseña|clave)\s*[:=]\s*\S+/iu,
   /\b[A-Za-z]:\\[^\r\n]+/u,
-  /\b[^\s/\\]+\.pdf\b/iu,
-  /(?:\+\d{1,3}[\s.-]?)?(?:\(?\d{2,4}\)?[\s.-]){2,}\d{3,4}\b/u,
 ];
+const PDF_FILENAME_PATTERN = /\b[^\s/\\?#]+\.pdf\b/iu;
+const SENSITIVE_URL_PARAMETER_PATTERN = /^(?:api[_ -]?key|token|access[_ -]?token|secret|password|authorization|contraseña|clave)$/iu;
+const PHONE_CANDIDATE_PATTERN = /\+?\d(?:[\s().-]*\d){7,14}/gu;
+const ISO_DATE_PATTERN = /\b\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])\b/gu;
+const TECHNICAL_IDENTIFIER_PATTERN = /\b(?:ECU|PCM|TCM|BCM|ECM|ABS|SRS|PID|CAN)-\d{8,15}\b/giu;
+const DISTANCE_MEASUREMENT_PATTERN = /\b\d{1,15}\s*(?:km|mi)\b/giu;
 
 const NOT_PROVIDED_MESSAGE =
   "No se proporcionaron observaciones adicionales. El análisis se realizó únicamente con los DTC extraídos del reporte.";
@@ -138,8 +174,52 @@ function cloneReference(value: ReportDtcReference): ReportDtcReference {
   return { code: value.code, moduleCode: value.moduleCode, moduleName: value.moduleName };
 }
 
+function withoutAllowedNumericTechnicalText(value: string, context: ReportSensitiveTextContext) {
+  if (context === "url") return value;
+  return value
+    .replace(ISO_DATE_PATTERN, " ")
+    .replace(TECHNICAL_IDENTIFIER_PATTERN, " ")
+    .replace(DISTANCE_MEASUREMENT_PATTERN, " ");
+}
+
+function containsPhoneCandidate(value: string) {
+  PHONE_CANDIDATE_PATTERN.lastIndex = 0;
+  for (const match of value.matchAll(PHONE_CANDIDATE_PATTERN)) {
+    const digits = match[0].replace(/\D/gu, "");
+    if (digits.length >= 8 && digits.length <= 15) return true;
+  }
+  return false;
+}
+
+export function containsSensitiveReportText(value: string, context: ReportSensitiveTextContext = "free_text") {
+  return SENSITIVE_PATTERNS.some((pattern) => pattern.test(value))
+    || (context !== "url" && PDF_FILENAME_PATTERN.test(value))
+    || (context !== "url" && containsPhoneCandidate(withoutAllowedNumericTechnicalText(value, context)));
+}
+
+export function isSafeRagSourceUrl(value: string) {
+  if (value.length > 2_048) return false;
+  try {
+    const parsed = new URL(value);
+    if (
+      parsed.protocol !== "https:" || parsed.username || parsed.password ||
+      containsSensitiveReportText(parsed.href, "url")
+    ) return false;
+    for (const [name, parameterValue] of parsed.searchParams) {
+      if (
+        SENSITIVE_URL_PARAMETER_PATTERN.test(name) ||
+        containsSensitiveReportText(parameterValue, "free_text")
+      ) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function assertSafeText(value: string | null) {
-  if (value !== null && SENSITIVE_PATTERNS.some((pattern) => pattern.test(value))) {
+  if (value !== null && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value)) return;
+  if (value !== null && containsSensitiveReportText(value, "free_text")) {
     throw new ReportPdfValidationError();
   }
 }
@@ -177,11 +257,15 @@ function walkSafeText(value: unknown): void {
     value.forEach(walkSafeText);
     return;
   }
-  if (value !== null && typeof value === "object") Object.values(value).forEach(walkSafeText);
+  if (value !== null && typeof value === "object") {
+    Object.entries(value).forEach(([key, item]) => {
+      if (key !== "url") walkSafeText(item);
+    });
+  }
 }
 
 export function validateReportExportModel(model: ReportExportModel): void {
-  assertOnlyKeys(model, ["vehicle", "summary", "actionableDtcs", "historicalDtcs", "analysis", "observations"]);
+  assertOnlyKeys(model, ["vehicle", "summary", "actionableDtcs", "historicalDtcs", "analysis", "observations", "rag"]);
   assertOnlyKeys(model.vehicle, ["make", "model", "year"]);
   assertOnlyKeys(model.summary, ["systemsScanned", "detectedRows", "actionableDtcs", "historicalRows", "findings"]);
   assertOnlyKeys(model.analysis, [
@@ -192,6 +276,7 @@ export function validateReportExportModel(model: ReportExportModel): void {
     "requiresTechnicianConfirmation",
   ]);
   assertOnlyKeys(model.observations, ["used", "status", "summary", "matches"]);
+  assertOnlyKeys(model.rag, ["enabled", "used", "status", "querySummary", "sources"]);
 
   const counts = Object.values(model.summary);
   if (counts.some((count) => !Number.isSafeInteger(count) || count < 0)) throw new ReportPdfValidationError();
@@ -311,6 +396,37 @@ export function validateReportExportModel(model: ReportExportModel): void {
     matchIdentities.push(dtcIdentity(match.relatedDtc));
   });
   if (new Set(matchIdentities).size !== matchIdentities.length) throw new ReportPdfValidationError();
+  if (
+    typeof model.rag.enabled !== "boolean" ||
+    typeof model.rag.used !== "boolean" ||
+    !RAG_STATUSES.has(model.rag.status) ||
+    typeof model.rag.querySummary !== "string" || model.rag.querySummary.length === 0 ||
+    !Array.isArray(model.rag.sources) || model.rag.sources.length > 10 ||
+    model.rag.used !== (model.rag.status === "used") ||
+    (model.rag.status === "used" ? model.rag.sources.length === 0 : model.rag.sources.length > 0) ||
+    (model.rag.status === "disabled" && model.rag.enabled)
+  ) {
+    throw new ReportPdfValidationError();
+  }
+  model.rag.sources.forEach((source) => {
+    assertOnlyKeys(source, ["id", "title", "label", "url", "similarity", "excerpt"]);
+    let validUrl = source.url === null;
+    if (typeof source.url === "string") {
+      try {
+        validUrl = isSafeRagSourceUrl(source.url);
+      } catch {
+        validUrl = false;
+      }
+    }
+    if (
+      typeof source.id !== "string" || !/^[0-9a-f]{8}-[0-9a-f-]{27}$/iu.test(source.id) ||
+      typeof source.title !== "string" || source.title.length === 0 || source.title.length > 200 ||
+      typeof source.label !== "string" || source.label.length === 0 || source.label.length > 200 ||
+      !validUrl || typeof source.similarity !== "number" || !Number.isFinite(source.similarity) ||
+      source.similarity < 0 || source.similarity > 1 ||
+      typeof source.excerpt !== "string" || source.excerpt.length === 0 || source.excerpt.length > 320
+    ) throw new ReportPdfValidationError();
+  });
   walkSafeText(model);
 }
 
@@ -388,6 +504,20 @@ export function buildReportExportModel(source: ReportExportSource): ReportExport
         observation: match.observation,
         possibleRelation: match.possibleRelation,
         confidence: match.confidence,
+      })),
+    },
+    rag: {
+      enabled: source.rag.enabled,
+      used: source.rag.used,
+      status: source.rag.status,
+      querySummary: source.rag.querySummary,
+      sources: source.rag.sources.map((ragSource) => ({
+        id: ragSource.id,
+        title: ragSource.title,
+        label: ragSource.label,
+        url: ragSource.url ?? null,
+        similarity: ragSource.similarity,
+        excerpt: ragSource.excerpt,
       })),
     },
   };
@@ -643,6 +773,32 @@ export function renderReportPdf(model: ReportExportModel, generatedAt: Date, log
       labelValue("Clasificación normalizada", classificationLabel(dtc.normalizedClassification));
       y += 1;
     }
+  }
+
+  heading("Fuentes de conocimiento recuperadas", 18);
+  if (model.rag.status !== "used") {
+    const statusMessage: Record<Exclude<ReportRagStatus, "used">, string> = {
+      disabled: "RAG desactivado para este análisis.",
+      not_configured: "RAG no configurado en el servidor.",
+      no_matches: "No se recuperaron fuentes con similitud suficiente.",
+      unavailable: "La recuperación no estuvo disponible; el análisis continuó sin fuentes.",
+    };
+    paragraph(statusMessage[model.rag.status]);
+  } else {
+    for (const [index, source] of model.rag.sources.entries()) {
+      ensureSpace(20);
+      paragraph(`[K${index + 1}] ${source.title} · Similitud ${(source.similarity * 100).toFixed(0)}%`, {
+        color: COLORS.navy,
+        bold: true,
+      });
+      paragraph(source.label, { fontSize: 8.5 });
+      paragraph(source.excerpt, { fontSize: 8.5 });
+      if (source.url !== null) paragraph(source.url, { color: COLORS.gray, fontSize: 8 });
+    }
+    paragraph("La similitud no confirma una causa y no sustituye documentación oficial.", {
+      color: COLORS.orange,
+      bold: true,
+    });
   }
 
   heading("Advertencias generales", 15);

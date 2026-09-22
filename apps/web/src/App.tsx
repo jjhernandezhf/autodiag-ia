@@ -6,7 +6,12 @@ import {
   type AuthIdentity,
   type BrowserAuthenticationService,
 } from "./auth-service";
-import { buildReportExportModel, downloadReportPdf } from "./report-pdf";
+import {
+  buildReportExportModel,
+  containsSensitiveReportText,
+  downloadReportPdf,
+  isSafeRagSourceUrl,
+} from "./report-pdf";
 
 const PDF_MIME_TYPE = "application/pdf";
 const MAX_VEHICLE_OBSERVATIONS_LENGTH = 1_000;
@@ -86,6 +91,24 @@ type AnalysisPreparation =
 
 type AnalysisPriority = "critical" | "high" | "medium" | "low";
 type AnalysisConfidence = "high" | "medium" | "low";
+type RagStatus = "used" | "disabled" | "not_configured" | "no_matches" | "unavailable";
+
+interface RagSource {
+  id: string;
+  title: string;
+  label: string;
+  url?: string;
+  similarity: number;
+  excerpt: string;
+}
+
+interface RagMetadata {
+  enabled: boolean;
+  used: boolean;
+  status: RagStatus;
+  querySummary: string;
+  sources: RagSource[];
+}
 
 interface DiagnosticFinding {
   relatedDtc: { code: string; moduleCode: string | null; moduleName: string } | null;
@@ -118,11 +141,13 @@ interface DiagnosticAnalysis {
 interface AnalysisResponse {
   status: "completed";
   analysis: DiagnosticAnalysis;
+  rag: RagMetadata;
 }
 
 interface AnalysisUiState {
   status: AnalysisStatus;
   analysis?: DiagnosticAnalysis;
+  rag?: RagMetadata;
   message?: string;
   submittedObservations?: string;
 }
@@ -239,11 +264,56 @@ function isDiagnosticAnalysis(value: unknown): value is DiagnosticAnalysis {
   );
 }
 
+function hasOnlyKeys(value: object, allowed: readonly string[]) {
+  return Object.keys(value).every((key) => allowed.includes(key));
+}
+
+function isRagSource(value: unknown): value is RagSource {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<RagSource>;
+  if (!hasOnlyKeys(candidate, ["id", "title", "label", "url", "similarity", "excerpt"])) return false;
+  const validUrl = candidate.url === undefined || (
+    typeof candidate.url === "string" && isSafeRagSourceUrl(candidate.url)
+  );
+  return (
+    typeof candidate.id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(candidate.id) &&
+    typeof candidate.title === "string" && candidate.title.trim().length > 0 && candidate.title.length <= 200 &&
+    !containsSensitiveReportText(candidate.title, "source_text") &&
+    typeof candidate.label === "string" && candidate.label.trim().length > 0 && candidate.label.length <= 200 &&
+    !containsSensitiveReportText(candidate.label, "source_text") &&
+    validUrl &&
+    typeof candidate.similarity === "number" && Number.isFinite(candidate.similarity) &&
+    candidate.similarity >= 0 && candidate.similarity <= 1 &&
+    typeof candidate.excerpt === "string" && candidate.excerpt.trim().length > 0 && candidate.excerpt.length <= 320 &&
+    !containsSensitiveReportText(candidate.excerpt, "source_text")
+  );
+}
+
+function isRagMetadata(value: unknown): value is RagMetadata {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<RagMetadata>;
+  if (!hasOnlyKeys(candidate, ["enabled", "used", "status", "querySummary", "sources"])) return false;
+  const statuses = new Set<RagStatus>(["used", "disabled", "not_configured", "no_matches", "unavailable"]);
+  const sources = candidate.sources;
+  if (
+    typeof candidate.enabled !== "boolean" ||
+    typeof candidate.used !== "boolean" ||
+    candidate.status === undefined || !statuses.has(candidate.status) ||
+    typeof candidate.querySummary !== "string" || candidate.querySummary.trim().length === 0 ||
+    containsSensitiveReportText(candidate.querySummary, "source_text") ||
+    !Array.isArray(sources) || sources.length > 10 || !sources.every(isRagSource)
+  ) return false;
+  const shouldContainSources = candidate.status === "used";
+  return candidate.used === shouldContainSources &&
+    (shouldContainSources ? sources.length > 0 : sources.length === 0) &&
+    !(candidate.status === "disabled" && candidate.enabled);
+}
+
 function parseAnalysisResponse(value: unknown): AnalysisResponse | null {
   if (!value || typeof value !== "object") return null;
   const candidate = value as Partial<AnalysisResponse>;
-  if (candidate.status !== "completed" || !isDiagnosticAnalysis(candidate.analysis)) return null;
-  return { status: candidate.status, analysis: candidate.analysis };
+  if (candidate.status !== "completed" || !isDiagnosticAnalysis(candidate.analysis) || !isRagMetadata(candidate.rag)) return null;
+  return { status: candidate.status, analysis: candidate.analysis, rag: candidate.rag };
 }
 
 function dtcIdentity(value: { code: string; moduleCode: string | null; moduleName: string }) {
@@ -357,7 +427,46 @@ function ExtractionResults({ extraction, counts }: { extraction: ExtractionResul
   );
 }
 
-function AnalysisResult({ analysis }: { analysis: DiagnosticAnalysis }) {
+const RAG_STATUS_MESSAGES: Record<Exclude<RagStatus, "used">, string> = {
+  disabled: "La recuperación de conocimiento está desactivada para este análisis.",
+  not_configured: "La recuperación de conocimiento todavía no está configurada en el servidor.",
+  no_matches: "No se encontraron fuentes suficientemente relacionadas con este caso.",
+  unavailable: "La recuperación no estuvo disponible; la orientación se generó sin fuentes adicionales.",
+};
+
+function RagEvidence({ rag }: { rag: RagMetadata }) {
+  return (
+    <section className={`rag-evidence ${rag.status}`} aria-labelledby="rag-evidence-title">
+      <div className="rag-evidence-heading">
+        <h3 id="rag-evidence-title">Evidencia recuperada por RAG</h3>
+        <span>{rag.sources.length} {rag.sources.length === 1 ? "fuente" : "fuentes"}</span>
+      </div>
+      {rag.status !== "used" ? (
+        <p className="rag-status-message">{RAG_STATUS_MESSAGES[rag.status]}</p>
+      ) : (
+        <>
+          <p className="rag-query-summary">{rag.querySummary}</p>
+          <ol className="rag-sources">
+            {rag.sources.map((source, index) => (
+              <li key={source.id}>
+                <div>
+                  <strong>[K{index + 1}] {source.title}</strong>
+                  <span>Similitud {(source.similarity * 100).toFixed(0)}%</span>
+                </div>
+                <p className="rag-source-label">{source.label}</p>
+                <p>{source.excerpt}</p>
+                {source.url && <a href={source.url} target="_blank" rel="noreferrer">Consultar fuente HTTPS</a>}
+              </li>
+            ))}
+          </ol>
+          <p className="rag-caution">La similitud orienta la búsqueda; no confirma una causa ni sustituye documentación oficial.</p>
+        </>
+      )}
+    </section>
+  );
+}
+
+function AnalysisResult({ analysis, rag }: { analysis: DiagnosticAnalysis; rag: RagMetadata }) {
   return (
     <div className="analysis-result">
       <div className="analysis-summary">
@@ -365,6 +474,8 @@ function AnalysisResult({ analysis }: { analysis: DiagnosticAnalysis }) {
         <p>{analysis.technicalSummary}</p>
         <span>Confianza general: <strong>{CONFIDENCE_LABELS[analysis.confidence]}</strong></span>
       </div>
+
+      <RagEvidence rag={rag} />
 
       <div className="analysis-findings">
         <h3>Hallazgos priorizados</h3>
@@ -567,9 +678,9 @@ function AiAnalysisSection({
             </div>
           )}
 
-          {state.status === "completed" && state.analysis && (
+          {state.status === "completed" && state.analysis && state.rag && (
             <>
-              <AnalysisResult analysis={state.analysis} />
+              <AnalysisResult analysis={state.analysis} rag={state.rag} />
               <div className="pdf-download" aria-live="polite">
                 <button
                   className="pdf-download-button"
@@ -851,6 +962,7 @@ function ReportWorkspace({
     setAnalysisState((current) => ({
       status: "confirming",
       ...(current.analysis ? { analysis: current.analysis } : {}),
+      ...(current.rag ? { rag: current.rag } : {}),
       ...(current.submittedObservations !== undefined
         ? { submittedObservations: current.submittedObservations }
         : {}),
@@ -863,6 +975,7 @@ function ReportWorkspace({
       ? {
           status: "completed",
           analysis: current.analysis,
+          ...(current.rag ? { rag: current.rag } : {}),
           submittedObservations: current.submittedObservations ?? "",
         }
       : { status: "ready" });
@@ -948,6 +1061,7 @@ function ReportWorkspace({
       setAnalysisState({
         status: "completed",
         analysis: result.analysis,
+        rag: result.rag,
         submittedObservations: normalizedObservations,
       });
     } catch (error) {
@@ -974,11 +1088,13 @@ function ReportWorkspace({
   async function handleDownloadPdf() {
     const preparation = uploadResult?.analysisPreparation;
     const analysis = analysisState.analysis;
+    const rag = analysisState.rag;
     const submittedObservations = analysisState.submittedObservations;
     if (
       pdfGenerationInProgressRef.current ||
       analysisState.status !== "completed" ||
       !analysis ||
+      !rag ||
       submittedObservations === undefined ||
       observationsChanged ||
       !uploadResult ||
@@ -1060,6 +1176,20 @@ function ReportWorkspace({
           safetyWarnings: [...analysis.safetyWarnings],
           confidence: analysis.confidence,
           requiresTechnicianConfirmation: analysis.requiresTechnicianConfirmation,
+        },
+        rag: {
+          enabled: rag.enabled,
+          used: rag.used,
+          status: rag.status,
+          querySummary: rag.querySummary,
+          sources: rag.sources.map((source) => ({
+            id: source.id,
+            title: source.title,
+            label: source.label,
+            ...(source.url === undefined ? {} : { url: source.url }),
+            similarity: source.similarity,
+            excerpt: source.excerpt,
+          })),
         },
         submittedObservations,
       });
@@ -1256,7 +1386,7 @@ function ReportWorkspace({
 
         <div className="privacy-note">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 10V7a6 6 0 0 1 12 0v3M5 10h14v11H5z" /><path d="M12 14v3" /></svg>
-          <p><strong>Tu archivo se procesa de forma temporal</strong><span>No lo almacenamos ni compartimos con servicios externos.</span></p>
+          <p><strong>Tu archivo se procesa de forma temporal</strong><span>El PDF no se almacena ni se envía; solo los datos técnicos confirmados participan en análisis y recuperación.</span></p>
         </div>
       </section>
 

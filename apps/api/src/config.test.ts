@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import { DEFAULT_OPENAI_TIMEOUT_MS, DEFAULT_PDF_EXTRACTION_LIMITS, loadEnv, resolvePdfExtractionLimits } from "./config.js";
+import {
+  DEFAULT_OPENAI_EMBEDDING_MODEL,
+  DEFAULT_OPENAI_TIMEOUT_MS,
+  DEFAULT_PDF_EXTRACTION_LIMITS,
+  DEFAULT_RAG_MATCH_COUNT,
+  DEFAULT_RAG_MATCH_THRESHOLD,
+  DEFAULT_RAG_MAX_CONTEXT_CHARACTERS,
+  loadEnv,
+  resolvePdfExtractionLimits,
+} from "./config.js";
 
 describe("configuración sensible", () => {
   it("rechaza el arranque cuando falta VIN_HMAC_SECRET", () => {
@@ -19,6 +28,11 @@ describe("configuración sensible", () => {
     expect(env.OPENAI_API_KEY).toBeUndefined();
     expect(env.OPENAI_MODEL).toBeUndefined();
     expect(env.OPENAI_TIMEOUT_MS).toBe(DEFAULT_OPENAI_TIMEOUT_MS);
+    expect(env.RAG_ENABLED).toBe(false);
+    expect(env.OPENAI_EMBEDDING_MODEL).toBe(DEFAULT_OPENAI_EMBEDDING_MODEL);
+    expect(env.RAG_MATCH_COUNT).toBe(DEFAULT_RAG_MATCH_COUNT);
+    expect(env.RAG_MATCH_THRESHOLD).toBe(DEFAULT_RAG_MATCH_THRESHOLD);
+    expect(env.RAG_MAX_CONTEXT_CHARACTERS).toBe(DEFAULT_RAG_MAX_CONTEXT_CHARACTERS);
     expect({
       maxPages: env.PDF_EXTRACTION_MAX_PAGES,
       maxTextItems: env.PDF_EXTRACTION_MAX_TEXT_ITEMS,
@@ -39,11 +53,21 @@ describe("configuración sensible", () => {
       PDF_EXTRACTION_TIMEOUT_MS: "",
       PDF_EXTRACTION_WORKER_MEMORY_MB: "\r\n",
       OPENAI_TIMEOUT_MS: " ",
+      RAG_ENABLED: "",
+      OPENAI_EMBEDDING_MODEL: " ",
+      RAG_MATCH_COUNT: "",
+      RAG_MATCH_THRESHOLD: " ",
+      RAG_MAX_CONTEXT_CHARACTERS: "",
     });
 
     expect(env.PORT).toBe(3_000);
     expect(env.REPORT_MAX_SIZE_BYTES).toBe(10 * 1024 * 1024);
     expect(env.OPENAI_TIMEOUT_MS).toBe(DEFAULT_OPENAI_TIMEOUT_MS);
+    expect(env.RAG_ENABLED).toBe(false);
+    expect(env.OPENAI_EMBEDDING_MODEL).toBe(DEFAULT_OPENAI_EMBEDDING_MODEL);
+    expect(env.RAG_MATCH_COUNT).toBe(DEFAULT_RAG_MATCH_COUNT);
+    expect(env.RAG_MATCH_THRESHOLD).toBe(DEFAULT_RAG_MATCH_THRESHOLD);
+    expect(env.RAG_MAX_CONTEXT_CHARACTERS).toBe(DEFAULT_RAG_MAX_CONTEXT_CHARACTERS);
     expect({
       maxPages: env.PDF_EXTRACTION_MAX_PAGES,
       maxTextItems: env.PDF_EXTRACTION_MAX_TEXT_ITEMS,
@@ -85,5 +109,36 @@ describe("configuración sensible", () => {
     expect(() =>
       loadEnv({ VIN_HMAC_SECRET: "synthetic-config-secret-with-32-bytes", OPENAI_TIMEOUT_MS: "999" }),
     ).toThrow();
+  });
+});
+
+describe("configuración RAG", () => {
+  const secret = "synthetic-config-secret-with-32-bytes";
+
+  it("acepta activación explícita y separa el modelo de embeddings", () => {
+    const env = loadEnv({
+      VIN_HMAC_SECRET: secret,
+      RAG_ENABLED: "true",
+      OPENAI_EMBEDDING_MODEL: "text-embedding-3-small",
+      RAG_MATCH_COUNT: "5",
+      RAG_MATCH_THRESHOLD: "0.75",
+      RAG_MAX_CONTEXT_CHARACTERS: "7000",
+    });
+    expect(env).toMatchObject({
+      RAG_ENABLED: true,
+      OPENAI_EMBEDDING_MODEL: "text-embedding-3-small",
+      RAG_MATCH_COUNT: 5,
+      RAG_MATCH_THRESHOLD: 0.75,
+      RAG_MAX_CONTEXT_CHARACTERS: 7_000,
+    });
+  });
+
+  it.each([
+    ["RAG_ENABLED", "yes"],
+    ["RAG_MATCH_COUNT", "11"],
+    ["RAG_MATCH_THRESHOLD", "1.1"],
+    ["RAG_MAX_CONTEXT_CHARACTERS", "499"],
+  ])("rechaza %s fuera de contrato", (name, value) => {
+    expect(() => loadEnv({ VIN_HMAC_SECRET: secret, [name]: value })).toThrow();
   });
 });
