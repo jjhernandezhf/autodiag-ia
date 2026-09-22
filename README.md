@@ -15,28 +15,22 @@ AutoDiag IA recibe reportes Autel PDF, valida el archivo y extrae información e
 
 ## Configuración segura
 
-La API requiere `VIN_HMAC_SECRET` para seudonimizar el VIN. Debe contener al menos 32 bytes y no tiene valor predeterminado. La API falla al iniciar si la variable falta o es demasiado corta.
+Prepara los archivos locales a partir de los ejemplos, sin reemplazarlos si ya existen:
 
-Genera una clave local con Node.js:
+```powershell
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+if (-not (Test-Path apps/web/.env.local)) { Copy-Item apps/web/.env.example apps/web/.env.local }
+```
+
+La API carga automáticamente el `.env` de la raíz durante el desarrollo. Vite carga `apps/web/.env.local` para el frontend. Ambos archivos reales están ignorados por Git y nunca deben versionarse, compartirse ni contenerse en logs.
+
+La API requiere `VIN_HMAC_SECRET` para seudonimizar el VIN. Debe contener al menos 32 bytes y no tiene valor predeterminado. La API falla al iniciar si la variable falta, está vacía o es demasiado corta. Genera una clave local segura con Node.js:
 
 ```bash
 node --input-type=module -e "import { randomBytes } from 'node:crypto'; console.log(randomBytes(48).toString('base64'))"
 ```
 
-Copia `.env.example` como referencia, pero configura la variable en el entorno del proceso. No guardes una clave real en el repositorio.
-
-En PowerShell:
-
-```powershell
-$env:VIN_HMAC_SECRET="valor-generado-localmente"
-npm run dev
-```
-
-En una terminal compatible con sintaxis POSIX:
-
-```bash
-VIN_HMAC_SECRET="valor-generado-localmente" npm run dev
-```
+Guarda el valor generado exclusivamente en el `.env` local. Las variables numéricas opcionales pueden quedar vacías para utilizar sus valores predeterminados seguros; un valor no vacío continúa sujeto a sus límites de validación.
 
 ## Instalación y desarrollo
 
@@ -45,7 +39,16 @@ npm install
 npm run dev
 ```
 
-La aplicación web se sirve en `http://localhost:5173` y la API en `http://localhost:3000`. Vite redirige `/api` hacia la API durante el desarrollo.
+El comando raíz inicia y etiqueta conjuntamente ambos procesos. La aplicación web se sirve en `http://localhost:5173` y la API en `http://localhost:3000`. Vite redirige `/api` hacia la API durante el desarrollo y `Ctrl+C` detiene ambos procesos.
+
+Como alternativa, pueden iniciarse individualmente en dos terminales:
+
+```powershell
+npm run dev --workspace @autodiag/api
+npm run dev --workspace @autodiag/web
+```
+
+La sesión autenticada se restaura dentro de la pestaña, pero los PDF, extracciones, observaciones, análisis y archivos generados continúan siendo temporales y se eliminan al abandonar el workspace o recargar la aplicación.
 
 ## Carga y extracción
 
@@ -335,7 +338,7 @@ El frontend utiliza exclusivamente las variables públicas vacías de `apps/web/
 
 La clave `SUPABASE_SECRET_KEY` permanece exclusivamente en el servidor y nunca debe usar prefijo `VITE_*`. Sin configuración pública válida, la aplicación muestra un error controlado y no permite acceder al área protegida. Los `.env` reales siguen ignorados por Git.
 
-La migración local `20260917000100_create_profiles.sql` define `profiles.id -> auth.users.id`, username normalizado y `is_active`. No crea usuarios automáticamente y todavía no se ha aplicado contra un proyecto real. Las pruebas de esta fase usan únicamente clientes simulados: no realizan conexiones reales a Supabase ni llamadas reales a OpenAI.
+La migración local `20260917000100_create_profiles.sql` define `profiles.id -> auth.users.id`, username normalizado y `is_active`. No crea usuarios automáticamente. Fue aplicada y verificada manualmente; antes de automatizar migraciones futuras se deberá reconciliar ese estado remoto con el historial local para evitar una aplicación duplicada. Las pruebas usan únicamente clientes simulados: no realizan conexiones reales a Supabase ni llamadas reales a OpenAI.
 
 La activación real del proyecto, aprovisionamiento administrativo de usuarios y comprobación de RLS quedan para la siguiente fase. Google OAuth, recuperación/restablecimiento de contraseña y Auth Hooks continúan pendientes.
 

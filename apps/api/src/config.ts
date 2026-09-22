@@ -31,48 +31,46 @@ export function resolvePdfExtractionLimits(input: Partial<PdfExtractionLimits> =
   return pdfExtractionLimitsSchema.parse({ ...DEFAULT_PDF_EXTRACTION_LIMITS, ...input });
 }
 
+function emptyEnvironmentValueAsUndefined(value: unknown) {
+  return typeof value === "string" && value.trim() === "" ? undefined : value;
+}
+
+function optionalIntegerFromEnvironment(minimum: number, maximum: number, defaultValue: number) {
+  return z.preprocess(
+    emptyEnvironmentValueAsUndefined,
+    z.coerce.number().int().min(minimum).max(maximum).default(defaultValue),
+  );
+}
+
 const envSchema = z.object({
-  PORT: z.coerce.number().int().min(1).max(65_535).default(3_000),
-  REPORT_MAX_SIZE_BYTES: z.coerce
-    .number()
-    .int()
-    .positive()
-    .max(100 * 1024 * 1024)
-    .default(DEFAULT_MAX_FILE_SIZE_BYTES),
-  PDF_EXTRACTION_MAX_PAGES: z.coerce.number().int().min(1).max(1_000).default(DEFAULT_PDF_EXTRACTION_LIMITS.maxPages),
-  PDF_EXTRACTION_MAX_TEXT_ITEMS: z.coerce
-    .number()
-    .int()
-    .min(1)
-    .max(1_000_000)
-    .default(DEFAULT_PDF_EXTRACTION_LIMITS.maxTextItems),
-  PDF_EXTRACTION_MAX_CHARACTERS: z.coerce
-    .number()
-    .int()
-    .min(1)
-    .max(20_000_000)
-    .default(DEFAULT_PDF_EXTRACTION_LIMITS.maxCharacters),
-  PDF_EXTRACTION_TIMEOUT_MS: z.coerce
-    .number()
-    .int()
-    .min(100)
-    .max(120_000)
-    .default(DEFAULT_PDF_EXTRACTION_LIMITS.timeoutMs),
-  PDF_EXTRACTION_WORKER_MEMORY_MB: z.coerce
-    .number()
-    .int()
-    .min(16)
-    .max(512)
-    .default(DEFAULT_PDF_EXTRACTION_LIMITS.workerMemoryMb),
+  PORT: optionalIntegerFromEnvironment(1, 65_535, 3_000),
+  REPORT_MAX_SIZE_BYTES: optionalIntegerFromEnvironment(1, 100 * 1024 * 1024, DEFAULT_MAX_FILE_SIZE_BYTES),
+  PDF_EXTRACTION_MAX_PAGES: optionalIntegerFromEnvironment(1, 1_000, DEFAULT_PDF_EXTRACTION_LIMITS.maxPages),
+  PDF_EXTRACTION_MAX_TEXT_ITEMS: optionalIntegerFromEnvironment(
+    1,
+    1_000_000,
+    DEFAULT_PDF_EXTRACTION_LIMITS.maxTextItems,
+  ),
+  PDF_EXTRACTION_MAX_CHARACTERS: optionalIntegerFromEnvironment(
+    1,
+    20_000_000,
+    DEFAULT_PDF_EXTRACTION_LIMITS.maxCharacters,
+  ),
+  PDF_EXTRACTION_TIMEOUT_MS: optionalIntegerFromEnvironment(100, 120_000, DEFAULT_PDF_EXTRACTION_LIMITS.timeoutMs),
+  PDF_EXTRACTION_WORKER_MEMORY_MB: optionalIntegerFromEnvironment(
+    16,
+    512,
+    DEFAULT_PDF_EXTRACTION_LIMITS.workerMemoryMb,
+  ),
   OPENAI_API_KEY: z.preprocess(
-    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    emptyEnvironmentValueAsUndefined,
     z.string().trim().min(1).optional(),
   ),
   OPENAI_MODEL: z.preprocess(
-    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    emptyEnvironmentValueAsUndefined,
     z.string().trim().min(1).max(100).optional(),
   ),
-  OPENAI_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(120_000).default(DEFAULT_OPENAI_TIMEOUT_MS),
+  OPENAI_TIMEOUT_MS: optionalIntegerFromEnvironment(1_000, 120_000, DEFAULT_OPENAI_TIMEOUT_MS),
   VIN_HMAC_SECRET: z.string().refine((value) => Buffer.byteLength(value, "utf8") >= 32, {
     message: "VIN_HMAC_SECRET debe contener al menos 32 bytes.",
   }),

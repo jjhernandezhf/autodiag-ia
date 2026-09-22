@@ -28,6 +28,36 @@ describe("configuración sensible", () => {
     }).toEqual(DEFAULT_PDF_EXTRACTION_LIMITS);
   });
 
+  it("interpreta variables numéricas opcionales vacías como ausentes", () => {
+    const env = loadEnv({
+      VIN_HMAC_SECRET: "synthetic-config-secret-with-32-bytes",
+      PORT: " ",
+      REPORT_MAX_SIZE_BYTES: "",
+      PDF_EXTRACTION_MAX_PAGES: "\t",
+      PDF_EXTRACTION_MAX_TEXT_ITEMS: "",
+      PDF_EXTRACTION_MAX_CHARACTERS: " ",
+      PDF_EXTRACTION_TIMEOUT_MS: "",
+      PDF_EXTRACTION_WORKER_MEMORY_MB: "\r\n",
+      OPENAI_TIMEOUT_MS: " ",
+    });
+
+    expect(env.PORT).toBe(3_000);
+    expect(env.REPORT_MAX_SIZE_BYTES).toBe(10 * 1024 * 1024);
+    expect(env.OPENAI_TIMEOUT_MS).toBe(DEFAULT_OPENAI_TIMEOUT_MS);
+    expect({
+      maxPages: env.PDF_EXTRACTION_MAX_PAGES,
+      maxTextItems: env.PDF_EXTRACTION_MAX_TEXT_ITEMS,
+      maxCharacters: env.PDF_EXTRACTION_MAX_CHARACTERS,
+      timeoutMs: env.PDF_EXTRACTION_TIMEOUT_MS,
+      workerMemoryMb: env.PDF_EXTRACTION_WORKER_MEMORY_MB,
+    }).toEqual(DEFAULT_PDF_EXTRACTION_LIMITS);
+  });
+
+  it("mantiene VIN_HMAC_SECRET como configuración obligatoria aunque esté vacía", () => {
+    expect(() => loadEnv({ VIN_HMAC_SECRET: "" })).toThrow();
+    expect(() => loadEnv({ VIN_HMAC_SECRET: " " })).toThrow();
+  });
+
   it.each([
     ["PDF_EXTRACTION_MAX_PAGES", "0"],
     ["PDF_EXTRACTION_MAX_TEXT_ITEMS", "0"],
