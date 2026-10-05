@@ -184,11 +184,19 @@ function readyAnalysisUpload(file: File) {
   );
 }
 
+const DISABLED_RAG = {
+  enabled: false,
+  used: false,
+  status: "disabled",
+  querySummary: "RAG disabled for this synthetic response.",
+  sources: [],
+};
+
 function successfulAnalysis(observationCorrelation: Record<string, unknown> = {
   status: "not_provided",
   summary: "No se proporcionaron observaciones del vehículo.",
   matches: [],
-}) {
+}, rag: Record<string, unknown> = DISABLED_RAG) {
   return createJsonResponse(true, {
     status: "completed",
     analysis: {
@@ -207,6 +215,7 @@ function successfulAnalysis(observationCorrelation: Record<string, unknown> = {
       confidence: "medium",
       requiresTechnicianConfirmation: true,
     },
+    rag,
   });
 }
 
@@ -934,6 +943,118 @@ describe("orientación asistida por IA", () => {
       await pendingAnalysis.promise;
     });
     expect(screen.queryByText("Orientación sintética sobre una falla de encendido que debe comprobarse.")).toBeNull();
+  });
+});
+
+describe("evidencia RAG visible y segura", () => {
+  const usedRag = {
+    enabled: true,
+    used: true,
+    status: "used",
+    querySummary: "Consulta técnica con un módulo y un DTC; sin datos personales.",
+    sources: [{
+      id: "11111111-1111-4111-8111-111111111111",
+      title: "Comprobación de alimentación y tierra",
+      label: "AutoDiag IA — Corpus demostrativo interno",
+      url: "https://example.test/conocimiento",
+      similarity: 0.91,
+      excerpt: "Verificar tensión y caída bajo carga antes de sustituir componentes.",
+    }],
+  };
+
+  it("renderiza fuentes y las elimina al seleccionar otro reporte", async () => {
+    const first = createPdf("primero.pdf");
+    const second = createPdf("segundo.pdf");
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(readyAnalysisUpload(first))
+      .mockResolvedValueOnce(successfulAnalysis(undefined, usedRag));
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const { container } = await renderAuthenticatedApp();
+    const { input } = getUploadElements(container);
+    await user.upload(input, first);
+    await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+    await user.click(await screen.findByRole("button", { name: "Analizar DTC con IA" }));
+    await user.click(screen.getByRole("button", { name: "Confirmar y analizar" }));
+
+    expect(await screen.findByRole("heading", { name: "Evidencia recuperada por RAG" })).toBeTruthy();
+    expect(screen.getByText("1 fuente")).toBeTruthy();
+    expect(screen.getByText(/Comprobación de alimentación y tierra/u)).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Consultar fuente HTTPS" }).getAttribute("href"))
+      .toBe("https://example.test/conocimiento");
+
+    await user.upload(input, second);
+    expect(screen.queryByRole("heading", { name: "Evidencia recuperada por RAG" })).toBeNull();
+    expect(screen.queryByText(/Comprobación de alimentación y tierra/u)).toBeNull();
+  });
+
+  it("rechaza una respuesta que intente mostrar un enlace no HTTPS", async () => {
+    const file = createPdf("url-insegura.pdf");
+    const unsafeRag = {
+      ...usedRag,
+      sources: [{ ...usedRag.sources[0]!, url: "http://example.test/inseguro" }],
+    };
+    vi.stubGlobal("fetch", vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(readyAnalysisUpload(file))
+      .mockResolvedValueOnce(successfulAnalysis(undefined, unsafeRag)));
+    const user = userEvent.setup();
+    const { container } = await renderAuthenticatedApp();
+    const { input } = getUploadElements(container);
+    await user.upload(input, file);
+    await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+    await user.click(await screen.findByRole("button", { name: "Analizar DTC con IA" }));
+    await user.click(screen.getByRole("button", { name: "Confirmar y analizar" }));
+    expect(await screen.findByText("El servicio devolvió una orientación que no pudo validarse.")).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "Consultar fuente HTTPS" })).toBeNull();
+  });
+
+  it.each([
+    ["contenido", { excerpt: "Contacto 55551234" }],
+    ["nombre PDF", { title: "reporte-cliente.pdf" }],
+    ["clave", { label: ["sb", "secret", "syntheticValue123456"].join("_") }],
+    ["parámetro URL", { url: "https://example.test/manual.pdf?token=valor-sintetico" }],
+  ])("rechaza una fuente contaminada en %s antes de mostrarla", async (_case, override) => {
+    const file = createPdf("respuesta-contaminada.pdf");
+    const contaminatedRag = {
+      ...usedRag,
+      sources: [{ ...usedRag.sources[0]!, ...override }],
+    };
+    vi.stubGlobal("fetch", vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(readyAnalysisUpload(file))
+      .mockResolvedValueOnce(successfulAnalysis(undefined, contaminatedRag)));
+    const user = userEvent.setup();
+    const { container } = await renderAuthenticatedApp();
+    const { input } = getUploadElements(container);
+    await user.upload(input, file);
+    await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+    await user.click(await screen.findByRole("button", { name: "Analizar DTC con IA" }));
+    await user.click(screen.getByRole("button", { name: "Confirmar y analizar" }));
+
+    expect(await screen.findByText("El servicio devolvió una orientación que no pudo validarse.")).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Evidencia recuperada por RAG" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Consultar fuente HTTPS" })).toBeNull();
+  });
+
+  it("elimina las fuentes al cerrar sesión", async () => {
+    const file = createPdf("cierre-sesion.pdf");
+    vi.stubGlobal("fetch", vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(readyAnalysisUpload(file))
+      .mockResolvedValueOnce(successfulAnalysis(undefined, usedRag)));
+    const user = userEvent.setup();
+    const { container } = await renderAuthenticatedApp();
+    const { input } = getUploadElements(container);
+    await user.upload(input, file);
+    await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+    await user.click(await screen.findByRole("button", { name: "Analizar DTC con IA" }));
+    await user.click(screen.getByRole("button", { name: "Confirmar y analizar" }));
+    expect(await screen.findByText(/Comprobación de alimentación y tierra/u)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Cerrar sesión" }));
+    expect(await screen.findByRole("button", { name: "Iniciar sesión" })).toBeTruthy();
+    expect(screen.queryByText(/Comprobación de alimentación y tierra/u)).toBeNull();
   });
 });
 

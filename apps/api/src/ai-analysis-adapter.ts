@@ -6,7 +6,8 @@ import type {
   ParsedDtc,
   ScannedSystem,
 } from "./report-types.js";
-import { classifyDtcStatus, containsVinCandidate, normalizeForMatch } from "./text-normalization.js";
+import { containsSensitiveDiagnosticReport } from "./sensitive-data.js";
+import { classifyDtcStatus, normalizeForMatch } from "./text-normalization.js";
 
 const MAX_MODULES = 40;
 const MAX_DTCS_PER_MODULE = 20;
@@ -29,13 +30,6 @@ function addReason(
   message: string,
 ) {
   if (!reasons.some((reason) => reason.code === code)) reasons.push({ code, message });
-}
-
-function containsSensitiveContent(value: unknown): boolean {
-  if (typeof value === "string") return containsVinCandidate(value);
-  if (Array.isArray(value)) return value.some(containsSensitiveContent);
-  if (value !== null && typeof value === "object") return Object.values(value).some(containsSensitiveContent);
-  return false;
 }
 
 export function prepareAiAnalysis(extraction: AutelExtraction): AiAnalysisPreparation {
@@ -195,7 +189,7 @@ export function prepareAiAnalysis(extraction: AutelExtraction): AiAnalysisPrepar
     }
   }
 
-  if (validatedInput !== null && containsSensitiveContent(validatedInput)) {
+  if (validatedInput !== null && containsSensitiveDiagnosticReport(validatedInput)) {
     addReason(
       reasons,
       "SENSITIVE_CONTENT_DETECTED",

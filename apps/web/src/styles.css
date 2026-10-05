@@ -335,6 +335,19 @@ td code { color: #c34628; font-family: ui-monospace, SFMono-Regular, Consolas, m
 .analysis-observations-changed p { margin: 0 0 11px; color: #6e5636; font-size: .78rem; line-height: 1.5; }
 .technician-confirmation { margin: 16px 0 0; padding: 12px; border: 1px solid #efc58f; border-radius: 8px; color: #744617; background: #fff7eb; font-size: .82rem; font-weight: 800; text-align: center; }
 .analysis-cancelled { margin-top: 18px; padding: 12px 14px; border-radius: 8px; color: #526474; background: #f1f4f6; font-size: .8rem; }
+.rag-evidence { margin-top: 18px; padding: 17px; border: 1px solid #d8e5ea; border-radius: 11px; background: #f5f9fb; }
+.rag-evidence-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.rag-evidence-heading h3 { margin: 0; color: #294156; font-size: .9rem; }
+.rag-evidence-heading > span { color: #526b7b; font-size: .72rem; font-weight: 750; }
+.rag-status-message, .rag-query-summary, .rag-caution { margin: 9px 0 0; color: #526474; font-size: .76rem; line-height: 1.5; }
+.rag-sources { display: grid; gap: 10px; margin: 13px 0 0; padding: 0; list-style: none; }
+.rag-sources li { padding: 13px 14px; border-left: 3px solid #1d8ca8; border-radius: 0 8px 8px 0; background: #fff; overflow-wrap: anywhere; }
+.rag-sources li > div { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.rag-sources strong { color: #173c54; font-size: .8rem; }
+.rag-sources span, .rag-source-label { color: #647889; font-size: .7rem; }
+.rag-sources p { margin: 7px 0 0; color: #40576a; font-size: .75rem; line-height: 1.5; }
+.rag-sources a { display: inline-block; margin-top: 8px; color: #146c85; font-size: .72rem; font-weight: 750; }
+.rag-caution { padding-top: 10px; border-top: 1px solid #d9e4e9; color: #735331; font-weight: 650; }
 .pdf-download { display: flex; align-items: center; gap: 14px; margin-top: 18px; padding: 15px 16px; border: 1px solid #d7e3e9; border-radius: 10px; background: #f5f9fb; }
 .pdf-download-button { display: inline-flex; min-height: 42px; flex: 0 0 auto; cursor: pointer; align-items: center; justify-content: center; gap: 8px; padding: 10px 16px; border: 0; border-radius: 8px; color: #fff; background: #173c54; box-shadow: 0 4px 11px rgb(23 60 84 / 18%); font: inherit; font-size: .8rem; font-weight: 750; }
 .pdf-download-button:hover:not(:disabled) { background: #102f44; }

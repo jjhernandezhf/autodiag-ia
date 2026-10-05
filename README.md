@@ -77,7 +77,7 @@ La extracción también aplica estos límites conservadores, configurables media
 
 El número de páginas se comprueba antes de recorrer el documento. Los elementos y caracteres se contabilizan incrementalmente antes de conservar cada fragmento. PDF.js se ejecuta en un `worker_threads.Worker` con límite de memoria; al vencer el plazo, la API termina el Worker y espera su cierre, por lo que el trabajo subyacente no continúa en segundo plano.
 
-El PDF y el texto extraído existen únicamente en memoria durante la solicitud. No se guardan en disco, base de datos ni servicios externos. Tampoco se usa OCR, RAG, n8n o almacenamiento permanente. Supabase se utiliza exclusivamente para autenticar y autorizar la solicitud; no recibe el PDF ni su extracción.
+El PDF y el texto extraído existen únicamente en memoria durante la solicitud. No se guardan en disco, base de datos ni servicios externos. La carga no usa OCR ni envía el PDF a RAG, n8n o almacenamiento permanente. Supabase Auth se utiliza para autenticar y autorizar la solicitud; no recibe el PDF ni su extracción.
 
 La extracción utiliza `pdfjs-dist` 5.4.624. Esta versión requiere Node `>=20.16.0 || >=22.3.0`, compatible con todo el rango declarado por el proyecto.
 
@@ -341,6 +341,71 @@ La clave `SUPABASE_SECRET_KEY` permanece exclusivamente en el servidor y nunca d
 La migración local `20260917000100_create_profiles.sql` define `profiles.id -> auth.users.id`, username normalizado y `is_active`. No crea usuarios automáticamente. Fue aplicada y verificada manualmente; antes de automatizar migraciones futuras se deberá reconciliar ese estado remoto con el historial local para evitar una aplicación duplicada. Las pruebas usan únicamente clientes simulados: no realizan conexiones reales a Supabase ni llamadas reales a OpenAI.
 
 La activación real del proyecto, aprovisionamiento administrativo de usuarios y comprobación de RLS quedan para la siguiente fase. Google OAuth, recuperación/restablecimiento de contraseña y Auth Hooks continúan pendientes.
+
+## RAG demostrativo con pgvector (RAG-MVP-1)
+
+El RAG es una etapa opcional y tolerante a fallos previa al análisis final. El backend construye una consulta exclusivamente con marca, modelo, año, sistemas, códigos y descripciones DTC y observaciones técnicas ya sanitizadas. No incorpora VIN —ni completo, enmascarado o seudonimizado—, usuario, correo, nombre o hash del archivo, identificadores del reporte ni contenido completo del PDF.
+
+Cuando está habilitado y configurado, el flujo es:
+
+1. `text-embedding-3-small` genera un vector de 1536 dimensiones para la consulta técnica.
+2. El backend invoca `public.match_knowledge_chunks` con umbral y cantidad acotados.
+3. El RPC realiza búsqueda coseno exacta únicamente sobre chunks activos.
+4. La respuesta se valida, ordena, deduplica y limita por cantidad y caracteres totales.
+5. Los bloques `[K1]`, `[K2]`, etc. se entregan al modelo final entre delimitadores de datos no confiables. El prompt prohíbe seguir instrucciones del corpus y recuerda que similitud no confirma una causa.
+6. La API devuelve estado y fuentes públicas sanitizadas; la interfaz y el PDF las muestran por separado de los DTC y observaciones.
+
+`OPENAI_MODEL` continúa seleccionando el modelo de análisis con Responses API y Structured Outputs. `OPENAI_EMBEDDING_MODEL` selecciona únicamente el modelo vectorial y por defecto usa `text-embedding-3-small`. Ambos propósitos son independientes.
+
+Variables backend nuevas:
+
+- `RAG_ENABLED`: `false` por defecto. Solo `true` activa la recuperación.
+- `OPENAI_EMBEDDING_MODEL`: `text-embedding-3-small` por defecto.
+- `RAG_MATCH_COUNT`: `4` por defecto; acepta de 1 a 10.
+- `RAG_MATCH_THRESHOLD`: `0.7` por defecto; acepta de 0 a 1.
+- `RAG_MAX_CONTEXT_CHARACTERS`: `6000` por defecto; acepta de 500 a 20000.
+
+Los valores vacíos de `.env.example` se interpretan como ausentes y reciben esos valores predeterminados. Las claves reales permanecen únicamente en `.env`, que no debe versionarse.
+
+### Migración e ingesta pendientes
+
+La migración `supabase/migrations/20260922000100_create_rag_knowledge.sql` instala `vector` en `extensions` o relocaliza allí una instalación existente antes de crear objetos dependientes. Si faltan permisos para relocalizarla, aborta con una acción administrativa explícita. Después crea `public.knowledge_chunks` con `extensions.vector(1536)`, RLS y permisos exclusivos de `service_role`, y define el RPC `public.match_knowledge_chunks` como `security invoker` con `search_path` vacío. El MVP usa búsqueda exacta porque el corpus es pequeño; HNSW o IVFFlat quedan para una fase posterior de escalamiento.
+
+Esta fase no aplica la migración ni ejecuta una ingesta real. Antes de activarla:
+
+1. Reconciliar el historial remoto de migraciones, incluida la migración `profiles` aplicada manualmente.
+2. Revisar y aplicar la nueva migración mediante el procedimiento administrativo aprobado.
+3. Validar localmente el corpus sin red:
+
+   ```bash
+   npm run rag:ingest -- --dry-run
+   ```
+
+4. Con la tabla ya disponible y secretos configurados solo en el backend, ejecutar una vez:
+
+   ```bash
+   npm run rag:ingest
+   ```
+
+5. Establecer `RAG_ENABLED=true` y reiniciar únicamente la API.
+
+El script valida el corpus con Zod y calcula dos SHA-256: `content_hash` identifica el contenido y `record_hash` cubre canónicamente todos los campos persistidos, con metadata ordenada de forma estable. La comparación de `record_hash` hace el upsert idempotente por `(source_id, chunk_index)` y vuelve a generar el embedding cuando cambia cualquier campo real. Su salida contiene solo cantidades de leídos, válidos, insertados, actualizados y omitidos; no imprime claves ni contenido completo.
+
+El corpus contiene 16 chunks originales y se identifica honestamente como **AutoDiag IA — Corpus demostrativo interno**. Sirve para demostrar recuperación semántica sobre prácticas generales de diagnóstico; no representa ni sustituye manuales de Autel, Mazda, SAE u otros fabricantes.
+
+Estados devueltos:
+
+- `used`: se recuperaron y utilizaron fuentes.
+- `disabled`: RAG está desactivado.
+- `not_configured`: se solicitó RAG, pero faltan dependencias de servidor válidas.
+- `no_matches`: no hubo resultados sobre el umbral.
+- `unavailable`: embedding o RPC falló; el análisis normal continuó sin RAG.
+
+Para rollback operativo, establecer `RAG_ENABLED=false` y reiniciar la API; el análisis existente continúa sin embeddings ni RPC. Si además se necesita retirar el esquema, primero detener la ingesta y RAG, luego crear y revisar una migración inversa que revoque el RPC y elimine `knowledge_chunks`. No eliminar la extensión `vector` sin comprobar otros consumidores.
+
+Guion breve de demostración: iniciar sesión, cargar un PDF Autel compatible, revisar la extracción, confirmar manualmente el análisis y comprobar la sección **Evidencia recuperada por RAG**. Descargar el PDF y verificar **Fuentes de conocimiento recuperadas**. Repetir con `RAG_ENABLED=false` para demostrar el fallback sin fuentes.
+
+Los reportes, extracciones y análisis continúan siendo temporales en memoria. La FASE 3.4A de historial permanece pausada; RAG no almacena el PDF ni el resultado diagnóstico.
 
 ## Verificación
 

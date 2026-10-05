@@ -93,6 +93,19 @@ function createSource(status: "not_provided" | "no_clear_match" | "matches_found
       confidence: "medium",
       requiresTechnicianConfirmation: true,
     },
+    rag: {
+      enabled: true,
+      used: true,
+      status: "used",
+      querySummary: "Synthetic technical query without personal data.",
+      sources: [{
+        id: "11111111-1111-4111-8111-111111111111",
+        title: "Synthetic electrical checks",
+        label: "AutoDiag IA - Corpus demostrativo interno",
+        similarity: 0.86,
+        excerpt: "Verify power and ground before replacing components.",
+      }],
+    },
     submittedObservations: hasObservation ? "  Vibración al acelerar.  " : "",
   };
 }
@@ -139,7 +152,7 @@ describe("modelo seguro del informe PDF", () => {
     const model = buildReportExportModel(sourceWithPrivateFields);
 
     expect(source).toEqual({ ...before, vin: "dato-que-no-debe-copiarse", originalName: "archivo-privado.pdf", sha256: "hash-privado", rawResponse: "respuesta-interna" });
-    expect(Object.keys(model)).toEqual(["vehicle", "summary", "actionableDtcs", "historicalDtcs", "analysis", "observations"]);
+    expect(Object.keys(model)).toEqual(["vehicle", "summary", "actionableDtcs", "historicalDtcs", "analysis", "observations", "rag"]);
     expect(model.actionableDtcs.map((dtc) => [dtc.moduleCode, dtc.code])).toEqual([["PCM", "P0300"]]);
     expect(model.actionableDtcs[0]?.alsoHistorical).toBe(true);
     expect(model.historicalDtcs.map((dtc) => [dtc.moduleCode, dtc.code])).toEqual([["SRS", "B1000"]]);
@@ -175,13 +188,80 @@ describe("modelo seguro del informe PDF", () => {
     "token=synthetic-secret",
     "C:\\clientes\\reporte.pdf",
     "a".repeat(64),
+    "55551234",
+    "Tel: 55551234",
+    "Teléfono 5555-1234",
     "+502 5555 1234",
+    "CONTACTO-55551234",
+    "reporte-cliente.pdf",
+    "sk-proj-syntheticValue123456",
+    ["sb", "secret", "syntheticValue123456"].join("_"),
+    "API_KEY=synthetic-value",
   ])("bloquea contenido sensible sin revelarlo en el error", (sensitiveValue) => {
     const source = createSource();
     source.analysis.technicalSummary = sensitiveValue;
     expect(() => buildReportExportModel(source)).toThrow(
       "No fue posible generar el informe porque los datos no superaron la validación de privacidad.",
     );
+  });
+});
+
+describe("fuentes RAG del informe", () => {
+  it("conserva una lista compacta de fuentes seguras", () => {
+    const model = buildReportExportModel(createSource());
+    expect(model.rag).toMatchObject({ status: "used", used: true });
+    expect(model.rag.sources).toHaveLength(1);
+    expect(model.rag.sources[0]).toMatchObject({
+      id: "11111111-1111-4111-8111-111111111111",
+      similarity: 0.86,
+      url: null,
+    });
+    expect(() => renderReportPdf(model, new Date(2026, 8, 7, 10, 15), logo)).not.toThrow();
+  });
+
+  it("genera el PDF sin fuentes cuando RAG está desactivado", () => {
+    const source = createSource();
+    source.rag = {
+      enabled: false,
+      used: false,
+      status: "disabled",
+      querySummary: "RAG desactivado.",
+      sources: [],
+    };
+    const bytes = renderReportPdf(buildReportExportModel(source), new Date(2026, 8, 7, 10, 15), logo);
+    expect(pdfText(bytes).startsWith("%PDF-")).toBe(true);
+  });
+
+  it("acepta una URL HTTPS legítima terminada en PDF", () => {
+    const source = createSource();
+    source.rag.sources[0]!.url = "https://example.com/manual.pdf";
+    expect(buildReportExportModel(source).rag.sources[0]?.url).toBe("https://example.com/manual.pdf");
+  });
+
+  it.each([
+    "http://example.com/manual.pdf",
+    "https://usuario:clave@example.com/manual.pdf",
+    "https://example.com/manual.pdf?token=valor-sintetico",
+  ])("rechaza la URL RAG insegura %s", (url) => {
+    const source = createSource();
+    source.rag.sources[0]!.url = url;
+    expect(() => buildReportExportModel(source)).toThrow(ReportPdfValidationError);
+  });
+
+  it("bloquea un nombre PDF proporcionado como observación", () => {
+    const source = createSource();
+    source.submittedObservations = "Revisar reporte-cliente.pdf";
+    expect(() => buildReportExportModel(source)).toThrow(ReportPdfValidationError);
+  });
+
+  it("permite fechas, mediciones e identificadores técnicos reconocibles", () => {
+    const source = createSource();
+    source.vehicle.model = "ECU-12345678";
+    source.submittedObservations = "Servicio 2026-09-22 con lectura de 123456 km.";
+    source.rag.sources[0]!.title = "Comprobación PCM-12345678";
+    source.rag.sources[0]!.excerpt = "Comparar PID-12345678 con CAN-12345678.";
+
+    expect(() => buildReportExportModel(source)).not.toThrow();
   });
 });
 

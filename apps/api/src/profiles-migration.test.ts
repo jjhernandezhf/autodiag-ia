@@ -59,7 +59,11 @@ describe("migración local de perfiles autorizados", () => {
 
   it("es posterior a la migración previa y conserva íntegramente su contenido", () => {
     const files = readdirSync(new URL("../../../supabase/migrations/", import.meta.url)).sort();
-    expect(files).toEqual(["20260821000100_create_diagnostic_history.sql", "20260917000100_create_profiles.sql"]);
+    expect(files).toEqual([
+      "20260821000100_create_diagnostic_history.sql",
+      "20260917000100_create_profiles.sql",
+      "20260922000100_create_rag_knowledge.sql",
+    ]);
     const previous = readFileSync(new URL("../../../supabase/migrations/20260821000100_create_diagnostic_history.sql", import.meta.url), "utf8").replaceAll("\r\n", "\n");
     expect(createHash("sha256").update(previous).digest("hex")).toBe("3973a689547ff3d1ffa1893a80536b0e9cccaa67014f2f8f84d331002ec8f13a");
     expect(sql.startsWith("begin;")).toBe(true);
