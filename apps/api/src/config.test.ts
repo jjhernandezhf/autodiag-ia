@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  DEFAULT_DIAGNOSTIC_HISTORY_SAVE_TIMEOUT_MS,
   DEFAULT_OPENAI_EMBEDDING_MODEL,
   DEFAULT_OPENAI_TIMEOUT_MS,
   DEFAULT_PDF_EXTRACTION_LIMITS,
@@ -8,6 +9,7 @@ import {
   DEFAULT_RAG_MATCH_THRESHOLD,
   DEFAULT_RAG_MAX_CONTEXT_CHARACTERS,
   loadEnv,
+  resolveDiagnosticHistorySaveTimeout,
   resolvePdfExtractionLimits,
 } from "./config.js";
 
@@ -28,6 +30,7 @@ describe("configuración sensible", () => {
     expect(env.OPENAI_API_KEY).toBeUndefined();
     expect(env.OPENAI_MODEL).toBeUndefined();
     expect(env.OPENAI_TIMEOUT_MS).toBe(DEFAULT_OPENAI_TIMEOUT_MS);
+    expect(env.DIAGNOSTIC_HISTORY_SAVE_TIMEOUT_MS).toBe(DEFAULT_DIAGNOSTIC_HISTORY_SAVE_TIMEOUT_MS);
     expect(env.RAG_ENABLED).toBe(false);
     expect(env.OPENAI_EMBEDDING_MODEL).toBe(DEFAULT_OPENAI_EMBEDDING_MODEL);
     expect(env.RAG_MATCH_COUNT).toBe(DEFAULT_RAG_MATCH_COUNT);
@@ -53,6 +56,7 @@ describe("configuración sensible", () => {
       PDF_EXTRACTION_TIMEOUT_MS: "",
       PDF_EXTRACTION_WORKER_MEMORY_MB: "\r\n",
       OPENAI_TIMEOUT_MS: " ",
+      DIAGNOSTIC_HISTORY_SAVE_TIMEOUT_MS: "\t",
       RAG_ENABLED: "",
       OPENAI_EMBEDDING_MODEL: " ",
       RAG_MATCH_COUNT: "",
@@ -63,6 +67,7 @@ describe("configuración sensible", () => {
     expect(env.PORT).toBe(3_000);
     expect(env.REPORT_MAX_SIZE_BYTES).toBe(10 * 1024 * 1024);
     expect(env.OPENAI_TIMEOUT_MS).toBe(DEFAULT_OPENAI_TIMEOUT_MS);
+    expect(env.DIAGNOSTIC_HISTORY_SAVE_TIMEOUT_MS).toBe(DEFAULT_DIAGNOSTIC_HISTORY_SAVE_TIMEOUT_MS);
     expect(env.RAG_ENABLED).toBe(false);
     expect(env.OPENAI_EMBEDDING_MODEL).toBe(DEFAULT_OPENAI_EMBEDDING_MODEL);
     expect(env.RAG_MATCH_COUNT).toBe(DEFAULT_RAG_MATCH_COUNT);
@@ -109,6 +114,18 @@ describe("configuración sensible", () => {
     expect(() =>
       loadEnv({ VIN_HMAC_SECRET: "synthetic-config-secret-with-32-bytes", OPENAI_TIMEOUT_MS: "999" }),
     ).toThrow();
+  });
+
+  it("valida el timeout limitado del guardado de historial", () => {
+    const secret = "synthetic-config-secret-with-32-bytes";
+    expect(loadEnv({ VIN_HMAC_SECRET: secret, DIAGNOSTIC_HISTORY_SAVE_TIMEOUT_MS: "100" })
+      .DIAGNOSTIC_HISTORY_SAVE_TIMEOUT_MS).toBe(100);
+    expect(loadEnv({ VIN_HMAC_SECRET: secret, DIAGNOSTIC_HISTORY_SAVE_TIMEOUT_MS: "10000" })
+      .DIAGNOSTIC_HISTORY_SAVE_TIMEOUT_MS).toBe(10_000);
+    expect(() => loadEnv({ VIN_HMAC_SECRET: secret, DIAGNOSTIC_HISTORY_SAVE_TIMEOUT_MS: "99" })).toThrow();
+    expect(() => loadEnv({ VIN_HMAC_SECRET: secret, DIAGNOSTIC_HISTORY_SAVE_TIMEOUT_MS: "10001" })).toThrow();
+    expect(() => resolveDiagnosticHistorySaveTimeout(99)).toThrow();
+    expect(() => resolveDiagnosticHistorySaveTimeout(10_001)).toThrow();
   });
 });
 

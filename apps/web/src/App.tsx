@@ -11,6 +11,7 @@ import {
   containsSensitiveReportText,
   downloadReportPdf,
   isSafeRagSourceUrl,
+  type ReportExportSource,
 } from "./report-pdf";
 
 const PDF_MIME_TYPE = "application/pdf";
@@ -142,6 +143,7 @@ interface AnalysisResponse {
   status: "completed";
   analysis: DiagnosticAnalysis;
   rag: RagMetadata;
+  history: { status: "saved"; id: string } | { status: "unavailable" };
 }
 
 interface AnalysisUiState {
@@ -162,6 +164,44 @@ interface UploadResponse {
   extraction: ExtractionResult;
   analysisPreparation: AnalysisPreparation;
 }
+
+interface HistoryListItem {
+  id: string;
+  createdAt: string;
+  reportReference: string | null;
+  vehicle: { make: string; model: string; year: number };
+  odometer: { value: number; unit: "km" | "mi" } | null;
+  dtcCount: number;
+  ragStatus: RagStatus;
+}
+
+interface HistorySnapshot {
+  extraction: ExtractionResult;
+  analysis: {
+    input: DiagnosticAnalysisInput;
+    counts: AnalysisCounts;
+    output: DiagnosticAnalysis;
+    submittedObservations: string;
+  };
+  rag: RagMetadata;
+}
+
+interface HistoryDetail extends HistoryListItem {
+  analysisModel: string;
+  embeddingModel: string | null;
+  schemaVersion: 1;
+  snapshot: HistorySnapshot;
+}
+
+interface HistoryListResponse {
+  items: HistoryListItem[];
+  nextCursor: string | null;
+}
+
+type HistoryViewState =
+  | { status: "idle" | "loading"; items: HistoryListItem[]; nextCursor: string | null }
+  | { status: "ready" | "empty"; items: HistoryListItem[]; nextCursor: string | null }
+  | { status: "error"; items: HistoryListItem[]; nextCursor: string | null; message: string };
 
 interface ErrorResponse {
   error?: {
@@ -309,11 +349,219 @@ function isRagMetadata(value: unknown): value is RagMetadata {
     !(candidate.status === "disabled" && candidate.enabled);
 }
 
+function isUuid(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value);
+}
+
+function parseHistoryListItem(value: unknown): HistoryListItem | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Partial<HistoryListItem>;
+  if (!hasOnlyKeys(candidate, ["id", "createdAt", "reportReference", "vehicle", "odometer", "dtcCount", "ragStatus"])) return null;
+  if (
+    !isUuid(candidate.id) ||
+    typeof candidate.createdAt !== "string" || !Number.isFinite(Date.parse(candidate.createdAt)) ||
+    !(candidate.reportReference === null || isUuid(candidate.reportReference)) ||
+    !candidate.vehicle || typeof candidate.vehicle !== "object" ||
+    !hasOnlyKeys(candidate.vehicle, ["make", "model", "year"]) ||
+    typeof candidate.vehicle.make !== "string" || !candidate.vehicle.make.trim() ||
+    typeof candidate.vehicle.model !== "string" || !candidate.vehicle.model.trim() ||
+    typeof candidate.vehicle.year !== "number" || !Number.isInteger(candidate.vehicle.year) ||
+    candidate.vehicle.year < 1886 || candidate.vehicle.year > 9_999 ||
+    containsSensitiveReportText(candidate.vehicle.make, "structured_identifier") ||
+    containsSensitiveReportText(candidate.vehicle.model, "structured_identifier") ||
+    typeof candidate.dtcCount !== "number" || !Number.isInteger(candidate.dtcCount) || candidate.dtcCount < 0 ||
+    !["used", "disabled", "not_configured", "no_matches", "unavailable"].includes(candidate.ragStatus ?? "")
+  ) return null;
+  if (candidate.odometer !== null) {
+    if (
+      !candidate.odometer || typeof candidate.odometer !== "object" ||
+      !hasOnlyKeys(candidate.odometer, ["value", "unit"]) ||
+      typeof candidate.odometer.value !== "number" || !Number.isFinite(candidate.odometer.value) || candidate.odometer.value < 0 ||
+      !["km", "mi"].includes(candidate.odometer.unit)
+    ) return null;
+  }
+  return candidate as HistoryListItem;
+}
+
+function isHistoryAnalysisInput(value: unknown): value is DiagnosticAnalysisInput {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<DiagnosticAnalysisInput>;
+  if (!hasOnlyKeys(candidate, ["vehicle", "modules", "observations"])) return false;
+  if (
+    !candidate.vehicle || typeof candidate.vehicle !== "object" ||
+    !hasOnlyKeys(candidate.vehicle, ["make", "model", "year"]) ||
+    typeof candidate.vehicle.make !== "string" || !candidate.vehicle.make.trim() ||
+    typeof candidate.vehicle.model !== "string" || !candidate.vehicle.model.trim() ||
+    typeof candidate.vehicle.year !== "number" || !Number.isInteger(candidate.vehicle.year) ||
+    containsSensitiveReportText(candidate.vehicle.make, "structured_identifier") ||
+    containsSensitiveReportText(candidate.vehicle.model, "structured_identifier") ||
+    !Array.isArray(candidate.modules) || candidate.modules.length === 0 || candidate.modules.length > 40
+  ) return false;
+  if (candidate.observations !== undefined && (
+    typeof candidate.observations !== "string" || candidate.observations.length > 1_000 ||
+    containsSensitiveReportText(candidate.observations, "free_text")
+  )) return false;
+  return candidate.modules.every((module) =>
+    module !== null && typeof module === "object" &&
+    hasOnlyKeys(module, ["code", "name", "dtcs"]) &&
+    (module.code === null || (typeof module.code === "string" && !!module.code.trim() && !containsSensitiveReportText(module.code, "structured_identifier"))) &&
+    typeof module.name === "string" && !!module.name.trim() && !containsSensitiveReportText(module.name, "structured_identifier") &&
+    Array.isArray(module.dtcs) && module.dtcs.length > 0 && module.dtcs.length <= 20 &&
+    module.dtcs.every((dtc) =>
+      dtc !== null && typeof dtc === "object" &&
+      hasOnlyKeys(dtc, ["code", "description", "status", "alsoHistorical"]) &&
+      typeof dtc.code === "string" && !!dtc.code.trim() && !containsSensitiveReportText(dtc.code, "structured_identifier") &&
+      typeof dtc.description === "string" && !!dtc.description.trim() && !containsSensitiveReportText(dtc.description, "free_text") &&
+      ["current", "confirmed", "stored", "pending", "permanent", "intermittent"].includes(dtc.status) &&
+      typeof dtc.alsoHistorical === "boolean"
+    )
+  );
+}
+
+function parseHistoryExtraction(value: unknown): ExtractionResult | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Partial<ExtractionResult>;
+  if (!hasOnlyKeys(candidate, ["status", "format", "requiresManualReview", "vehicle", "scanSummary", "systems", "dtcs", "warnings"])) return null;
+  const vehicle = candidate.vehicle;
+  const scan = candidate.scanSummary;
+  if (
+    candidate.status !== "completed" || candidate.format !== "autel_vehicle_diagnostic_report" ||
+    candidate.requiresManualReview !== false || !vehicle || typeof vehicle !== "object" ||
+    !hasOnlyKeys(vehicle, ["year", "make", "model", "engine", "odometer", "vinMasked", "vinPseudonym"]) ||
+    !(vehicle.year === null || (Number.isInteger(vehicle.year) && vehicle.year >= 1886 && vehicle.year <= 9_999)) ||
+    !(vehicle.make === null || (typeof vehicle.make === "string" && !!vehicle.make.trim() && !containsSensitiveReportText(vehicle.make, "structured_identifier"))) ||
+    !(vehicle.model === null || (typeof vehicle.model === "string" && !!vehicle.model.trim() && !containsSensitiveReportText(vehicle.model, "structured_identifier"))) ||
+    !(vehicle.engine === null || (typeof vehicle.engine === "string" && !!vehicle.engine.trim() && !containsSensitiveReportText(vehicle.engine, "structured_identifier"))) ||
+    !(vehicle.vinMasked === null || (typeof vehicle.vinMasked === "string" && /^\*{13}[A-HJ-NPR-Z0-9]{4}$/u.test(vehicle.vinMasked))) ||
+    vehicle.vinPseudonym !== null || !scan || typeof scan !== "object" ||
+    !hasOnlyKeys(scan, ["declaredSystems", "parsedSystems", "declaredDtcs", "parsedDtcs"]) ||
+    !Array.isArray(candidate.systems) || !Array.isArray(candidate.dtcs) || !Array.isArray(candidate.warnings)
+  ) return null;
+  if (vehicle.odometer !== null && (
+    !vehicle.odometer || typeof vehicle.odometer !== "object" ||
+    !hasOnlyKeys(vehicle.odometer, ["value", "unit"]) ||
+    typeof vehicle.odometer.value !== "number" || !Number.isFinite(vehicle.odometer.value) || vehicle.odometer.value < 0 ||
+    !["km", "mi"].includes(vehicle.odometer.unit)
+  )) return null;
+  const validOptionalCount = (item: unknown) => item === null || (typeof item === "number" && Number.isInteger(item) && item >= 0);
+  const validRequiredCount = (item: unknown) => typeof item === "number" && Number.isInteger(item) && item >= 0;
+  if (
+    !validOptionalCount(scan.declaredSystems) || !validOptionalCount(scan.declaredDtcs) ||
+    !validRequiredCount(scan.parsedSystems) || !validRequiredCount(scan.parsedDtcs)
+  ) return null;
+  const systemsValid = candidate.systems.every((system) =>
+    system !== null && typeof system === "object" && hasOnlyKeys(system, ["code", "name", "dtcCount"]) &&
+    (system.code === null || (typeof system.code === "string" && !!system.code.trim() && !containsSensitiveReportText(system.code, "structured_identifier"))) &&
+    typeof system.name === "string" && !!system.name.trim() && !containsSensitiveReportText(system.name, "structured_identifier") &&
+    typeof system.dtcCount === "number" && Number.isInteger(system.dtcCount) && system.dtcCount >= 0
+  );
+  const dtcsValid = candidate.dtcs.every((dtc) =>
+    dtc !== null && typeof dtc === "object" &&
+    hasOnlyKeys(dtc, ["code", "moduleCode", "moduleName", "status", "statusOriginal", "classification", "descriptionOriginal"]) &&
+    typeof dtc.code === "string" && !!dtc.code.trim() && !containsSensitiveReportText(dtc.code, "structured_identifier") &&
+    (dtc.moduleCode === null || (typeof dtc.moduleCode === "string" && !!dtc.moduleCode.trim() && !containsSensitiveReportText(dtc.moduleCode, "structured_identifier"))) &&
+    typeof dtc.moduleName === "string" && !!dtc.moduleName.trim() && !containsSensitiveReportText(dtc.moduleName, "structured_identifier") &&
+    ["current", "confirmed", "stored", "pending", "permanent", "intermittent", "history", "unknown"].includes(dtc.status) &&
+    (dtc.statusOriginal === null || (typeof dtc.statusOriginal === "string" && !containsSensitiveReportText(dtc.statusOriginal, "source_text"))) &&
+    ["actionable", "historical", "unknown"].includes(dtc.classification) &&
+    typeof dtc.descriptionOriginal === "string" && !!dtc.descriptionOriginal.trim() &&
+    !containsSensitiveReportText(dtc.descriptionOriginal, "source_text")
+  );
+  const warningsValid = candidate.warnings.every((warning) =>
+    warning !== null && typeof warning === "object" && hasOnlyKeys(warning, ["code", "message"]) &&
+    typeof warning.code === "string" && !!warning.code.trim() &&
+    typeof warning.message === "string" && !!warning.message.trim() &&
+    !containsSensitiveReportText(warning.message, "source_text")
+  );
+  return systemsValid && dtcsValid && warningsValid ? candidate as ExtractionResult : null;
+}
+
+function parseHistoryDetail(value: unknown): HistoryDetail | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Partial<HistoryDetail>;
+  if (!hasOnlyKeys(candidate, [
+    "id", "createdAt", "reportReference", "vehicle", "odometer", "dtcCount", "ragStatus",
+    "analysisModel", "embeddingModel", "schemaVersion", "snapshot",
+  ])) return null;
+  const listItem = parseHistoryListItem({
+    id: candidate.id,
+    createdAt: candidate.createdAt,
+    reportReference: candidate.reportReference,
+    vehicle: candidate.vehicle,
+    odometer: candidate.odometer,
+    dtcCount: candidate.dtcCount,
+    ragStatus: candidate.ragStatus,
+  });
+  const snapshot = candidate.snapshot;
+  if (
+    !listItem || typeof candidate.analysisModel !== "string" || !candidate.analysisModel.trim() ||
+    containsSensitiveReportText(candidate.analysisModel, "structured_identifier") ||
+    !(candidate.embeddingModel === null || (
+      typeof candidate.embeddingModel === "string" && !!candidate.embeddingModel.trim() &&
+      !containsSensitiveReportText(candidate.embeddingModel, "structured_identifier")
+    )) ||
+    candidate.schemaVersion !== 1 || !snapshot || typeof snapshot !== "object" ||
+    !hasOnlyKeys(snapshot, ["extraction", "analysis", "rag"]) ||
+    !snapshot.analysis || typeof snapshot.analysis !== "object" ||
+    !hasOnlyKeys(snapshot.analysis, ["input", "counts", "output", "submittedObservations"])
+  ) return null;
+  const extraction = parseHistoryExtraction(snapshot.extraction);
+  const input = isHistoryAnalysisInput(snapshot.analysis.input) ? snapshot.analysis.input : null;
+  const output = isDiagnosticAnalysis(snapshot.analysis.output) ? snapshot.analysis.output : null;
+  const rag = isRagMetadata(snapshot.rag) ? snapshot.rag : null;
+  const counts = snapshot.analysis.counts;
+  const inputDtcIdentities = input === null ? new Set<string>() : new Set(input.modules.flatMap((module) =>
+    module.dtcs.map((dtc) => dtcIdentity({ code: dtc.code, moduleCode: module.code, moduleName: module.name })),
+  ));
+  const findingIdentities = output?.findings.flatMap((finding) =>
+    finding.relatedDtc === null ? [] : [dtcIdentity(finding.relatedDtc)],
+  ) ?? [];
+  const correlationIdentities = output?.observationCorrelation.matches.map((match) => dtcIdentity(match.relatedDtc)) ?? [];
+  if (
+    !extraction || !input || !output || !rag || !counts || typeof counts !== "object" ||
+    !hasOnlyKeys(counts, ["detected", "actionable", "historical"]) ||
+    ![counts.detected, counts.actionable, counts.historical].every((count) => typeof count === "number" && Number.isInteger(count) && count >= 0) ||
+    typeof snapshot.analysis.submittedObservations !== "string" ||
+    snapshot.analysis.submittedObservations !== (input.observations ?? "") ||
+    listItem.dtcCount !== extraction.dtcs.length || listItem.ragStatus !== rag.status ||
+    listItem.vehicle.make !== input.vehicle.make || listItem.vehicle.model !== input.vehicle.model ||
+    listItem.vehicle.year !== input.vehicle.year ||
+    JSON.stringify(listItem.odometer) !== JSON.stringify(extraction.vehicle.odometer) ||
+    rag.used !== (candidate.embeddingModel !== null) ||
+    counts.detected !== extraction.dtcs.length ||
+    counts.actionable !== input.modules.reduce((total, module) => total + module.dtcs.length, 0) ||
+    counts.historical !== extraction.dtcs.filter((dtc) => dtc.classification === "historical").length ||
+    findingIdentities.some((identity) => !inputDtcIdentities.has(identity)) ||
+    new Set(findingIdentities).size !== findingIdentities.length ||
+    correlationIdentities.some((identity) => !inputDtcIdentities.has(identity)) ||
+    new Set(correlationIdentities).size !== correlationIdentities.length
+  ) return null;
+  return { ...listItem, analysisModel: candidate.analysisModel, embeddingModel: candidate.embeddingModel, schemaVersion: 1, snapshot: { extraction, analysis: { input, counts, output, submittedObservations: snapshot.analysis.submittedObservations }, rag } };
+}
+
+function parseHistoryListResponse(value: unknown): HistoryListResponse | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Partial<HistoryListResponse>;
+  if (!hasOnlyKeys(candidate, ["items", "nextCursor"]) || !Array.isArray(candidate.items)) return null;
+  const items = candidate.items.map(parseHistoryListItem);
+  if (items.some((item) => item === null) || !(candidate.nextCursor === null || typeof candidate.nextCursor === "string")) return null;
+  return { items: items as HistoryListItem[], nextCursor: candidate.nextCursor };
+}
+
 function parseAnalysisResponse(value: unknown): AnalysisResponse | null {
   if (!value || typeof value !== "object") return null;
   const candidate = value as Partial<AnalysisResponse>;
   if (candidate.status !== "completed" || !isDiagnosticAnalysis(candidate.analysis) || !isRagMetadata(candidate.rag)) return null;
-  return { status: candidate.status, analysis: candidate.analysis, rag: candidate.rag };
+  const history = candidate.history;
+  if (history !== undefined && (
+    !history || typeof history !== "object" ||
+    !hasOnlyKeys(history, ["status", "id"]) ||
+    !["saved", "unavailable"].includes(history.status) ||
+    (history.status === "saved"
+      ? !("id" in history) || !isUuid(history.id)
+      : "id" in history)
+  )) return null;
+  return { status: candidate.status, analysis: candidate.analysis, rag: candidate.rag, history: history ?? { status: "unavailable" } };
 }
 
 function dtcIdentity(value: { code: string; moduleCode: string | null; moduleName: string }) {
@@ -588,6 +836,112 @@ function normalizeObservations(value: string) {
   return value.trim();
 }
 
+function buildHistoryContext(reportReference: string, extraction: ExtractionResult) {
+  return {
+    reportReference,
+    extraction: {
+      status: extraction.status,
+      format: extraction.format,
+      requiresManualReview: extraction.requiresManualReview,
+      vehicle: {
+        year: extraction.vehicle.year,
+        make: extraction.vehicle.make,
+        model: extraction.vehicle.model,
+        engine: extraction.vehicle.engine,
+        odometer: extraction.vehicle.odometer === null ? null : { ...extraction.vehicle.odometer },
+        vinMasked: extraction.vehicle.vinMasked,
+        vinPseudonym: extraction.vehicle.vinPseudonym,
+      },
+      scanSummary: { ...extraction.scanSummary },
+      systems: extraction.systems.map((system) => ({ ...system })),
+      dtcs: extraction.dtcs.map((dtc) => ({ ...dtc })),
+      warnings: extraction.warnings.map((warning) => ({ ...warning })),
+    },
+  };
+}
+
+function createReportExportSource(
+  extraction: ExtractionResult,
+  input: DiagnosticAnalysisInput,
+  counts: AnalysisCounts,
+  analysis: DiagnosticAnalysis,
+  rag: RagMetadata,
+  submittedObservations: string,
+): ReportExportSource {
+  return {
+    vehicle: {
+      make: extraction.vehicle.make,
+      model: extraction.vehicle.model,
+      year: extraction.vehicle.year,
+      odometer: extraction.vehicle.odometer === null ? null : { ...extraction.vehicle.odometer },
+    },
+    counts: {
+      systems: extraction.scanSummary.parsedSystems,
+      detected: counts.detected,
+      actionable: counts.actionable,
+      historical: counts.historical,
+    },
+    actionableModules: input.modules.map((module) => ({
+      code: module.code,
+      name: module.name,
+      dtcs: module.dtcs.map((dtc) => ({
+        code: dtc.code,
+        description: dtc.description,
+        status: dtc.status,
+        alsoHistorical: dtc.alsoHistorical,
+      })),
+    })),
+    documentaryDtcs: extraction.dtcs.map((dtc) => ({
+      code: dtc.code,
+      moduleCode: dtc.moduleCode,
+      moduleName: dtc.moduleName,
+      description: dtc.descriptionOriginal,
+      originalStatus: dtc.statusOriginal,
+      normalizedClassification: dtc.classification,
+    })),
+    analysis: {
+      technicalSummary: analysis.technicalSummary,
+      findings: analysis.findings.map((finding) => ({
+        relatedDtc: finding.relatedDtc === null ? null : { ...finding.relatedDtc },
+        priority: finding.priority,
+        simpleExplanation: finding.simpleExplanation,
+        possibleCauses: [...finding.possibleCauses],
+        recommendedChecks: [...finding.recommendedChecks],
+        safetyWarnings: [...finding.safetyWarnings],
+        confidence: finding.confidence,
+      })),
+      observationCorrelation: {
+        status: analysis.observationCorrelation.status,
+        summary: analysis.observationCorrelation.summary,
+        matches: analysis.observationCorrelation.matches.map((match) => ({
+          relatedDtc: { ...match.relatedDtc },
+          observation: match.observation,
+          possibleRelation: match.possibleRelation,
+          confidence: match.confidence,
+        })),
+      },
+      safetyWarnings: [...analysis.safetyWarnings],
+      confidence: analysis.confidence,
+      requiresTechnicianConfirmation: analysis.requiresTechnicianConfirmation,
+    },
+    rag: {
+      enabled: rag.enabled,
+      used: rag.used,
+      status: rag.status,
+      querySummary: rag.querySummary,
+      sources: rag.sources.map((source) => ({
+        id: source.id,
+        title: source.title,
+        label: source.label,
+        ...(source.url === undefined ? {} : { url: source.url }),
+        similarity: source.similarity,
+        excerpt: source.excerpt,
+      })),
+    },
+    submittedObservations,
+  };
+}
+
 function AiAnalysisSection({
   preparation,
   state,
@@ -654,7 +1008,7 @@ function AiAnalysisSection({
                 <li>Códigos DTC, descripciones y estados.</li>
                 {observationsProvided && <li>Las observaciones del vehículo escritas en el formulario.</li>}
               </ul>
-              <p className="data-exclusion"><strong>No se enviarán</strong> VIN, PDF, odómetro ni datos del cliente.</p>
+              <p className="data-exclusion"><strong>No se enviarán a OpenAI</strong> el VIN protegido, el PDF, el odómetro ni datos del cliente. El historial recibe solo snapshots técnicos sanitizados.</p>
               <div className="confirmation-actions">
                 <button className="analysis-button" type="button" onClick={onConfirm}>Confirmar y analizar</button>
                 <button className="secondary-button" type="button" onClick={onCancelConfirmation}>Cancelar</button>
@@ -748,6 +1102,13 @@ function ReportWorkspace({
   const [isDragging, setIsDragging] = useState(false);
   const [pdfStatus, setPdfStatus] = useState<PdfStatus>("idle");
   const [pdfMessage, setPdfMessage] = useState("");
+  const [workspaceView, setWorkspaceView] = useState<"new" | "history">("new");
+  const [historyState, setHistoryState] = useState<HistoryViewState>({ status: "idle", items: [], nextCursor: null });
+  const [historyDetail, setHistoryDetail] = useState<HistoryDetail | null>(null);
+  const [historyDetailStatus, setHistoryDetailStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [historyDetailMessage, setHistoryDetailMessage] = useState("");
+  const [historyPdfStatus, setHistoryPdfStatus] = useState<PdfStatus>("idle");
+  const [historyPdfMessage, setHistoryPdfMessage] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   const logoRef = useRef<HTMLImageElement>(null);
   const uploadInProgressRef = useRef(false);
@@ -759,6 +1120,10 @@ function ReportWorkspace({
   const pdfGenerationInProgressRef = useRef(false);
   const pdfSequenceRef = useRef(0);
   const activePdfGenerationRef = useRef<{ id: number; reportId: string } | null>(null);
+  const historyListSequenceRef = useRef(0);
+  const historyDetailSequenceRef = useRef(0);
+  const historyListControllerRef = useRef<AbortController | null>(null);
+  const historyDetailControllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => () => {
     uploadSequenceRef.current += 1;
@@ -766,12 +1131,16 @@ function ReportWorkspace({
     pdfSequenceRef.current += 1;
     activeUploadRef.current?.controller.abort();
     activeAnalysisRef.current?.controller.abort();
+    historyListControllerRef.current?.abort();
+    historyDetailControllerRef.current?.abort();
     activeUploadRef.current = null;
     activeAnalysisRef.current = null;
     uploadInProgressRef.current = false;
     analysisInProgressRef.current = false;
     pdfGenerationInProgressRef.current = false;
     activePdfGenerationRef.current = null;
+    historyListControllerRef.current = null;
+    historyDetailControllerRef.current = null;
   }, []);
 
   function invalidateActiveSession() {
@@ -780,9 +1149,19 @@ function ReportWorkspace({
     pdfSequenceRef.current += 1;
     activeUploadRef.current?.controller.abort();
     activeAnalysisRef.current?.controller.abort();
+    historyListControllerRef.current?.abort();
+    historyDetailControllerRef.current?.abort();
     activeUploadRef.current = null;
     activeAnalysisRef.current = null;
     activePdfGenerationRef.current = null;
+    historyListControllerRef.current = null;
+    historyDetailControllerRef.current = null;
+    historyListSequenceRef.current += 1;
+    historyDetailSequenceRef.current += 1;
+    setHistoryState({ status: "idle", items: [], nextCursor: null });
+    setHistoryDetail(null);
+    setHistoryDetailStatus("idle");
+    setHistoryDetailMessage("");
     uploadInProgressRef.current = false;
     analysisInProgressRef.current = false;
     pdfGenerationInProgressRef.current = false;
@@ -1008,7 +1387,10 @@ function ReportWorkspace({
       const response = await authService.authenticatedFetch("/api/reports/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(requestInput),
+        body: JSON.stringify({
+          input: requestInput,
+          historyContext: buildHistoryContext(uploadResult.id, uploadResult.extraction),
+        }),
         signal: controller.signal,
       });
       if (response.status === 401) {
@@ -1064,6 +1446,9 @@ function ReportWorkspace({
         rag: result.rag,
         submittedObservations: normalizedObservations,
       });
+      if (result.history.status === "saved") {
+        setHistoryState({ status: "idle", items: [], nextCursor: null });
+      }
     } catch (error) {
       if (!isActiveAnalysis()) return;
       if (error instanceof DOMException && error.name === "AbortError") return;
@@ -1119,6 +1504,9 @@ function ReportWorkspace({
           make: uploadResult.extraction.vehicle.make,
           model: uploadResult.extraction.vehicle.model,
           year: uploadResult.extraction.vehicle.year,
+          odometer: uploadResult.extraction.vehicle.odometer === null
+            ? null
+            : { ...uploadResult.extraction.vehicle.odometer },
         },
         counts: {
           systems: uploadResult.extraction.scanSummary.parsedSystems,
@@ -1209,6 +1597,145 @@ function ReportWorkspace({
     }
   }
 
+  async function loadHistory(append: boolean) {
+    const cursor = append ? historyState.nextCursor : null;
+    if (append && cursor === null) return;
+    historyListControllerRef.current?.abort();
+    const controller = new AbortController();
+    const sequence = ++historyListSequenceRef.current;
+    historyListControllerRef.current = controller;
+    setHistoryState((current) => ({
+      status: "loading",
+      items: append ? current.items : [],
+      nextCursor: append ? current.nextCursor : null,
+    }));
+    try {
+      const parameters = new URLSearchParams({ limit: "20" });
+      if (cursor) parameters.set("cursor", cursor);
+      const response = await authService.authenticatedFetch(`/api/history?${parameters.toString()}`, {
+        signal: controller.signal,
+      });
+      if (response.status === 401) {
+        invalidateActiveSession();
+        return;
+      }
+      const body = await response.json() as unknown;
+      if (sequence !== historyListSequenceRef.current || historyListControllerRef.current !== controller) return;
+      if (!response.ok) throw new Error("No fue posible cargar el historial.");
+      const parsed = parseHistoryListResponse(body);
+      if (!parsed) throw new Error("El servidor devolvió un historial inválido.");
+      setHistoryState((current) => {
+        const combined = append ? [...current.items, ...parsed.items] : parsed.items;
+        const unique = combined.filter((item, index) => combined.findIndex((candidate) => candidate.id === item.id) === index);
+        return {
+          status: unique.length === 0 ? "empty" : "ready",
+          items: unique,
+          nextCursor: parsed.nextCursor,
+        };
+      });
+    } catch (error) {
+      if (controller.signal.aborted || sequence !== historyListSequenceRef.current) return;
+      if (error instanceof BrowserAuthenticationError && error.code === "AUTH_SESSION_INVALID") {
+        invalidateActiveSession();
+        return;
+      }
+      setHistoryState((current) => ({
+        status: "error",
+        items: current.items,
+        nextCursor: current.nextCursor,
+        message: error instanceof Error ? error.message : "No fue posible cargar el historial.",
+      }));
+    } finally {
+      if (historyListControllerRef.current === controller) historyListControllerRef.current = null;
+    }
+  }
+
+  function showHistory() {
+    setWorkspaceView("history");
+    setHistoryDetail(null);
+    setHistoryDetailStatus("idle");
+    setHistoryDetailMessage("");
+    setHistoryPdfStatus("idle");
+    setHistoryPdfMessage("");
+    if (historyState.status === "idle") void loadHistory(false);
+  }
+
+  function showNewDiagnostic() {
+    historyDetailControllerRef.current?.abort();
+    historyDetailControllerRef.current = null;
+    historyDetailSequenceRef.current += 1;
+    setWorkspaceView("new");
+    setHistoryDetail(null);
+    setHistoryDetailStatus("idle");
+    setHistoryDetailMessage("");
+    setHistoryPdfStatus("idle");
+    setHistoryPdfMessage("");
+  }
+
+  async function openHistory(id: string) {
+    historyDetailControllerRef.current?.abort();
+    const controller = new AbortController();
+    const sequence = ++historyDetailSequenceRef.current;
+    historyDetailControllerRef.current = controller;
+    setHistoryDetail(null);
+    setHistoryDetailStatus("loading");
+    setHistoryDetailMessage("");
+    setHistoryPdfStatus("idle");
+    setHistoryPdfMessage("");
+    try {
+      const response = await authService.authenticatedFetch(`/api/history/${encodeURIComponent(id)}`, {
+        signal: controller.signal,
+      });
+      if (response.status === 401) {
+        invalidateActiveSession();
+        return;
+      }
+      const body = await response.json() as unknown;
+      if (sequence !== historyDetailSequenceRef.current || historyDetailControllerRef.current !== controller) return;
+      if (!response.ok) throw new Error("No fue posible abrir el diagnóstico.");
+      if (!body || typeof body !== "object" || !hasOnlyKeys(body, ["history"])) {
+        throw new Error("El servidor devolvió un diagnóstico inválido.");
+      }
+      const parsed = parseHistoryDetail((body as { history?: unknown }).history);
+      if (!parsed) throw new Error("El servidor devolvió un diagnóstico inválido.");
+      setHistoryDetail(parsed);
+      setHistoryDetailStatus("ready");
+    } catch (error) {
+      if (controller.signal.aborted || sequence !== historyDetailSequenceRef.current) return;
+      if (error instanceof BrowserAuthenticationError && error.code === "AUTH_SESSION_INVALID") {
+        invalidateActiveSession();
+        return;
+      }
+      setHistoryDetailStatus("error");
+      setHistoryDetailMessage(error instanceof Error ? error.message : "No fue posible abrir el diagnóstico.");
+    } finally {
+      if (historyDetailControllerRef.current === controller) historyDetailControllerRef.current = null;
+    }
+  }
+
+  async function downloadHistoryPdf() {
+    if (!historyDetail || historyPdfStatus === "generating" || !logoRef.current) return;
+    setHistoryPdfStatus("generating");
+    setHistoryPdfMessage("Creando el informe desde el historial…");
+    try {
+      const snapshot = historyDetail.snapshot;
+      const source = createReportExportSource(
+        snapshot.extraction,
+        snapshot.analysis.input,
+        snapshot.analysis.counts,
+        snapshot.analysis.output,
+        snapshot.rag,
+        snapshot.analysis.submittedObservations,
+      );
+      await downloadReportPdf(buildReportExportModel(source), new Date(), logoRef.current);
+      setHistoryPdfStatus("success");
+      setHistoryPdfMessage("Informe histórico descargado correctamente.");
+    } catch {
+      setHistoryPdfStatus("error");
+      setHistoryPdfMessage("No fue posible generar el informe histórico.");
+    }
+  }
+
   const normalizedObservations = normalizeObservations(observations);
   const observationsChanged = analysisState.status === "completed"
     && analysisState.submittedObservations !== undefined
@@ -1236,6 +1763,26 @@ function ReportWorkspace({
 
       {logoutError && <div className="logout-error" role="alert">{logoutError}</div>}
 
+      <nav className="workspace-navigation" aria-label="Secciones principales">
+        <button
+          type="button"
+          className={workspaceView === "new" ? "is-active" : ""}
+          aria-current={workspaceView === "new" ? "page" : undefined}
+          onClick={showNewDiagnostic}
+        >
+          Nuevo diagnóstico
+        </button>
+        <button
+          type="button"
+          className={workspaceView === "history" ? "is-active" : ""}
+          aria-current={workspaceView === "history" ? "page" : undefined}
+          onClick={showHistory}
+        >
+          Historial
+        </button>
+      </nav>
+
+      {workspaceView === "new" ? (
       <section className="upload-card" aria-labelledby="upload-title">
         <div className="intro">
           <span className="eyebrow">ANÁLISIS AUTOMOTRIZ</span>
@@ -1386,9 +1933,94 @@ function ReportWorkspace({
 
         <div className="privacy-note">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 10V7a6 6 0 0 1 12 0v3M5 10h14v11H5z" /><path d="M12 14v3" /></svg>
-          <p><strong>Tu archivo se procesa de forma temporal</strong><span>El PDF no se almacena ni se envía; solo los datos técnicos confirmados participan en análisis y recuperación.</span></p>
+          <p><strong>Tu archivo se procesa de forma temporal</strong><span>El PDF no se almacena ni se envía. Tras el análisis se intenta guardar únicamente un historial técnico estructurado y sanitizado.</span></p>
         </div>
       </section>
+      ) : (
+        <section className="upload-card history-card" aria-labelledby="history-title">
+          <div className="intro">
+            <span className="eyebrow">HISTORIAL SEGURO</span>
+            <h1 id="history-title">Diagnósticos anteriores</h1>
+            <p>Consulta únicamente los diagnósticos asociados a tu sesión.</p>
+          </div>
+
+          {historyDetailStatus === "loading" && (
+            <div className="history-state" role="status"><span className="analysis-spinner" aria-hidden="true" /> Cargando diagnóstico…</div>
+          )}
+          {historyDetailStatus === "error" && (
+            <div className="history-state history-error" role="alert">
+              <p>{historyDetailMessage}</p>
+              <button type="button" onClick={() => setHistoryDetailStatus("idle")}>Volver al historial</button>
+            </div>
+          )}
+          {historyDetailStatus === "ready" && historyDetail ? (
+            <div className="history-detail">
+              <button className="text-button history-back" type="button" onClick={() => {
+                setHistoryDetail(null);
+                setHistoryDetailStatus("idle");
+                setHistoryDetailMessage("");
+                setHistoryPdfStatus("idle");
+                setHistoryPdfMessage("");
+              }}>← Volver al historial</button>
+              <div className="history-detail-heading">
+                <div>
+                  <h2>{historyDetail.vehicle.make} {historyDetail.vehicle.model}</h2>
+                  <p>{new Date(historyDetail.createdAt).toLocaleString("es-GT")} · Año {historyDetail.vehicle.year}</p>
+                </div>
+                <span className={`rag-history-status ${historyDetail.ragStatus}`}>RAG: {historyDetail.ragStatus}</span>
+              </div>
+              {historyDetail.odometer && <p className="history-odometer">Odómetro: {historyDetail.odometer.value.toLocaleString("es-GT")} {historyDetail.odometer.unit}</p>}
+              <ExtractionResults extraction={historyDetail.snapshot.extraction} counts={historyDetail.snapshot.analysis.counts} />
+              <section className="analysis-panel completed" aria-labelledby="history-analysis-title">
+                <div className="analysis-heading">
+                  <div><span className="analysis-icon" aria-hidden="true">IA</span><div><h2 id="history-analysis-title">Orientación guardada</h2><p>No se realizó un nuevo análisis al abrir este registro.</p></div></div>
+                </div>
+                <AnalysisResult analysis={historyDetail.snapshot.analysis.output} rag={historyDetail.snapshot.rag} />
+                <div className="pdf-download" aria-live="polite">
+                  <button className="pdf-download-button" type="button" disabled={historyPdfStatus === "generating"} onClick={() => void downloadHistoryPdf()}>
+                    {historyPdfStatus === "generating" ? "Generando informe…" : "Descargar informe PDF"}
+                  </button>
+                  {historyPdfMessage && <p className={historyPdfStatus === "error" ? "pdf-error" : "pdf-success"} role={historyPdfStatus === "error" ? "alert" : "status"}>{historyPdfMessage}</p>}
+                </div>
+              </section>
+            </div>
+          ) : historyDetailStatus === "idle" ? (
+            <div className="history-list-region">
+              {historyState.status === "loading" && historyState.items.length === 0 && (
+                <div className="history-state" role="status"><span className="analysis-spinner" aria-hidden="true" /> Cargando historial…</div>
+              )}
+              {historyState.status === "empty" && <p className="history-state" role="status">Todavía no hay diagnósticos guardados.</p>}
+              {historyState.status === "error" && (
+                <div className="history-state history-error" role="alert">
+                  <p>{historyState.message}</p>
+                  <button type="button" onClick={() => void loadHistory(false)}>Reintentar</button>
+                </div>
+              )}
+              {historyState.items.length > 0 && (
+                <ul className="history-list">
+                  {historyState.items.map((item) => (
+                    <li key={item.id}>
+                      <button type="button" onClick={() => void openHistory(item.id)} aria-label={`Abrir diagnóstico de ${item.vehicle.make} ${item.vehicle.model}`}>
+                        <span className="history-list-main"><strong>{item.vehicle.make} {item.vehicle.model}</strong><small>{new Date(item.createdAt).toLocaleString("es-GT")} · Año {item.vehicle.year}</small></span>
+                        <span className="history-list-meta">
+                          {item.odometer && <span>{item.odometer.value.toLocaleString("es-GT")} {item.odometer.unit}</span>}
+                          <span>{item.dtcCount} DTC</span>
+                          <span>RAG: {item.ragStatus}</span>
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {historyState.nextCursor && (
+                <button className="history-load-more" type="button" disabled={historyState.status === "loading"} onClick={() => void loadHistory(true)}>
+                  {historyState.status === "loading" ? "Cargando…" : "Cargar más"}
+                </button>
+              )}
+            </div>
+          ) : null}
+        </section>
+      )}
 
       <footer>AutoDiag IA · Recepción segura de reportes</footer>
     </main>

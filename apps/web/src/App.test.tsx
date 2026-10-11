@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { downloadReportPdf } from "./report-pdf";
 import { App } from "./App";
-import type { BrowserAuthenticationService } from "./auth-service";
+import type { BrowserAuthenticationService, SupportedAuthEvent } from "./auth-service";
 
 vi.mock("./report-pdf", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./report-pdf")>();
@@ -216,6 +216,114 @@ function successfulAnalysis(observationCorrelation: Record<string, unknown> = {
       requiresTechnicianConfirmation: true,
     },
     rag,
+  });
+}
+
+const HISTORY_ID = "77777777-7777-4777-8777-777777777777";
+
+function historyListResponse() {
+  return createJsonResponse(true, {
+    items: [{
+      id: HISTORY_ID,
+      createdAt: "2026-10-04T12:00:00.000Z",
+      reportReference: "5f02d19b-5fd2-4128-aeb6-c5eef33554a0",
+      vehicle: { make: "Marca Histórica", model: "Modelo Seguro", year: 2024 },
+      odometer: { value: 45678, unit: "km" },
+      dtcCount: 1,
+      ragStatus: "used",
+    }],
+    nextCursor: null,
+  });
+}
+
+function historyDetailResponse() {
+  return createJsonResponse(true, {
+    history: {
+      id: HISTORY_ID,
+      createdAt: "2026-10-04T12:00:00.000Z",
+      reportReference: "5f02d19b-5fd2-4128-aeb6-c5eef33554a0",
+      vehicle: { make: "Marca Histórica", model: "Modelo Seguro", year: 2024 },
+      odometer: { value: 45678, unit: "km" },
+      dtcCount: 1,
+      ragStatus: "used",
+      analysisModel: "synthetic-analysis-model",
+      embeddingModel: "text-embedding-3-small",
+      schemaVersion: 1,
+      snapshot: {
+        extraction: {
+          status: "completed",
+          format: "autel_vehicle_diagnostic_report",
+          requiresManualReview: false,
+          vehicle: {
+            year: 2024,
+            make: "Marca Histórica",
+            model: "Modelo Seguro",
+            engine: "Motor técnico",
+            odometer: { value: 45678, unit: "km" },
+            vinMasked: "*************6789",
+            vinPseudonym: null,
+          },
+          scanSummary: { declaredSystems: 1, parsedSystems: 1, declaredDtcs: 1, parsedDtcs: 1 },
+          systems: [{ code: "PCM", name: "Módulo motriz", dtcCount: 1 }],
+          dtcs: [{
+            code: "P0300",
+            moduleCode: "PCM",
+            moduleName: "Módulo motriz",
+            status: "current",
+            statusOriginal: "Actual",
+            classification: "actionable",
+            descriptionOriginal: "Fallo de encendido sintético",
+          }],
+          warnings: [],
+        },
+        analysis: {
+          input: {
+            vehicle: { make: "Marca Histórica", model: "Modelo Seguro", year: 2024 },
+            modules: [{
+              code: "PCM",
+              name: "Módulo motriz",
+              dtcs: [{ code: "P0300", description: "Fallo de encendido sintético", status: "current", alsoHistorical: false }],
+            }],
+          },
+          counts: { detected: 1, actionable: 1, historical: 0 },
+          output: {
+            technicalSummary: "Orientación histórica validada.",
+            findings: [{
+              relatedDtc: { code: "P0300", moduleCode: "PCM", moduleName: "Módulo motriz" },
+              priority: "high",
+              simpleExplanation: "El DTC requiere comprobaciones profesionales.",
+              possibleCauses: ["Conexión eléctrica deficiente"],
+              recommendedChecks: ["Comprobar alimentación y señal"],
+              safetyWarnings: ["Trabajar con el vehículo inmovilizado"],
+              confidence: "medium",
+            }],
+            observationCorrelation: {
+              status: "not_provided",
+              summary: "No se proporcionaron observaciones adicionales.",
+              matches: [],
+            },
+            safetyWarnings: ["Confirmar antes de sustituir componentes"],
+            confidence: "medium",
+            requiresTechnicianConfirmation: true,
+          },
+          submittedObservations: "",
+        },
+        rag: {
+          enabled: true,
+          used: true,
+          status: "used",
+          querySummary: "Se recuperó evidencia histórica sintética.",
+          sources: [{
+            id: "99999999-9999-4999-8999-999999999999",
+            title: "Comprobación técnica histórica",
+            label: "Fuente sintética",
+            url: "https://example.com/manual",
+            similarity: 0.84,
+            excerpt: "Verificar alimentación y señal antes de sustituir componentes.",
+          }],
+        },
+      },
+    },
   });
 }
 
@@ -562,7 +670,7 @@ describe("orientación asistida por IA", () => {
     const analysisCalls = fetchMock.mock.calls.filter(([url]) => url === "/api/reports/analyze");
     expect(analysisCalls).toHaveLength(1);
     const requestBody = JSON.parse(String((analysisCalls[0]?.[1] as RequestInit).body)) as Record<string, unknown>;
-    expect(requestBody).toEqual({
+    expect(requestBody.input).toEqual({
       vehicle: { make: "Marca Sintética", model: "Modelo Académico", year: 2024 },
       modules: [{
         code: "PCM",
@@ -576,7 +684,13 @@ describe("orientación asistida por IA", () => {
       }],
       observations: "Vibración al acelerar\ncon motor caliente.",
     });
-    expect(JSON.stringify(requestBody)).not.toMatch(/vin|odometer|pdf|sha256|originalName|cliente/iu);
+    expect(requestBody.historyContext).toMatchObject({
+      reportReference: "5f02d19b-5fd2-4128-aeb6-c5eef33554a0",
+      extraction: {
+        vehicle: { vinMasked: "*************6789", vinPseudonym: "vin_v1_private", odometer: { value: 45678, unit: "km" } },
+      },
+    });
+    expect(JSON.stringify(requestBody)).not.toMatch(/originalName|sha256|rawText|cliente/iu);
   });
 
   it("deshabilita las observaciones durante cada solicitud activa", async () => {
@@ -735,7 +849,7 @@ describe("orientación asistida por IA", () => {
 
     expect(screen.getByRole("heading", { name: "Confirma los datos que se enviarán" })).toBeTruthy();
     expect(screen.getByText(/No se enviarán/i)).toBeTruthy();
-    expect(screen.getByText(/VIN, PDF, odómetro ni datos del cliente/i)).toBeTruthy();
+    expect(screen.getByText(/No se enviarán a OpenAI/i)).toBeTruthy();
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     await user.click(screen.getByRole("button", { name: "Confirmar y analizar" }));
@@ -746,7 +860,7 @@ describe("orientación asistida por IA", () => {
     expect(analysisCalls).toHaveLength(1);
 
     const requestBody = JSON.parse(String((analysisCalls[0]?.[1] as RequestInit | undefined)?.body)) as Record<string, unknown>;
-    expect(requestBody).toEqual({
+    expect(requestBody.input).toEqual({
       vehicle: { make: "Marca Sintética", model: "Modelo Académico", year: 2024 },
       modules: [{
         code: "PCM",
@@ -759,8 +873,12 @@ describe("orientación asistida por IA", () => {
         }],
       }],
     });
+    expect(requestBody.historyContext).toMatchObject({
+      reportReference: "5f02d19b-5fd2-4128-aeb6-c5eef33554a0",
+      extraction: { vehicle: { vinMasked: "*************6789", vinPseudonym: "vin_v1_private" } },
+    });
     const serialized = JSON.stringify(requestBody).toLowerCase();
-    for (const forbidden of ["vin", "pdf", "odometer", "originalname", "sha256", "customer", "cliente"]) {
+    for (const forbidden of ["originalname", "sha256", "customer", "cliente", "rawtext"]) {
       expect(serialized).not.toContain(forbidden);
     }
   });
@@ -1058,6 +1176,269 @@ describe("evidencia RAG visible y segura", () => {
   });
 });
 
+describe("historial seguro de diagnósticos", () => {
+  it("carga páginas adicionales sin duplicar registros", async () => {
+    const firstPage = await historyListResponse().json() as { items: Array<Record<string, unknown>> };
+    const secondId = "88888888-8888-4888-8888-888888888888";
+    const authenticatedFetch = vi.fn<BrowserAuthenticationService["authenticatedFetch"]>()
+      .mockResolvedValueOnce(createJsonResponse(true, { ...firstPage, nextCursor: "next-page" }))
+      .mockResolvedValueOnce(createJsonResponse(true, {
+        items: [{
+          ...firstPage.items[0],
+          id: secondId,
+          vehicle: { make: "Segunda Marca", model: "Segundo Modelo", year: 2025 },
+        }],
+        nextCursor: null,
+      }));
+    const user = userEvent.setup();
+    await renderAuthenticatedApp(createTestAuthService({ authenticatedFetch }));
+
+    await user.click(screen.getByRole("button", { name: "Historial" }));
+    expect(await screen.findByRole("button", { name: "Cargar más" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Cargar más" }));
+
+    expect(await screen.findByRole("button", { name: "Abrir diagnóstico de Segunda Marca Segundo Modelo" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Abrir diagnóstico de Marca Histórica Modelo Seguro" })).toBeTruthy();
+    expect(authenticatedFetch.mock.calls.map(([url]) => String(url))).toEqual([
+      "/api/history?limit=20",
+      "/api/history?limit=20&cursor=next-page",
+    ]);
+  });
+
+  it("lista, abre y exporta un diagnóstico histórico sin repetir análisis ni solicitudes", async () => {
+    const authenticatedFetch = vi.fn<BrowserAuthenticationService["authenticatedFetch"]>(async (input, init) => {
+      const url = String(input);
+      expect(init?.method).toBeUndefined();
+      if (url === "/api/history?limit=20") return historyListResponse();
+      if (url === `/api/history/${HISTORY_ID}`) return historyDetailResponse();
+      throw new Error(`Solicitud inesperada: ${url}`);
+    });
+    downloadReportPdfMock.mockResolvedValue("AutoDiagIA_Informe_historico.pdf");
+    const user = userEvent.setup();
+    await renderAuthenticatedApp(createTestAuthService({ authenticatedFetch }));
+
+    await user.click(screen.getByRole("button", { name: "Historial" }));
+    const historyButton = await screen.findByRole("button", { name: "Abrir diagnóstico de Marca Histórica Modelo Seguro" });
+    await user.click(historyButton);
+
+    expect(await screen.findByRole("heading", { name: "Orientación guardada" })).toBeTruthy();
+    expect(screen.getByText("Orientación histórica validada.")).toBeTruthy();
+    expect(screen.getByText("Odómetro: 45,678 km")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Evidencia recuperada por RAG" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Consultar fuente HTTPS" }).getAttribute("href")).toBe("https://example.com/manual");
+
+    const requestsBeforeDownload = authenticatedFetch.mock.calls.length;
+    await user.click(screen.getByRole("button", { name: "Descargar informe PDF" }));
+
+    expect(downloadReportPdfMock).toHaveBeenCalledTimes(1);
+    expect(authenticatedFetch).toHaveBeenCalledTimes(requestsBeforeDownload);
+    expect(authenticatedFetch.mock.calls.map(([url]) => String(url))).toEqual([
+      "/api/history?limit=20",
+      `/api/history/${HISTORY_ID}`,
+    ]);
+    expect(authenticatedFetch.mock.calls.some(([url]) => String(url).includes("/api/reports/analyze"))).toBe(false);
+    const exported = downloadReportPdfMock.mock.calls[0]?.[0];
+    expect(exported?.vehicle.odometer).toEqual({ value: 45678, unit: "km" });
+    expect(JSON.stringify(exported)).not.toMatch(/vin|reportReference|analysisModel|embeddingModel/iu);
+  });
+
+  it("rechaza una instantánea histórica contaminada antes de mostrarla o exportarla", async () => {
+    const contaminated = await historyDetailResponse().json() as {
+      history: { snapshot: { extraction: { vehicle: { engine: string } } } };
+    };
+    contaminated.history.snapshot.extraction.vehicle.engine = "API_KEY=valor-sintetico";
+    const authenticatedFetch = vi.fn<BrowserAuthenticationService["authenticatedFetch"]>(async (input) => (
+      String(input) === "/api/history?limit=20"
+        ? historyListResponse()
+        : createJsonResponse(true, contaminated)
+    ));
+    const user = userEvent.setup();
+    await renderAuthenticatedApp(createTestAuthService({ authenticatedFetch }));
+
+    await user.click(screen.getByRole("button", { name: "Historial" }));
+    await user.click(await screen.findByRole("button", { name: "Abrir diagnóstico de Marca Histórica Modelo Seguro" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain("El servidor devolvió un diagnóstico inválido.");
+    expect(screen.queryByText("API_KEY=valor-sintetico")).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Orientación guardada" })).toBeNull();
+    expect(downloadReportPdfMock).not.toHaveBeenCalled();
+  });
+
+  it("elimina el historial visible al cerrar sesión", async () => {
+    const authenticatedFetch = vi.fn<BrowserAuthenticationService["authenticatedFetch"]>(async () => historyListResponse());
+    const signOutLocal = vi.fn(async () => undefined);
+    const user = userEvent.setup();
+    await renderAuthenticatedApp(createTestAuthService({ authenticatedFetch, signOutLocal }));
+
+    await user.click(screen.getByRole("button", { name: "Historial" }));
+    expect(await screen.findByRole("button", { name: "Abrir diagnóstico de Marca Histórica Modelo Seguro" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Cerrar sesión" }));
+
+    expect(await screen.findByRole("button", { name: "Iniciar sesión" })).toBeTruthy();
+    expect(screen.queryByText("Marca Histórica")).toBeNull();
+    expect(signOutLocal).toHaveBeenCalledOnce();
+  });
+
+  it("descarta el historial anterior cuando cambia la identidad autenticada", async () => {
+    let authListener: ((event: SupportedAuthEvent) => void) | undefined;
+    const secondIdentity = { id: "8b34944b-afec-40ad-a1ee-e31978be731e", username: "otro.usuario" };
+    const authenticatedFetch = vi.fn<BrowserAuthenticationService["authenticatedFetch"]>(async () => historyListResponse());
+    const authService = createTestAuthService({
+      authenticatedFetch,
+      validateCurrentSession: async () => secondIdentity,
+      subscribe: (listener) => {
+        authListener = listener;
+        return () => undefined;
+      },
+    });
+    const user = userEvent.setup();
+    await renderAuthenticatedApp(authService);
+    await user.click(screen.getByRole("button", { name: "Historial" }));
+    expect(await screen.findByRole("button", { name: "Abrir diagnóstico de Marca Histórica Modelo Seguro" })).toBeTruthy();
+
+    await act(async () => {
+      authListener?.("TOKEN_REFRESHED");
+    });
+
+    expect(await screen.findByText("otro.usuario")).toBeTruthy();
+    expect(screen.queryByText("Marca Histórica")).toBeNull();
+    expect(screen.getByRole("heading", { name: "Carga tu reporte Autel" })).toBeTruthy();
+  });
+
+  it("aborta una lista pendiente al cerrar sesión y descarta su respuesta tardía", async () => {
+    const pendingList = createDeferred<Response>();
+    let listSignal: AbortSignal | undefined;
+    const authenticatedFetch = vi.fn<BrowserAuthenticationService["authenticatedFetch"]>((_input, init) => {
+      listSignal = init?.signal as AbortSignal | undefined;
+      return pendingList.promise;
+    });
+    const user = userEvent.setup();
+    await renderAuthenticatedApp(createTestAuthService({ authenticatedFetch }));
+
+    await user.click(screen.getByRole("button", { name: "Historial" }));
+    await waitFor(() => expect(authenticatedFetch).toHaveBeenCalledOnce());
+    await user.click(screen.getByRole("button", { name: "Cerrar sesión" }));
+
+    expect(await screen.findByRole("button", { name: "Iniciar sesión" })).toBeTruthy();
+    expect(listSignal?.aborted).toBe(true);
+    await act(async () => pendingList.resolve(historyListResponse()));
+    expect(screen.queryByText("Marca Histórica")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Cargar más" })).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("aborta un detalle pendiente al cerrar sesión y descarta su respuesta tardía", async () => {
+    const pendingDetail = createDeferred<Response>();
+    let detailSignal: AbortSignal | undefined;
+    const authenticatedFetch = vi.fn<BrowserAuthenticationService["authenticatedFetch"]>((input, init) => {
+      if (String(input) === "/api/history?limit=20") return Promise.resolve(historyListResponse());
+      detailSignal = init?.signal as AbortSignal | undefined;
+      return pendingDetail.promise;
+    });
+    const user = userEvent.setup();
+    await renderAuthenticatedApp(createTestAuthService({ authenticatedFetch }));
+
+    await user.click(screen.getByRole("button", { name: "Historial" }));
+    await user.click(await screen.findByRole("button", { name: "Abrir diagnóstico de Marca Histórica Modelo Seguro" }));
+    await waitFor(() => expect(authenticatedFetch).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByRole("button", { name: "Cerrar sesión" }));
+
+    expect(await screen.findByRole("button", { name: "Iniciar sesión" })).toBeTruthy();
+    expect(detailSignal?.aborted).toBe(true);
+    await act(async () => pendingDetail.resolve(historyDetailResponse()));
+    expect(screen.queryByText("Orientación histórica validada.")).toBeNull();
+    expect(downloadReportPdfMock).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("descarta una lista pendiente de A y permite cargar exclusivamente la lista de B", async () => {
+    const pendingUserA = createDeferred<Response>();
+    let authListener: ((event: SupportedAuthEvent) => void) | undefined;
+    let listSignal: AbortSignal | undefined;
+    const secondIdentity = { id: "8b34944b-afec-40ad-a1ee-e31978be731e", username: "otro.usuario" };
+    const secondPage = await historyListResponse().json() as { items: Array<Record<string, unknown>>; nextCursor: null };
+    secondPage.items[0] = {
+      ...secondPage.items[0],
+      id: "88888888-8888-4888-8888-888888888888",
+      vehicle: { make: "Marca B", model: "Modelo B", year: 2025 },
+    };
+    const authenticatedFetch = vi.fn<BrowserAuthenticationService["authenticatedFetch"]>((_input, init) => {
+      if (authenticatedFetch.mock.calls.length === 1) {
+        listSignal = init?.signal as AbortSignal | undefined;
+        return pendingUserA.promise;
+      }
+      return Promise.resolve(createJsonResponse(true, secondPage));
+    });
+    const authService = createTestAuthService({
+      authenticatedFetch,
+      validateCurrentSession: async () => secondIdentity,
+      subscribe: (listener) => {
+        authListener = listener;
+        return () => undefined;
+      },
+    });
+    const user = userEvent.setup();
+    await renderAuthenticatedApp(authService);
+
+    await user.click(screen.getByRole("button", { name: "Historial" }));
+    await waitFor(() => expect(authenticatedFetch).toHaveBeenCalledOnce());
+    await act(async () => authListener?.("TOKEN_REFRESHED"));
+    expect(await screen.findByText("otro.usuario")).toBeTruthy();
+    expect(listSignal?.aborted).toBe(true);
+    await act(async () => pendingUserA.resolve(historyListResponse()));
+
+    await user.click(screen.getByRole("button", { name: "Historial" }));
+    expect(await screen.findByRole("button", { name: "Abrir diagnóstico de Marca B Modelo B" })).toBeTruthy();
+    expect(screen.queryByText("Marca Histórica")).toBeNull();
+    expect(authenticatedFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("descarta un detalle pendiente de A y permite cargar exclusivamente el historial de B", async () => {
+    const pendingDetailA = createDeferred<Response>();
+    let authListener: ((event: SupportedAuthEvent) => void) | undefined;
+    let detailSignal: AbortSignal | undefined;
+    const secondIdentity = { id: "8b34944b-afec-40ad-a1ee-e31978be731e", username: "otro.usuario" };
+    const secondPage = await historyListResponse().json() as { items: Array<Record<string, unknown>>; nextCursor: null };
+    secondPage.items[0] = {
+      ...secondPage.items[0],
+      id: "88888888-8888-4888-8888-888888888888",
+      vehicle: { make: "Marca B", model: "Modelo B", year: 2025 },
+    };
+    const authenticatedFetch = vi.fn<BrowserAuthenticationService["authenticatedFetch"]>((input, init) => {
+      const url = String(input);
+      if (url === `/api/history/${HISTORY_ID}`) {
+        detailSignal = init?.signal as AbortSignal | undefined;
+        return pendingDetailA.promise;
+      }
+      if (authenticatedFetch.mock.calls.length >= 3) return Promise.resolve(createJsonResponse(true, secondPage));
+      return Promise.resolve(historyListResponse());
+    });
+    const authService = createTestAuthService({
+      authenticatedFetch,
+      validateCurrentSession: async () => secondIdentity,
+      subscribe: (listener) => {
+        authListener = listener;
+        return () => undefined;
+      },
+    });
+    const user = userEvent.setup();
+    await renderAuthenticatedApp(authService);
+
+    await user.click(screen.getByRole("button", { name: "Historial" }));
+    await user.click(await screen.findByRole("button", { name: "Abrir diagnóstico de Marca Histórica Modelo Seguro" }));
+    await waitFor(() => expect(authenticatedFetch).toHaveBeenCalledTimes(2));
+    await act(async () => authListener?.("TOKEN_REFRESHED"));
+    expect(await screen.findByText("otro.usuario")).toBeTruthy();
+    expect(detailSignal?.aborted).toBe(true);
+    await act(async () => pendingDetailA.resolve(historyDetailResponse()));
+
+    await user.click(screen.getByRole("button", { name: "Historial" }));
+    expect(await screen.findByRole("button", { name: "Abrir diagnóstico de Marca B Modelo B" })).toBeTruthy();
+    expect(screen.queryByText("Orientación histórica validada.")).toBeNull();
+    expect(authenticatedFetch).toHaveBeenCalledTimes(3);
+  });
+});
+
 describe("descarga local del informe PDF", () => {
   it("solo queda disponible después de un análisis completado y no realiza solicitudes adicionales", async () => {
     const file = createPdf("informe-local.pdf");
@@ -1089,7 +1470,8 @@ describe("descarga local del informe PDF", () => {
     expect(await screen.findByText("Informe PDF descargado correctamente.")).toBeTruthy();
     const exported = downloadReportPdfMock.mock.calls[0]?.[0];
     expect(exported?.observations.used).toBeNull();
-    expect(JSON.stringify(exported)).not.toMatch(/vin|odometer|Motor privado|originalName|sha256|vin_v1_private/iu);
+    expect(exported?.vehicle.odometer).toEqual({ value: 45678, unit: "km" });
+    expect(JSON.stringify(exported)).not.toMatch(/vin|Motor privado|originalName|sha256|vin_v1_private/iu);
   });
 
   it("usa un bloqueo síncrono para impedir dos descargas por doble clic", async () => {

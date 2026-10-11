@@ -277,6 +277,7 @@ describe("documento PDF", () => {
     expect(raw).toContain("Informe de orientaci");
     expect(raw).toContain("7 de septiembre de 2026");
     expect(raw).toContain("Resumen del veh");
+    expect(raw).toContain("Odómetro: No disponible");
     expect(raw).toContain("Sistemas escaneados");
     expect(raw).toContain("Resumen t");
     expect(raw).toContain("P0300");
@@ -287,7 +288,7 @@ describe("documento PDF", () => {
     expect(raw).toContain("Antecedentes hist");
     expect(raw).toContain("Requiere confirmaci");
     expect(raw).toMatch(/P.gina 1 de \d/u);
-    expect(raw).not.toMatch(/archivo-privado|vin_v1|od.metro|sha256|rawResponse|prompt|token=/iu);
+    expect(raw).not.toMatch(/archivo-privado|vin_v1|sha256|rawResponse|prompt|token=/iu);
   });
 
   it("pagina contenido extenso sin producir una página final vacía", () => {

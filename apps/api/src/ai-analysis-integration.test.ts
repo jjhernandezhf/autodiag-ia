@@ -89,6 +89,7 @@ describe("POST /api/reports/analyze", () => {
         querySummary: "La recuperación de conocimiento está desactivada.",
         sources: [],
       },
+      history: { status: "unavailable" },
     });
   });
 
