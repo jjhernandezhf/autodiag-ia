@@ -12,7 +12,12 @@ export interface ReportDtcReference {
 }
 
 export interface ReportExportSource {
-  vehicle: { make: string | null; model: string | null; year: number | null };
+  vehicle: {
+    make: string | null;
+    model: string | null;
+    year: number | null;
+    odometer?: { value: number; unit: "km" | "mi" } | null;
+  };
   counts: { systems: number; detected: number; actionable: number; historical: number };
   actionableModules: Array<{
     code: string | null;
@@ -77,7 +82,12 @@ export interface ReportExportDtc extends ReportDtcReference {
 }
 
 export interface ReportExportModel {
-  vehicle: { make: string | null; model: string | null; year: number | null };
+  vehicle: {
+    make: string | null;
+    model: string | null;
+    year: number | null;
+    odometer: { value: number; unit: "km" | "mi" } | null;
+  };
   summary: {
     systemsScanned: number;
     detectedRows: number;
@@ -266,7 +276,7 @@ function walkSafeText(value: unknown): void {
 
 export function validateReportExportModel(model: ReportExportModel): void {
   assertOnlyKeys(model, ["vehicle", "summary", "actionableDtcs", "historicalDtcs", "analysis", "observations", "rag"]);
-  assertOnlyKeys(model.vehicle, ["make", "model", "year"]);
+  assertOnlyKeys(model.vehicle, ["make", "model", "year", "odometer"]);
   assertOnlyKeys(model.summary, ["systemsScanned", "detectedRows", "actionableDtcs", "historicalRows", "findings"]);
   assertOnlyKeys(model.analysis, [
     "technicalSummary",
@@ -286,7 +296,12 @@ export function validateReportExportModel(model: ReportExportModel): void {
   if (
     (model.vehicle.make !== null && typeof model.vehicle.make !== "string") ||
     (model.vehicle.model !== null && typeof model.vehicle.model !== "string") ||
-    (model.vehicle.year !== null && (!Number.isSafeInteger(model.vehicle.year) || model.vehicle.year < 1886))
+    (model.vehicle.year !== null && (!Number.isSafeInteger(model.vehicle.year) || model.vehicle.year < 1886)) ||
+    (model.vehicle.odometer !== null && (
+      typeof model.vehicle.odometer !== "object" ||
+      !Number.isFinite(model.vehicle.odometer.value) || model.vehicle.odometer.value < 0 ||
+      !["km", "mi"].includes(model.vehicle.odometer.unit)
+    ))
   ) {
     throw new ReportPdfValidationError();
   }
@@ -468,6 +483,9 @@ export function buildReportExportModel(source: ReportExportSource): ReportExport
       make: source.vehicle.make,
       model: source.vehicle.model,
       year: source.vehicle.year,
+      odometer: source.vehicle.odometer === undefined || source.vehicle.odometer === null
+        ? null
+        : { ...source.vehicle.odometer },
     },
     summary: {
       systemsScanned: source.counts.systems,
@@ -669,6 +687,12 @@ export function renderReportPdf(model: ReportExportModel, generatedAt: Date, log
   labelValue("Marca", model.vehicle.make ?? "No identificado");
   labelValue("Modelo", model.vehicle.model ?? "No identificado");
   labelValue("Año", model.vehicle.year === null ? "No identificado" : String(model.vehicle.year));
+  labelValue(
+    "Odómetro",
+    model.vehicle.odometer === null
+      ? "No disponible"
+      : `${model.vehicle.odometer.value.toLocaleString("es-GT")} ${model.vehicle.odometer.unit}`,
+  );
 
   heading("Resumen del reporte");
   const summaryItems = [

@@ -14,6 +14,7 @@ import { AutelFormatError, extractAutelReport, type PdfPageExtractor } from "./a
 import {
   DEFAULT_MAX_FILE_SIZE_BYTES,
   DEFAULT_OPENAI_TIMEOUT_MS,
+  resolveDiagnosticHistorySaveTimeout,
   resolvePdfExtractionLimits,
   type PdfExtractionLimits,
 } from "./config.js";
@@ -23,6 +24,12 @@ import {
   createAuthenticationService,
   type AuthenticationService,
 } from "./auth-service.js";
+import {
+  DiagnosticHistoryError,
+  DiagnosticHistoryService,
+  parseAnalysisRequest,
+  parseHistoryListQuery,
+} from "./diagnostic-history.js";
 import {
   DISABLED_RAG_RESULT,
   NOT_CONFIGURED_RAG_RESULT,
@@ -62,7 +69,12 @@ type ErrorCode =
   | "AUTH_PROFILE_FORBIDDEN"
   | "AUTH_CONFIGURATION_UNAVAILABLE"
   | "AUTH_PROVIDER_UNAVAILABLE"
-  | "AUTH_RATE_LIMITED";
+  | "AUTH_RATE_LIMITED"
+  | "HISTORY_REQUEST_INVALID"
+  | "HISTORY_ID_INVALID"
+  | "HISTORY_NOT_FOUND"
+  | "HISTORY_DATA_INVALID"
+  | "HISTORY_UNAVAILABLE";
 
 interface ApiErrorBody {
   error: {
@@ -79,10 +91,13 @@ export interface AppOptions {
   openAiApiKey?: string;
   openAiModel?: string;
   openAiTimeoutMs?: number;
+  openAiEmbeddingModel?: string;
   analysisService?: DiagnosticAnalysisService;
   ragEnabled?: boolean;
   ragService?: Pick<RagRetrievalService, "retrieve">;
   authenticationService?: AuthenticationService;
+  historyService?: DiagnosticHistoryService;
+  diagnosticHistorySaveTimeoutMs?: number;
 }
 
 class UploadValidationError extends Error {
@@ -107,6 +122,9 @@ export function createApp(options: AppOptions) {
   const openAiApiKey = options.openAiApiKey?.trim();
   const openAiModel = options.openAiModel?.trim();
   const authenticationService = options.authenticationService ?? createAuthenticationService();
+  const diagnosticHistorySaveTimeoutMs = resolveDiagnosticHistorySaveTimeout(
+    options.diagnosticHistorySaveTimeoutMs,
+  );
   let analysisService = options.analysisService;
   if (Buffer.byteLength(options.vinHmacSecret, "utf8") < 32) {
     throw new Error("VIN_HMAC_SECRET debe contener al menos 32 bytes.");
@@ -244,7 +262,8 @@ export function createApp(options: AppOptions) {
   });
 
   app.post("/api/reports/analyze", requireAuthentication, async (request, response) => {
-    const input = validateDiagnosticAnalysisInput(request.body);
+    const parsedRequest = parseAnalysisRequest(request.body);
+    const input = validateDiagnosticAnalysisInput(parsedRequest.input);
 
     if (!analysisService) {
       if (!openAiApiKey) {
@@ -272,7 +291,59 @@ export function createApp(options: AppOptions) {
     }
 
     const analysis = await analysisService.analyze(input, ragResult.evidence);
-    response.json({ status: "completed", analysis, rag: ragResult.metadata });
+    let history: { status: "saved"; id: string } | { status: "unavailable" } = { status: "unavailable" };
+    if (
+      options.historyService &&
+      parsedRequest.historyContext &&
+      request.usuario &&
+      openAiModel
+    ) {
+      try {
+        const abortController = new AbortController();
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        const timeoutPromise = new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => {
+            abortController.abort();
+            reject(new DiagnosticHistoryError("HISTORY_UNAVAILABLE"));
+          }, diagnosticHistorySaveTimeoutMs);
+        });
+        const savePromise = options.historyService.save(request.usuario.id, {
+          context: parsedRequest.historyContext,
+          input,
+          analysis,
+          rag: ragResult.metadata,
+          analysisModel: openAiModel,
+          embeddingModel: options.openAiEmbeddingModel?.trim() || null,
+        }, abortController.signal);
+        const id = await Promise.race([savePromise, timeoutPromise]).finally(() => {
+          if (timeout !== undefined) clearTimeout(timeout);
+        });
+        history = { status: "saved", id };
+      } catch {
+        console.warn("DIAGNOSTIC_HISTORY_SAVE_FAILED");
+      }
+    }
+    response.json({ status: "completed", analysis, rag: ragResult.metadata, history });
+  });
+
+  app.get("/api/history", requireAuthentication, async (request, response) => {
+    if (!options.historyService || !request.usuario) {
+      sendError(response, 503, "HISTORY_UNAVAILABLE", "El historial no está disponible temporalmente.");
+      return;
+    }
+    const query = parseHistoryListQuery(request.query);
+    const result = await options.historyService.list(request.usuario.id, query);
+    response.json(result);
+  });
+
+  app.get("/api/history/:id", requireAuthentication, async (request, response) => {
+    if (!options.historyService || !request.usuario) {
+      sendError(response, 503, "HISTORY_UNAVAILABLE", "El historial no está disponible temporalmente.");
+      return;
+    }
+    const historyId = typeof request.params.id === "string" ? request.params.id : "";
+    const history = await options.historyService.get(request.usuario.id, historyId);
+    response.json({ history });
   });
 
   app.use((error: unknown, request: Request, response: Response, _next: NextFunction) => {
@@ -285,6 +356,25 @@ export function createApp(options: AppOptions) {
 
     if (error instanceof AuthenticationError) {
       sendError(response, error.status, error.code, error.message);
+      return;
+    }
+
+    if (error instanceof DiagnosticHistoryError) {
+      const statusByCode: Record<typeof error.code, number> = {
+        HISTORY_REQUEST_INVALID: 400,
+        HISTORY_ID_INVALID: 400,
+        HISTORY_NOT_FOUND: 404,
+        HISTORY_DATA_INVALID: 502,
+        HISTORY_UNAVAILABLE: 503,
+      };
+      const messageByCode: Record<typeof error.code, string> = {
+        HISTORY_REQUEST_INVALID: "La solicitud de historial no es válida.",
+        HISTORY_ID_INVALID: "El identificador del diagnóstico no es válido.",
+        HISTORY_NOT_FOUND: "El diagnóstico solicitado no existe.",
+        HISTORY_DATA_INVALID: "El historial almacenado no cumple el contrato esperado.",
+        HISTORY_UNAVAILABLE: "El historial no está disponible temporalmente.",
+      };
+      sendError(response, statusByCode[error.code], error.code, messageByCode[error.code]);
       return;
     }
 

@@ -2,6 +2,7 @@ import { z } from "zod";
 
 export const DEFAULT_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
 export const DEFAULT_OPENAI_TIMEOUT_MS = 20_000;
+export const DEFAULT_DIAGNOSTIC_HISTORY_SAVE_TIMEOUT_MS = 2_000;
 export const DEFAULT_OPENAI_EMBEDDING_MODEL = "text-embedding-3-small";
 export const DEFAULT_RAG_MATCH_COUNT = 4;
 export const DEFAULT_RAG_MATCH_THRESHOLD = 0.7;
@@ -33,6 +34,12 @@ const pdfExtractionLimitsSchema = z.object({
 
 export function resolvePdfExtractionLimits(input: Partial<PdfExtractionLimits> = {}): PdfExtractionLimits {
   return pdfExtractionLimitsSchema.parse({ ...DEFAULT_PDF_EXTRACTION_LIMITS, ...input });
+}
+
+const diagnosticHistorySaveTimeoutSchema = z.number().int().min(100).max(10_000);
+
+export function resolveDiagnosticHistorySaveTimeout(value = DEFAULT_DIAGNOSTIC_HISTORY_SAVE_TIMEOUT_MS) {
+  return diagnosticHistorySaveTimeoutSchema.parse(value);
 }
 
 function emptyEnvironmentValueAsUndefined(value: unknown) {
@@ -90,6 +97,11 @@ const envSchema = z.object({
     z.string().trim().min(1).max(100).optional(),
   ),
   OPENAI_TIMEOUT_MS: optionalIntegerFromEnvironment(1_000, 120_000, DEFAULT_OPENAI_TIMEOUT_MS),
+  DIAGNOSTIC_HISTORY_SAVE_TIMEOUT_MS: optionalIntegerFromEnvironment(
+    100,
+    10_000,
+    DEFAULT_DIAGNOSTIC_HISTORY_SAVE_TIMEOUT_MS,
+  ),
   RAG_ENABLED: optionalBooleanFromEnvironment,
   OPENAI_EMBEDDING_MODEL: z.preprocess(
     emptyEnvironmentValueAsUndefined,

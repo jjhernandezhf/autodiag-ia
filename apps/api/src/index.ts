@@ -1,9 +1,11 @@
 import { createApp } from "./app.js";
 import { loadEnv } from "./config.js";
+import { createConfiguredDiagnosticHistoryService } from "./diagnostic-history-runtime.js";
 import { createConfiguredRagService } from "./rag-runtime.js";
 
 const env = loadEnv();
 const ragService = createConfiguredRagService(env);
+const historyService = createConfiguredDiagnosticHistoryService();
 const app = createApp({
   maxFileSizeBytes: env.REPORT_MAX_SIZE_BYTES,
   pdfExtractionLimits: {
@@ -16,8 +18,11 @@ const app = createApp({
   openAiApiKey: env.OPENAI_API_KEY,
   openAiModel: env.OPENAI_MODEL,
   openAiTimeoutMs: env.OPENAI_TIMEOUT_MS,
+  diagnosticHistorySaveTimeoutMs: env.DIAGNOSTIC_HISTORY_SAVE_TIMEOUT_MS,
+  openAiEmbeddingModel: env.OPENAI_EMBEDDING_MODEL,
   ragEnabled: env.RAG_ENABLED,
   ragService,
+  historyService,
   vinHmacSecret: env.VIN_HMAC_SECRET,
 });
 

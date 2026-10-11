@@ -1,74 +1,60 @@
 import { readFileSync } from "node:fs";
-
 import { describe, expect, it } from "vitest";
 
 const migration = readFileSync(
   new URL("../../../supabase/migrations/20260821000100_create_diagnostic_history.sql", import.meta.url),
   "utf8",
-).toLowerCase();
+).replaceAll("\r\n", "\n");
+const sql = migration.toLowerCase();
 
-const TABLES = [
-  "diagnostic_reports",
-  "diagnostic_modules",
-  "diagnostic_dtcs",
-  "diagnostic_ai_analyses",
-  "diagnostic_findings",
-  "diagnostic_finding_causes",
-  "diagnostic_finding_checks",
-  "diagnostic_finding_warnings",
-  "diagnostic_analysis_warnings",
-];
-
-describe("migración de historial diagnóstico", () => {
-  it("crea todas las tablas normalizadas con UUID, relaciones y cascadas", () => {
-    for (const table of TABLES) {
-      expect(migration).toContain(`create table public.${table}`);
-    }
-    expect(migration.match(/id uuid primary key default gen_random_uuid\(\)/gu)).toHaveLength(TABLES.length);
-    expect(migration.match(/foreign key \([^)]+\) references public\.[^(]+ \([^)]+\) on delete cascade/gu)).toHaveLength(9);
-    expect(migration).toContain("created_at timestamptz not null default now()");
+describe("migración del historial seguro", () => {
+  it("crea un registro principal inmutable relacionado con auth.users", () => {
+    expect(sql).toContain("create table public.diagnostic_history");
+    expect(sql).toContain("user_id uuid not null");
+    expect(sql).toContain("foreign key (user_id) references auth.users (id) on delete cascade");
+    expect(sql).toContain("created_at timestamptz not null default now()");
+    expect(sql).not.toMatch(/create table public\.diagnostic_(?:modules|dtcs|ai_analyses|findings)/u);
+    expect(sql).not.toMatch(/grant[^;]*(?:update|delete)[^;]*to service_role/u);
   });
 
-  it("incluye restricciones e índices acordes con los contratos vigentes", () => {
-    for (const constraint of [
-      "diagnostic_reports_year_range",
-      "diagnostic_dtcs_status_allowed",
-      "diagnostic_dtcs_classification_allowed",
-      "diagnostic_findings_priority_allowed",
-      "diagnostic_findings_confidence_allowed",
-      "diagnostic_ai_analyses_confirmation_required",
-      "position_nonnegative",
-    ]) {
-      expect(migration).toContain(constraint);
-    }
-    for (const index of [
-      "diagnostic_reports_created_at_idx",
-      "diagnostic_reports_make_idx",
-      "diagnostic_reports_model_idx",
-      "diagnostic_reports_year_idx",
-      "diagnostic_dtcs_code_idx",
-      "diagnostic_dtcs_classification_idx",
-      "diagnostic_dtcs_position_idx",
-      "diagnostic_findings_related_dtc_idx",
-      "diagnostic_findings_priority_idx",
-      "diagnostic_findings_confidence_idx",
-    ]) {
-      expect(migration).toContain(`create index ${index}`);
-    }
-    expect(migration).not.toContain("if not exists");
-    expect(migration).toContain("status_original varchar(120)");
-    expect(migration).toContain("classification varchar(12) not null");
-    expect(migration).toContain("related_dtc_id uuid");
-    expect(migration).toContain("foreign key (related_dtc_id) references public.diagnostic_dtcs (id) on delete cascade");
+  it("incluye escalares, VIN protegido y snapshots JSONB sin límite de año obsoleto", () => {
+    for (const column of [
+      "report_reference uuid",
+      "odometer_value numeric",
+      "odometer_unit varchar(2)",
+      "vin_hmac varchar(71)",
+      "vin_last4 varchar(4)",
+      "dtc_codes text[] not null",
+      "extraction_snapshot jsonb not null",
+      "analysis_snapshot jsonb not null",
+      "rag_snapshot jsonb not null",
+      "analysis_model varchar(100) not null",
+      "embedding_model varchar(100)",
+      "schema_version integer not null default 1",
+    ]) expect(sql).toContain(column);
+    expect(sql).toContain("year between 1886 and 9999");
+    expect(sql).not.toMatch(/year\s*<=\s*2027|between 1886 and 2027/u);
+    expect(sql).toContain("jsonb_typeof(extraction_snapshot) = 'object'");
   });
 
-  it("habilita RLS en cada tabla sin crear políticas públicas", () => {
-    for (const table of TABLES) {
-      expect(migration).toContain(`alter table public.${table} enable row level security`);
-    }
-    expect(migration.match(/enable row level security/gu)).toHaveLength(TABLES.length);
-    expect(migration).not.toMatch(/create\s+policy/gu);
-    expect(migration).toContain("from anon, authenticated");
-    expect(migration).toContain("to service_role");
+  it("habilita RLS y permite a authenticated leer únicamente filas propias", () => {
+    expect(sql).toContain("alter table public.diagnostic_history enable row level security");
+    expect(sql).toContain("alter table public.diagnostic_history force row level security");
+    expect(sql).toMatch(/create policy diagnostic_history_select_own[\s\S]*for select[\s\S]*to authenticated[\s\S]*auth\.uid\(\)[\s\S]*= user_id/u);
+    expect(sql).not.toMatch(/create policy[^;]*for (?:insert|update|delete)/u);
+  });
+
+  it("revoca anon y escritura directa de authenticated", () => {
+    expect(sql).toContain("revoke all privileges on table public.diagnostic_history from public, anon, authenticated");
+    expect(sql).toContain("grant select on table public.diagnostic_history to authenticated");
+    expect(sql).toContain("grant select, insert on table public.diagnostic_history to service_role");
+    const authenticatedGrants = sql.match(/grant[^;]+to authenticated;/gu) ?? [];
+    expect(authenticatedGrants).toEqual(["grant select on table public.diagnostic_history to authenticated;"]);
+    expect(sql).not.toMatch(/grant[^;]+to anon/u);
+  });
+
+  it("crea índices para paginación estable y referencia por usuario", () => {
+    expect(sql).toContain("on public.diagnostic_history (user_id, created_at desc, id desc)");
+    expect(sql).toContain("on public.diagnostic_history (user_id, report_reference)");
   });
 });

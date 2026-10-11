@@ -293,15 +293,20 @@ No pegues claves en solicitudes, archivos versionados, logs ni conversaciones.
 
 Para probar el flujo manualmente, inicia API y frontend, carga un reporte Autel compatible con al menos un DTC y verifica que no se envíe ninguna solicitud a `/api/reports/analyze` hasta completar las dos acciones de confirmación. Usa únicamente datos ficticios en entornos de desarrollo.
 
-## Persistencia preparada (FASE 3.1)
+## Historial seguro de diagnósticos (FASE 3.4A)
 
-La migración versionada de `supabase/migrations` prepara un historial diagnóstico normalizado, pero todavía no existe una conexión ni una escritura real a Supabase. El modelo separa reportes, módulos, DTC, análisis de IA, hallazgos, causas posibles, comprobaciones, advertencias por hallazgo y advertencias generales. Las posiciones originales se conservan en cada relación ordenada.
+La migración pendiente `20260821000100_create_diagnostic_history.sql` define un registro inmutable por diagnóstico. Conserva escalares mínimos para el listado y snapshots JSONB validados de extracción, análisis y evidencia RAG. El backend intenta guardarlo solamente después de un análisis correcto; si Supabase no está configurado, la escritura falla o excede `DIAGNOSTIC_HISTORY_SAVE_TIMEOUT_MS`, la orientación mantiene HTTP 200 y devuelve `history.status = "unavailable"`. El límite predeterminado es 2,000 ms y solo acepta valores entre 100 y 10,000 ms.
 
-Solo se contempla persistir marca, modelo, año, módulos, todas las filas DTC y la orientación estructurada completada. Cada fila conserva su orden, estado original, estado normalizado y clasificación accionable, histórica o desconocida. Los hallazgos se relacionan por separado con una fila accionable inequívoca y no se duplican por la existencia de un antecedente histórico equivalente.
+El historial almacena marca, modelo, año, odómetro opcional, códigos DTC, observaciones sanitizadas, modelos utilizados y el VIN exclusivamente como HMAC existente y, cuando está disponible, sus últimos cuatro caracteres. No almacena el PDF, nombre o ruta del archivo, texto bruto, VIN completo, embeddings, respuestas sin validar, datos del usuario, credenciales ni tokens. El snapshot público conserva únicamente el VIN enmascarado y nunca expone su seudónimo HMAC.
 
-Nunca se contempla almacenar VIN original, protegido o seudonimizado; odómetro; motor; observaciones libres del vehículo ni su correlación; PDF o texto completo extraído; contenido binario; nombre, hash o identificador del archivo; datos del cliente; claves o tokens; prompts; identificadores del proveedor; métricas ni respuestas crudas de OpenAI.
+`public.diagnostic_history` tiene RLS habilitado y forzado. `authenticated` puede leer únicamente sus propias filas y no puede escribirlas; `anon` no tiene privilegios; `service_role` dispone solo de lectura e inserción. Además de RLS, todas las consultas administrativas del backend filtran explícitamente por el UUID obtenido de la sesión autenticada. La migración continúa sin aplicarse: antes de activarla debe reconciliarse el historial remoto de migraciones aplicado manualmente.
 
-Todas las tablas del historial tienen RLS habilitado, no incluyen políticas públicas para `anon` o `authenticated` y reservan sus privilegios al rol de servicio del backend. Esas credenciales deben permanecer exclusivamente en el servidor. La ejecución de las migraciones contra un proyecto y las escrituras reales continúan pendientes.
+Endpoints protegidos:
+
+- `GET /api/history?limit=20&cursor=...`: lista paginada en orden estable por fecha e id descendentes; el máximo es 50.
+- `GET /api/history/:id`: devuelve el detalle público validado o `404` tanto si no existe como si pertenece a otro usuario.
+
+La interfaz permite alternar entre un diagnóstico nuevo y el historial, cargar páginas adicionales, abrir un detalle y regenerar el PDF localmente desde el snapshot guardado. Abrir o exportar un registro histórico no vuelve a invocar OpenAI, embeddings ni el RPC pgvector. El cierre de sesión o cambio de UUID desmonta el área de trabajo y elimina de memoria el listado y detalle anteriores.
 
 ## Login privado y Supabase Auth (FASE 3.3B)
 
@@ -318,6 +323,8 @@ El navegador observa `INITIAL_SESSION`, `SIGNED_IN`, `SIGNED_OUT` y `TOKEN_REFRE
 - `GET /api/auth/me`: protegido; devuelve únicamente `{ "id": "uuid", "username": "usuario.apellido" }`.
 - `POST /api/reports/upload`: protegido con Bearer.
 - `POST /api/reports/analyze`: protegido con Bearer.
+- `GET /api/history`: protegido con Bearer.
+- `GET /api/history/:id`: protegido con Bearer.
 
 El backend valida cada access token con `supabase.auth.getUser(token)`; no confía en un JWT decodificado, `getSession()` del servidor ni datos enviados por el navegador. Después exige que el perfil asociado exista y tenga `is_active = true`. La identidad añadida a la solicitud contiene exclusivamente UUID y username.
 
@@ -405,7 +412,7 @@ Para rollback operativo, establecer `RAG_ENABLED=false` y reiniciar la API; el a
 
 Guion breve de demostración: iniciar sesión, cargar un PDF Autel compatible, revisar la extracción, confirmar manualmente el análisis y comprobar la sección **Evidencia recuperada por RAG**. Descargar el PDF y verificar **Fuentes de conocimiento recuperadas**. Repetir con `RAG_ENABLED=false` para demostrar el fallback sin fuentes.
 
-Los reportes, extracciones y análisis continúan siendo temporales en memoria. La FASE 3.4A de historial permanece pausada; RAG no almacena el PDF ni el resultado diagnóstico.
+El PDF original y el texto bruto continúan siendo temporales en memoria. Cuando la migración pendiente se aplique y el backend administrativo esté configurado, solo los snapshots estructurados y sanitizados del historial se conservarán; RAG no almacena el PDF ni embeddings asociados al diagnóstico.
 
 ## Verificación
 
