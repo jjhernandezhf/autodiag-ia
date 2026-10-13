@@ -1,5 +1,11 @@
-import { type ChangeEvent, type DragEvent, type FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { type ChangeEvent, type DragEvent, type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import autodiagLogoUrl from "./assets/autodiag-ia-logo.png";
+import {
+  API_UNAVAILABLE_MESSAGE,
+  ApiRequestError,
+  createBrowserApiClient,
+  type BrowserApiClient,
+} from "./api-client";
 import {
   browserAuthenticationService,
   BrowserAuthenticationError,
@@ -20,6 +26,7 @@ const MAX_VEHICLE_OBSERVATIONS_LENGTH = 1_000;
 type UploadStatus = "idle" | "uploading" | "success" | "error";
 type AnalysisStatus = "unavailable" | "ready" | "confirming" | "analyzing" | "completed" | "error" | "cancelled";
 type PdfStatus = "idle" | "generating" | "success" | "error";
+type ConnectivityStatus = "checking" | "connected" | "unavailable";
 
 type DtcStatus =
   | "current"
@@ -210,6 +217,50 @@ interface ErrorResponse {
   };
 }
 
+const PUBLIC_API_ERROR_MESSAGES: Record<string, string> = {
+  FILE_REQUIRED: 'Selecciona un archivo PDF en el campo "report".',
+  FILE_TOO_LARGE: "El archivo excede el límite permitido por el servidor.",
+  INVALID_FILE_FORMAT: "El contenido del archivo no corresponde a un PDF válido.",
+  INVALID_UPLOAD: "Envía un único archivo PDF.",
+  PDF_ENCRYPTED: "El PDF está protegido y no puede procesarse.",
+  PDF_UNREADABLE: "No fue posible leer el contenido del PDF.",
+  PDF_NO_USABLE_TEXT: "El PDF no contiene texto utilizable para el análisis.",
+  PDF_EXTRACTION_LIMIT_EXCEEDED: "El PDF supera los límites seguros de extracción.",
+  PDF_EXTRACTION_TIMEOUT: "La extracción del PDF agotó el tiempo disponible.",
+  AUTEL_FORMAT_NOT_RECOGNIZED: "El PDF no corresponde a un reporte Autel compatible.",
+  PDF_EXTRACTION_ERROR: "No fue posible extraer el contenido del PDF.",
+  HISTORY_REQUEST_INVALID: "La solicitud de historial no es válida.",
+  HISTORY_ID_INVALID: "El identificador del diagnóstico no es válido.",
+  HISTORY_NOT_FOUND: "El diagnóstico solicitado no existe.",
+  HISTORY_DATA_INVALID: "El historial almacenado no cumple el contrato esperado.",
+  HISTORY_UNAVAILABLE: "El historial no está disponible temporalmente.",
+};
+
+const ANALYSIS_AVAILABILITY_REASON_CODES = new Set([
+  "EXTRACTION_INCOMPLETE",
+  "MANUAL_REVIEW_REQUIRED",
+  "SYSTEM_TOTAL_MISMATCH",
+  "DTC_TOTAL_MISMATCH",
+  "EXTRACTION_DATA_INCONSISTENT",
+  "VEHICLE_DATA_MISSING",
+  "NO_VALID_DTCS",
+  "MODULE_DATA_INVALID",
+  "DTC_DATA_INVALID",
+  "UNKNOWN_DTC_STATUS",
+  "ONLY_HISTORICAL_DTCS",
+  "DTC_DESCRIPTION_CONFLICT",
+  "DTC_STATUS_CONFLICT",
+  "DTC_MODULE_MISMATCH",
+  "SENSITIVE_CONTENT_DETECTED",
+  "ANALYSIS_LIMIT_EXCEEDED",
+]);
+
+function controlledErrorMessage(value: unknown, fallback: string) {
+  if (!value || typeof value !== "object") return fallback;
+  const code = (value as ErrorResponse).error?.code;
+  return typeof code === "string" ? PUBLIC_API_ERROR_MESSAGES[code] ?? fallback : fallback;
+}
+
 function formatFileSize(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
@@ -390,32 +441,148 @@ function isHistoryAnalysisInput(value: unknown): value is DiagnosticAnalysisInpu
   if (
     !candidate.vehicle || typeof candidate.vehicle !== "object" ||
     !hasOnlyKeys(candidate.vehicle, ["make", "model", "year"]) ||
-    typeof candidate.vehicle.make !== "string" || !candidate.vehicle.make.trim() ||
-    typeof candidate.vehicle.model !== "string" || !candidate.vehicle.model.trim() ||
+    typeof candidate.vehicle.make !== "string" || !candidate.vehicle.make.trim() || candidate.vehicle.make.length > 80 ||
+    typeof candidate.vehicle.model !== "string" || !candidate.vehicle.model.trim() || candidate.vehicle.model.length > 120 ||
     typeof candidate.vehicle.year !== "number" || !Number.isInteger(candidate.vehicle.year) ||
+    candidate.vehicle.year < 1886 || candidate.vehicle.year > new Date().getUTCFullYear() + 1 ||
     containsSensitiveReportText(candidate.vehicle.make, "structured_identifier") ||
     containsSensitiveReportText(candidate.vehicle.model, "structured_identifier") ||
     !Array.isArray(candidate.modules) || candidate.modules.length === 0 || candidate.modules.length > 40
   ) return false;
   if (candidate.observations !== undefined && (
-    typeof candidate.observations !== "string" || candidate.observations.length > 1_000 ||
+    typeof candidate.observations !== "string" || !candidate.observations.trim() || candidate.observations.length > 1_000 ||
     containsSensitiveReportText(candidate.observations, "free_text")
   )) return false;
-  return candidate.modules.every((module) =>
+  let totalDtcs = 0;
+  const modulesValid = candidate.modules.every((module) =>
     module !== null && typeof module === "object" &&
     hasOnlyKeys(module, ["code", "name", "dtcs"]) &&
-    (module.code === null || (typeof module.code === "string" && !!module.code.trim() && !containsSensitiveReportText(module.code, "structured_identifier"))) &&
-    typeof module.name === "string" && !!module.name.trim() && !containsSensitiveReportText(module.name, "structured_identifier") &&
+    (module.code === null || (typeof module.code === "string" && !!module.code.trim() && module.code.length <= 32 && !containsSensitiveReportText(module.code, "structured_identifier"))) &&
+    typeof module.name === "string" && !!module.name.trim() && module.name.length <= 160 && !containsSensitiveReportText(module.name, "structured_identifier") &&
     Array.isArray(module.dtcs) && module.dtcs.length > 0 && module.dtcs.length <= 20 &&
+    (totalDtcs += module.dtcs.length) <= 100 &&
     module.dtcs.every((dtc) =>
       dtc !== null && typeof dtc === "object" &&
       hasOnlyKeys(dtc, ["code", "description", "status", "alsoHistorical"]) &&
-      typeof dtc.code === "string" && !!dtc.code.trim() && !containsSensitiveReportText(dtc.code, "structured_identifier") &&
-      typeof dtc.description === "string" && !!dtc.description.trim() && !containsSensitiveReportText(dtc.description, "free_text") &&
+      typeof dtc.code === "string" && !!dtc.code.trim() && dtc.code.length <= 32 && !containsSensitiveReportText(dtc.code, "structured_identifier") &&
+      typeof dtc.description === "string" && !!dtc.description.trim() && dtc.description.length <= 1_000 && !containsSensitiveReportText(dtc.description, "free_text") &&
       ["current", "confirmed", "stored", "pending", "permanent", "intermittent"].includes(dtc.status) &&
       typeof dtc.alsoHistorical === "boolean"
     )
   );
+  return modulesValid && totalDtcs <= 100;
+}
+
+function parseUploadExtraction(value: unknown): ExtractionResult | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Partial<ExtractionResult>;
+  if (!hasOnlyKeys(candidate, ["status", "format", "requiresManualReview", "vehicle", "scanSummary", "systems", "dtcs", "warnings"])) return null;
+  const vehicle = candidate.vehicle;
+  const scan = candidate.scanSummary;
+  const nullableText = (item: unknown, maxLength = 500) => item === null
+    || (typeof item === "string" && item.trim().length > 0 && item.length <= maxLength);
+  const optionalCount = (item: unknown) => item === null
+    || (typeof item === "number" && Number.isInteger(item) && item >= 0);
+  const count = (item: unknown) => typeof item === "number" && Number.isInteger(item) && item >= 0;
+  if (
+    !["completed", "partial"].includes(candidate.status ?? "")
+    || candidate.format !== "autel_vehicle_diagnostic_report"
+    || typeof candidate.requiresManualReview !== "boolean"
+    || !vehicle || typeof vehicle !== "object"
+    || !hasOnlyKeys(vehicle, ["year", "make", "model", "engine", "odometer", "vinMasked", "vinPseudonym"])
+    || !(vehicle.year === null || (typeof vehicle.year === "number" && Number.isInteger(vehicle.year) && vehicle.year >= 1886 && vehicle.year <= 9_999))
+    || !nullableText(vehicle.make, 200)
+    || !nullableText(vehicle.model, 200)
+    || !nullableText(vehicle.engine, 300)
+    || !(vehicle.vinMasked === null || (typeof vehicle.vinMasked === "string" && /^\*{13}[A-HJ-NPR-Z0-9]{4}$/u.test(vehicle.vinMasked)))
+    || !(vehicle.vinPseudonym === null || (typeof vehicle.vinPseudonym === "string" && /^vin_v1_[a-f0-9]{64}$/u.test(vehicle.vinPseudonym)))
+    || ((vehicle.vinMasked === null) !== (vehicle.vinPseudonym === null))
+    || !scan || typeof scan !== "object"
+    || !hasOnlyKeys(scan, ["declaredSystems", "parsedSystems", "declaredDtcs", "parsedDtcs"])
+    || !optionalCount(scan.declaredSystems)
+    || !count(scan.parsedSystems)
+    || !optionalCount(scan.declaredDtcs)
+    || !count(scan.parsedDtcs)
+    || !Array.isArray(candidate.systems)
+    || !Array.isArray(candidate.dtcs)
+    || !Array.isArray(candidate.warnings)
+  ) return null;
+  if (vehicle.odometer !== null && (
+    !vehicle.odometer || typeof vehicle.odometer !== "object"
+    || !hasOnlyKeys(vehicle.odometer, ["value", "unit"])
+    || typeof vehicle.odometer.value !== "number" || !Number.isFinite(vehicle.odometer.value) || vehicle.odometer.value < 0
+    || !["km", "mi"].includes(vehicle.odometer.unit)
+  )) return null;
+  const systemsValid = candidate.systems.every((system) =>
+    system !== null && typeof system === "object"
+    && hasOnlyKeys(system, ["code", "name", "dtcCount"])
+    && nullableText(system.code, 64)
+    && typeof system.name === "string" && system.name.trim().length > 0 && system.name.length <= 300
+    && count(system.dtcCount)
+  );
+  const dtcsValid = candidate.dtcs.every((dtc) =>
+    dtc !== null && typeof dtc === "object"
+    && hasOnlyKeys(dtc, ["code", "moduleCode", "moduleName", "status", "statusOriginal", "classification", "descriptionOriginal"])
+    && typeof dtc.code === "string" && dtc.code.trim().length > 0 && dtc.code.length <= 32
+    && nullableText(dtc.moduleCode, 64)
+    && typeof dtc.moduleName === "string" && dtc.moduleName.trim().length > 0 && dtc.moduleName.length <= 300
+    && ["current", "confirmed", "stored", "pending", "permanent", "intermittent", "history", "unknown"].includes(dtc.status)
+    && nullableText(dtc.statusOriginal, 200)
+    && ["actionable", "historical", "unknown"].includes(dtc.classification)
+    && typeof dtc.descriptionOriginal === "string" && dtc.descriptionOriginal.trim().length > 0 && dtc.descriptionOriginal.length <= 1_000
+  );
+  const warningsValid = candidate.warnings.every((warning) =>
+    warning !== null && typeof warning === "object"
+    && hasOnlyKeys(warning, ["code", "message"])
+    && typeof warning.code === "string" && warning.code.trim().length > 0 && warning.code.length <= 100
+    && typeof warning.message === "string" && warning.message.trim().length > 0 && warning.message.length <= 1_000
+  );
+  return systemsValid && dtcsValid && warningsValid ? candidate as ExtractionResult : null;
+}
+
+function parseAnalysisPreparation(value: unknown): AnalysisPreparation | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Partial<AnalysisPreparation> & { input?: unknown };
+  const allowedKeys = candidate.available === true
+    ? ["available", "input", "reasons", "warnings", "counts"]
+    : ["available", "reasons", "warnings", "counts"];
+  if (!hasOnlyKeys(candidate, allowedKeys) || typeof candidate.available !== "boolean") return null;
+  const counts = candidate.counts;
+  const reasons = candidate.reasons;
+  if (
+    !counts || typeof counts !== "object" || !hasOnlyKeys(counts, ["detected", "actionable", "historical"])
+    || ![counts.detected, counts.actionable, counts.historical].every((item) => typeof item === "number" && Number.isInteger(item) && item >= 0)
+    || !Array.isArray(reasons) || !reasons.every((reason) =>
+      reason !== null && typeof reason === "object" && hasOnlyKeys(reason, ["code", "message"])
+      && typeof reason.code === "string" && ANALYSIS_AVAILABILITY_REASON_CODES.has(reason.code)
+      && typeof reason.message === "string" && reason.message.trim().length > 0 && reason.message.length <= 1_000
+    )
+    || !Array.isArray(candidate.warnings)
+    || !candidate.warnings.every((warning) => typeof warning === "string" && warning.trim().length > 0 && warning.length <= 1_000)
+  ) return null;
+  if (candidate.available) {
+    return isHistoryAnalysisInput(candidate.input) ? candidate as AnalysisPreparation : null;
+  }
+  return candidate as AnalysisPreparation;
+}
+
+function parseUploadResponse(value: unknown): UploadResponse | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Partial<UploadResponse>;
+  if (!hasOnlyKeys(candidate, ["id", "originalName", "size", "sha256", "type", "status", "extraction", "analysisPreparation"])) return null;
+  const extraction = parseUploadExtraction(candidate.extraction);
+  const analysisPreparation = parseAnalysisPreparation(candidate.analysisPreparation);
+  if (
+    !isUuid(candidate.id)
+    || typeof candidate.originalName !== "string" || candidate.originalName.trim().length === 0 || candidate.originalName.length > 255
+    || typeof candidate.size !== "number" || !Number.isInteger(candidate.size) || candidate.size <= 0
+    || typeof candidate.sha256 !== "string" || !/^[0-9a-f]{64}$/u.test(candidate.sha256)
+    || candidate.type !== PDF_MIME_TYPE
+    || candidate.status !== "received"
+    || !extraction
+    || !analysisPreparation
+  ) return null;
+  return { ...candidate, extraction, analysisPreparation } as UploadResponse;
 }
 
 function parseHistoryExtraction(value: unknown): ExtractionResult | null {
@@ -1028,7 +1195,16 @@ function AiAnalysisSection({
             <div className="analysis-error" role="alert">
               <h3>No fue posible obtener la orientación</h3>
               <p>{state.message}</p>
-              <button className="analysis-button" type="button" onClick={onRequestConfirmation}>Intentar de nuevo</button>
+              <button className="analysis-button" type="button" onClick={onRequestConfirmation}>Reintentar</button>
+            </div>
+          )}
+
+          {state.status !== "completed" && state.analysis && state.rag && (
+            <div className="preserved-analysis">
+              <p className="preserved-analysis-note" role="status">
+                Se conserva la orientación anterior mientras reintentas la solicitud.
+              </p>
+              <AnalysisResult analysis={state.analysis} rag={state.rag} />
             </div>
           )}
 
@@ -1076,21 +1252,31 @@ function AiAnalysisSection({
 }
 
 interface ReportWorkspaceProps {
-  authService: BrowserAuthenticationService;
+  apiClient: BrowserApiClient;
   identity: AuthIdentity;
+  connectivityStatus: ConnectivityStatus;
+  connectionRestored: boolean;
   isLoggingOut: boolean;
   logoutError: string;
   onLogout: () => void;
   onSessionInvalid: () => void;
+  onConnectivityChecking: () => void;
+  onConnectivityUnavailable: () => void;
+  onConnectivityConnected: () => void;
 }
 
 function ReportWorkspace({
-  authService,
+  apiClient,
   identity,
+  connectivityStatus,
+  connectionRestored,
   isLoggingOut,
   logoutError,
   onLogout,
   onSessionInvalid,
+  onConnectivityChecking,
+  onConnectivityUnavailable,
+  onConnectivityConnected,
 }: ReportWorkspaceProps) {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [status, setStatus] = useState<UploadStatus>("idle");
@@ -1124,6 +1310,9 @@ function ReportWorkspace({
   const historyDetailSequenceRef = useRef(0);
   const historyListControllerRef = useRef<AbortController | null>(null);
   const historyDetailControllerRef = useRef<AbortController | null>(null);
+  const historyDetailRequestIdRef = useRef<string | null>(null);
+  const healthControllerRef = useRef<AbortController | null>(null);
+  const retryActionRef = useRef<(() => void) | null>(null);
 
   useEffect(() => () => {
     uploadSequenceRef.current += 1;
@@ -1133,6 +1322,7 @@ function ReportWorkspace({
     activeAnalysisRef.current?.controller.abort();
     historyListControllerRef.current?.abort();
     historyDetailControllerRef.current?.abort();
+    healthControllerRef.current?.abort();
     activeUploadRef.current = null;
     activeAnalysisRef.current = null;
     uploadInProgressRef.current = false;
@@ -1141,6 +1331,9 @@ function ReportWorkspace({
     activePdfGenerationRef.current = null;
     historyListControllerRef.current = null;
     historyDetailControllerRef.current = null;
+    historyDetailRequestIdRef.current = null;
+    healthControllerRef.current = null;
+    retryActionRef.current = null;
   }, []);
 
   function invalidateActiveSession() {
@@ -1151,11 +1344,15 @@ function ReportWorkspace({
     activeAnalysisRef.current?.controller.abort();
     historyListControllerRef.current?.abort();
     historyDetailControllerRef.current?.abort();
+    healthControllerRef.current?.abort();
     activeUploadRef.current = null;
     activeAnalysisRef.current = null;
     activePdfGenerationRef.current = null;
     historyListControllerRef.current = null;
     historyDetailControllerRef.current = null;
+    historyDetailRequestIdRef.current = null;
+    healthControllerRef.current = null;
+    retryActionRef.current = null;
     historyListSequenceRef.current += 1;
     historyDetailSequenceRef.current += 1;
     setHistoryState({ status: "idle", items: [], nextCursor: null });
@@ -1166,6 +1363,41 @@ function ReportWorkspace({
     analysisInProgressRef.current = false;
     pdfGenerationInProgressRef.current = false;
     onSessionInvalid();
+  }
+
+  function handleApiFailure(error: unknown, retry: () => void) {
+    if (!(error instanceof ApiRequestError)) return false;
+    if (error.type === "aborted") return true;
+    if (error.type === "unauthorized") {
+      invalidateActiveSession();
+      return true;
+    }
+    retryActionRef.current = retry;
+    if (["network", "timeout", "server", "invalid_response"].includes(error.type)) {
+      onConnectivityUnavailable();
+    } else {
+      onConnectivityConnected();
+    }
+    return false;
+  }
+
+  async function checkConnection() {
+    if (healthControllerRef.current) return;
+    const controller = new AbortController();
+    healthControllerRef.current = controller;
+    onConnectivityChecking();
+    try {
+      await apiClient.checkHealth(controller.signal);
+      if (healthControllerRef.current !== controller) return;
+      onConnectivityConnected();
+    } catch (error) {
+      if (healthControllerRef.current !== controller) return;
+      if (!(error instanceof ApiRequestError) || error.type !== "aborted") {
+        onConnectivityUnavailable();
+      }
+    } finally {
+      if (healthControllerRef.current === controller) healthControllerRef.current = null;
+    }
   }
 
   function resetPdfGeneration() {
@@ -1258,8 +1490,12 @@ function ReportWorkspace({
     if (inputRef.current) inputRef.current.value = "";
   }
 
-  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    void submitReport();
+  }
+
+  async function submitReport() {
     if (!selectedFile || uploadInProgressRef.current) return;
 
     uploadInProgressRef.current = true;
@@ -1277,57 +1513,36 @@ function ReportWorkspace({
 
     setStatus("uploading");
     setMessage("Enviando reporte de forma segura…");
-    resetAnalysisForReportChange(uploadResult !== null || activeAnalysisRef.current !== null);
-    setUploadResult(null);
 
     const formData = new FormData();
     formData.append("report", fileBeingUploaded);
 
     try {
-      const response = await authService.authenticatedFetch("/api/reports/upload", {
-        method: "POST",
-        body: formData,
-        signal: controller.signal,
+      const result = await apiClient.requestJson<UploadResponse>("/api/reports/upload", {
+        init: {
+          method: "POST",
+          body: formData,
+          signal: controller.signal,
+        },
+        retry: "none",
+        parse: parseUploadResponse,
+        invalidResponseMessage: "El servidor devolvió una respuesta de carga no válida.",
+        errorMessage: (value) => controlledErrorMessage(value, "No fue posible enviar el reporte."),
       });
-      if (response.status === 401) {
-        invalidateActiveSession();
-        return;
-      }
-      let body: UploadResponse | ErrorResponse;
-
-      try {
-        body = (await response.json()) as UploadResponse | ErrorResponse;
-      } catch {
-        throw new Error("El servidor devolvió una respuesta inválida.");
-      }
-
       if (!isActiveUpload()) return;
-
-      if (!response.ok) {
-        const errorBody = body as ErrorResponse;
-        throw new Error(errorBody.error?.message ?? "No fue posible enviar el reporte.");
-      }
-
-      const result = body as UploadResponse;
+      resetAnalysisForReportChange(uploadResult !== null || activeAnalysisRef.current !== null);
       setUploadResult(result);
       setAnalysisState({ status: result.analysisPreparation.available ? "ready" : "unavailable" });
       setStatus("success");
       setMessage("Reporte recibido correctamente.");
+      retryActionRef.current = null;
+      onConnectivityConnected();
     } catch (error) {
       if (!isActiveUpload()) return;
-      if (error instanceof BrowserAuthenticationError && error.code === "AUTH_SESSION_INVALID") {
-        invalidateActiveSession();
-        return;
-      }
+      if (handleApiFailure(error, () => void submitReport())) return;
 
       setStatus("error");
-      setMessage(
-        error instanceof TypeError
-          ? "No fue posible conectar con el servidor. Inténtalo de nuevo."
-          : error instanceof Error
-            ? error.message
-            : "No fue posible enviar el reporte.",
-      );
+      setMessage(error instanceof Error ? error.message : "No fue posible enviar el reporte.");
     } finally {
       if (isActiveUpload()) {
         activeUploadRef.current = null;
@@ -1368,6 +1583,9 @@ function ReportWorkspace({
       ...preparation.input,
       ...(normalizedObservations.length === 0 ? {} : { observations: normalizedObservations }),
     };
+    const preservedAnalysis = analysisState.analysis;
+    const preservedRag = analysisState.rag;
+    const preservedObservations = analysisState.submittedObservations;
 
     analysisInProgressRef.current = true;
     resetPdfGeneration();
@@ -1381,62 +1599,56 @@ function ReportWorkspace({
       return active?.id === requestId && active.reportId === reportId && active.controller === controller;
     };
 
-    setAnalysisState({ status: "analyzing" });
+    setAnalysisState({
+      status: "analyzing",
+      ...(preservedAnalysis ? { analysis: preservedAnalysis } : {}),
+      ...(preservedRag ? { rag: preservedRag } : {}),
+      ...(preservedObservations !== undefined ? { submittedObservations: preservedObservations } : {}),
+    });
 
     try {
-      const response = await authService.authenticatedFetch("/api/reports/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          input: requestInput,
-          historyContext: buildHistoryContext(uploadResult.id, uploadResult.extraction),
-        }),
-        signal: controller.signal,
+      const result = await apiClient.requestJson<AnalysisResponse>("/api/reports/analyze", {
+        init: {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            input: requestInput,
+            historyContext: buildHistoryContext(uploadResult.id, uploadResult.extraction),
+          }),
+          signal: controller.signal,
+        },
+        retry: "none",
+        parse: parseAnalysisResponse,
+        invalidResponseMessage: AI_ERROR_MESSAGES.OPENAI_RESPONSE_INVALID,
+        errorMessage: (value) => getAiErrorMessage((value as ErrorResponse | null)?.error?.code),
       });
-      if (response.status === 401) {
-        invalidateActiveSession();
-        return;
-      }
-
-      let body: unknown;
-      try {
-        body = await response.json();
-      } catch {
-        if (isActiveAnalysis()) {
-          setAnalysisState({ status: "error", message: AI_ERROR_MESSAGES.OPENAI_RESPONSE_INVALID });
-        }
-        return;
-      }
-
       if (!isActiveAnalysis()) return;
-
-      if (!response.ok) {
-        const errorBody = body as ErrorResponse;
-        setAnalysisState({ status: "error", message: getAiErrorMessage(errorBody.error?.code) });
-        return;
-      }
-
-      const result = parseAnalysisResponse(body);
       const inputDtcIdentities = new Set(
         requestInput.modules.flatMap((module) =>
           module.dtcs.map((dtc) => dtcIdentity({ code: dtc.code, moduleCode: module.code, moduleName: module.name })),
         ),
       );
-      const relatedIdentities = result?.analysis.findings.flatMap((finding) =>
+      const relatedIdentities = result.analysis.findings.flatMap((finding) =>
         finding.relatedDtc === null ? [] : [dtcIdentity(finding.relatedDtc)],
-      ) ?? [];
-      const correlationIdentities = result?.analysis.observationCorrelation.matches.map((match) =>
+      );
+      const correlationIdentities = result.analysis.observationCorrelation.matches.map((match) =>
         dtcIdentity(match.relatedDtc)
-      ) ?? [];
+      );
       const correlationStatusIsInvalid = normalizedObservations.length === 0
-        ? result?.analysis.observationCorrelation.status !== "not_provided"
-        : result?.analysis.observationCorrelation.status === "not_provided";
+        ? result.analysis.observationCorrelation.status !== "not_provided"
+        : result.analysis.observationCorrelation.status === "not_provided";
       const hasInvalidDtcReference = relatedIdentities.some((identity) => !inputDtcIdentities.has(identity))
         || new Set(relatedIdentities).size !== relatedIdentities.length
         || correlationIdentities.some((identity) => !inputDtcIdentities.has(identity))
         || new Set(correlationIdentities).size !== correlationIdentities.length;
-      if (!result || hasInvalidDtcReference || correlationStatusIsInvalid) {
-        setAnalysisState({ status: "error", message: AI_ERROR_MESSAGES.OPENAI_RESPONSE_INVALID });
+      if (hasInvalidDtcReference || correlationStatusIsInvalid) {
+        setAnalysisState({
+          status: "error",
+          message: AI_ERROR_MESSAGES.OPENAI_RESPONSE_INVALID,
+          ...(preservedAnalysis ? { analysis: preservedAnalysis } : {}),
+          ...(preservedRag ? { rag: preservedRag } : {}),
+          ...(preservedObservations !== undefined ? { submittedObservations: preservedObservations } : {}),
+        });
         return;
       }
 
@@ -1449,18 +1661,17 @@ function ReportWorkspace({
       if (result.history.status === "saved") {
         setHistoryState({ status: "idle", items: [], nextCursor: null });
       }
+      retryActionRef.current = null;
+      onConnectivityConnected();
     } catch (error) {
       if (!isActiveAnalysis()) return;
-      if (error instanceof DOMException && error.name === "AbortError") return;
-      if (error instanceof BrowserAuthenticationError && error.code === "AUTH_SESSION_INVALID") {
-        invalidateActiveSession();
-        return;
-      }
+      if (handleApiFailure(error, requestAnalysisConfirmation)) return;
       setAnalysisState({
         status: "error",
-        message: error instanceof TypeError
-          ? "No fue posible conectar con el servicio de orientación por IA."
-          : "No fue posible obtener la orientación por IA.",
+        message: error instanceof Error ? error.message : "No fue posible obtener la orientación por IA.",
+        ...(preservedAnalysis ? { analysis: preservedAnalysis } : {}),
+        ...(preservedRag ? { rag: preservedRag } : {}),
+        ...(preservedObservations !== undefined ? { submittedObservations: preservedObservations } : {}),
       });
     } finally {
       if (isActiveAnalysis()) {
@@ -1477,7 +1688,6 @@ function ReportWorkspace({
     const submittedObservations = analysisState.submittedObservations;
     if (
       pdfGenerationInProgressRef.current ||
-      analysisState.status !== "completed" ||
       !analysis ||
       !rag ||
       submittedObservations === undefined ||
@@ -1598,32 +1808,29 @@ function ReportWorkspace({
   }
 
   async function loadHistory(append: boolean) {
+    if (historyListControllerRef.current) return;
     const cursor = append ? historyState.nextCursor : null;
     if (append && cursor === null) return;
-    historyListControllerRef.current?.abort();
     const controller = new AbortController();
     const sequence = ++historyListSequenceRef.current;
     historyListControllerRef.current = controller;
     setHistoryState((current) => ({
       status: "loading",
-      items: append ? current.items : [],
-      nextCursor: append ? current.nextCursor : null,
+      items: current.items,
+      nextCursor: current.nextCursor,
     }));
     try {
       const parameters = new URLSearchParams({ limit: "20" });
       if (cursor) parameters.set("cursor", cursor);
-      const response = await authService.authenticatedFetch(`/api/history?${parameters.toString()}`, {
-        signal: controller.signal,
+      const parsed = await apiClient.requestJson<HistoryListResponse>(`/api/history?${parameters.toString()}`, {
+        init: { signal: controller.signal },
+        retry: "once",
+        timeoutMs: 10_000,
+        parse: parseHistoryListResponse,
+        invalidResponseMessage: "El servidor devolvió un historial inválido.",
+        errorMessage: (value) => controlledErrorMessage(value, "No fue posible cargar el historial."),
       });
-      if (response.status === 401) {
-        invalidateActiveSession();
-        return;
-      }
-      const body = await response.json() as unknown;
       if (sequence !== historyListSequenceRef.current || historyListControllerRef.current !== controller) return;
-      if (!response.ok) throw new Error("No fue posible cargar el historial.");
-      const parsed = parseHistoryListResponse(body);
-      if (!parsed) throw new Error("El servidor devolvió un historial inválido.");
       setHistoryState((current) => {
         const combined = append ? [...current.items, ...parsed.items] : parsed.items;
         const unique = combined.filter((item, index) => combined.findIndex((candidate) => candidate.id === item.id) === index);
@@ -1633,12 +1840,11 @@ function ReportWorkspace({
           nextCursor: parsed.nextCursor,
         };
       });
+      retryActionRef.current = null;
+      onConnectivityConnected();
     } catch (error) {
       if (controller.signal.aborted || sequence !== historyListSequenceRef.current) return;
-      if (error instanceof BrowserAuthenticationError && error.code === "AUTH_SESSION_INVALID") {
-        invalidateActiveSession();
-        return;
-      }
+      if (handleApiFailure(error, () => void loadHistory(append))) return;
       setHistoryState((current) => ({
         status: "error",
         items: current.items,
@@ -1673,9 +1879,10 @@ function ReportWorkspace({
   }
 
   async function openHistory(id: string) {
-    historyDetailControllerRef.current?.abort();
+    if (historyDetailControllerRef.current) return;
     const controller = new AbortController();
     const sequence = ++historyDetailSequenceRef.current;
+    historyDetailRequestIdRef.current = id;
     historyDetailControllerRef.current = controller;
     setHistoryDetail(null);
     setHistoryDetailStatus("loading");
@@ -1683,29 +1890,25 @@ function ReportWorkspace({
     setHistoryPdfStatus("idle");
     setHistoryPdfMessage("");
     try {
-      const response = await authService.authenticatedFetch(`/api/history/${encodeURIComponent(id)}`, {
-        signal: controller.signal,
+      const parsed = await apiClient.requestJson<HistoryDetail>(`/api/history/${encodeURIComponent(id)}`, {
+        init: { signal: controller.signal },
+        retry: "once",
+        timeoutMs: 10_000,
+        parse: (value) => {
+          if (!value || typeof value !== "object" || !hasOnlyKeys(value, ["history"])) return null;
+          return parseHistoryDetail((value as { history?: unknown }).history);
+        },
+        invalidResponseMessage: "El servidor devolvió un diagnóstico inválido.",
+        errorMessage: (value) => controlledErrorMessage(value, "No fue posible abrir el diagnóstico."),
       });
-      if (response.status === 401) {
-        invalidateActiveSession();
-        return;
-      }
-      const body = await response.json() as unknown;
       if (sequence !== historyDetailSequenceRef.current || historyDetailControllerRef.current !== controller) return;
-      if (!response.ok) throw new Error("No fue posible abrir el diagnóstico.");
-      if (!body || typeof body !== "object" || !hasOnlyKeys(body, ["history"])) {
-        throw new Error("El servidor devolvió un diagnóstico inválido.");
-      }
-      const parsed = parseHistoryDetail((body as { history?: unknown }).history);
-      if (!parsed) throw new Error("El servidor devolvió un diagnóstico inválido.");
       setHistoryDetail(parsed);
       setHistoryDetailStatus("ready");
+      retryActionRef.current = null;
+      onConnectivityConnected();
     } catch (error) {
       if (controller.signal.aborted || sequence !== historyDetailSequenceRef.current) return;
-      if (error instanceof BrowserAuthenticationError && error.code === "AUTH_SESSION_INVALID") {
-        invalidateActiveSession();
-        return;
-      }
+      if (handleApiFailure(error, () => void openHistory(id))) return;
       setHistoryDetailStatus("error");
       setHistoryDetailMessage(error instanceof Error ? error.message : "No fue posible abrir el diagnóstico.");
     } finally {
@@ -1737,7 +1940,7 @@ function ReportWorkspace({
   }
 
   const normalizedObservations = normalizeObservations(observations);
-  const observationsChanged = analysisState.status === "completed"
+  const observationsChanged = analysisState.analysis !== undefined
     && analysisState.submittedObservations !== undefined
     && analysisState.submittedObservations !== normalizedObservations;
   const observationsDisabled = status === "uploading" || analysisState.status === "analyzing";
@@ -1762,6 +1965,34 @@ function ReportWorkspace({
       </header>
 
       {logoutError && <div className="logout-error" role="alert">{logoutError}</div>}
+
+      {connectivityStatus === "unavailable" && (
+        <section className="connectivity-banner unavailable" role="alert" aria-live="assertive">
+          <div>
+            <strong>Servidor temporalmente no disponible</strong>
+            <p>{API_UNAVAILABLE_MESSAGE}</p>
+          </div>
+          <div className="connectivity-actions">
+            <button type="button" onClick={() => {
+              const retry = retryActionRef.current;
+              if (retry) retry();
+              else void checkConnection();
+            }}>Reintentar</button>
+            <button type="button" onClick={() => void checkConnection()}>Comprobar conexión</button>
+          </div>
+        </section>
+      )}
+      {connectivityStatus === "checking" && (
+        <div className="connectivity-banner checking" role="status" aria-live="polite">
+          <span className="spinner" aria-hidden="true" />
+          <p>Comprobando conexión con el servidor…</p>
+        </div>
+      )}
+      {connectivityStatus === "connected" && connectionRestored && (
+        <div className="connectivity-banner restored" role="status" aria-live="polite">
+          Conexión restablecida. Ya puedes continuar.
+        </div>
+      )}
 
       <nav className="workspace-navigation" aria-label="Secciones principales">
         <button
@@ -1902,7 +2133,7 @@ function ReportWorkspace({
 
           <button className="submit-button" type="submit" disabled={!selectedFile || status === "uploading"}>
             {status === "uploading" ? <span className="spinner" aria-hidden="true" /> : <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L7 9m5-5 5 5M5 15v4h14v-4" /></svg>}
-            {status === "uploading" ? "Enviando…" : "Enviar reporte"}
+            {status === "uploading" ? "Enviando…" : status === "error" ? "Reintentar" : "Enviar reporte"}
           </button>
         </form>
 
@@ -1950,6 +2181,9 @@ function ReportWorkspace({
           {historyDetailStatus === "error" && (
             <div className="history-state history-error" role="alert">
               <p>{historyDetailMessage}</p>
+              {historyDetailRequestIdRef.current && (
+                <button type="button" onClick={() => void openHistory(historyDetailRequestIdRef.current!)}>Reintentar</button>
+              )}
               <button type="button" onClick={() => setHistoryDetailStatus("idle")}>Volver al historial</button>
             </div>
           )}
@@ -2032,6 +2266,7 @@ interface LoginScreenProps {
   configurationUnavailable: boolean;
   initialMessage: string;
   onAuthenticated: (identity: AuthIdentity) => void;
+  onValidationPending: () => void;
   onLoginActivity: (active: boolean) => void;
 }
 
@@ -2040,6 +2275,7 @@ function LoginScreen({
   configurationUnavailable,
   initialMessage,
   onAuthenticated,
+  onValidationPending,
   onLoginActivity,
 }: LoginScreenProps) {
   const [username, setUsername] = useState("");
@@ -2080,6 +2316,14 @@ function LoginScreen({
     } catch (error) {
       if (activeControllerRef.current !== controller) return;
       if (error instanceof DOMException && error.name === "AbortError") return;
+      if (
+        error instanceof BrowserAuthenticationError
+        && error.code === "AUTH_PROVIDER_UNAVAILABLE"
+        && error.sessionEstablished
+      ) {
+        onValidationPending();
+        return;
+      }
       setPassword("");
       setErrorMessage(
         error instanceof BrowserAuthenticationError
@@ -2167,17 +2411,69 @@ type AuthViewState =
 
 interface AppProps {
   authService?: BrowserAuthenticationService;
+  apiClient?: BrowserApiClient;
 }
 
-export function App({ authService = browserAuthenticationService }: AppProps) {
+export function App({ authService = browserAuthenticationService, apiClient }: AppProps) {
+  const resolvedApiClient = useMemo(
+    () => apiClient ?? createBrowserApiClient(authService),
+    [apiClient, authService],
+  );
   const [authState, setAuthState] = useState<AuthViewState>({ status: "checking" });
+  const [connectivityStatus, setConnectivityStatus] = useState<ConnectivityStatus>("checking");
+  const [connectionRestored, setConnectionRestored] = useState(false);
+  const [authRetrySequence, setAuthRetrySequence] = useState(0);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [logoutError, setLogoutError] = useState("");
+  const [neutralHealthInProgress, setNeutralHealthInProgress] = useState(false);
   const identityRef = useRef<AuthIdentity | null>(null);
   const loginInProgressRef = useRef(false);
   const authValidationSequenceRef = useRef(0);
   const authValidationControllerRef = useRef<AbortController | null>(null);
   const invalidationInProgressRef = useRef(false);
+  const connectivityStatusRef = useRef<ConnectivityStatus>("checking");
+  const authStatusRef = useRef<AuthViewState["status"]>("checking");
+  const authenticationGenerationRef = useRef(0);
+  const neutralHealthSequenceRef = useRef(0);
+  const neutralHealthControllerRef = useRef<AbortController | null>(null);
+  const appMountedRef = useRef(true);
+
+  const markConnectivityUnavailable = useCallback(() => {
+    connectivityStatusRef.current = "unavailable";
+    setConnectionRestored(false);
+    setConnectivityStatus("unavailable");
+  }, []);
+
+  const markConnectivityChecking = useCallback(() => {
+    connectivityStatusRef.current = "checking";
+    setConnectionRestored(false);
+    setConnectivityStatus("checking");
+  }, []);
+
+  const markConnectivityConnected = useCallback(() => {
+    const wasUnavailable = connectivityStatusRef.current === "unavailable";
+    connectivityStatusRef.current = "connected";
+    setConnectionRestored(wasUnavailable);
+    setConnectivityStatus("connected");
+  }, []);
+
+  const invalidateNeutralHealth = useCallback(() => {
+    neutralHealthSequenceRef.current += 1;
+    const controller = neutralHealthControllerRef.current;
+    neutralHealthControllerRef.current = null;
+    controller?.abort();
+    if (appMountedRef.current) setNeutralHealthInProgress(false);
+  }, []);
+
+  const advanceAuthenticationGeneration = useCallback(() => {
+    authenticationGenerationRef.current += 1;
+    invalidateNeutralHealth();
+  }, [invalidateNeutralHealth]);
+
+  const updateAuthState = useCallback((nextState: AuthViewState) => {
+    authStatusRef.current = nextState.status;
+    setAuthState(nextState);
+  }, []);
 
   const invalidateAuthenticationValidation = useCallback(() => {
     authValidationSequenceRef.current += 1;
@@ -2188,19 +2484,32 @@ export function App({ authService = browserAuthenticationService }: AppProps) {
   }, []);
 
   useEffect(() => {
+    appMountedRef.current = true;
+    return () => {
+      appMountedRef.current = false;
+      neutralHealthSequenceRef.current += 1;
+      neutralHealthControllerRef.current?.abort();
+      neutralHealthControllerRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
     let mounted = true;
 
     const showUnauthenticated = (message = "", configurationUnavailable = false) => {
       if (!mounted) return;
+      advanceAuthenticationGeneration();
       identityRef.current = null;
-      setAuthState({ status: "unauthenticated", message, configurationUnavailable });
+      updateAuthState({ status: "unauthenticated", message, configurationUnavailable });
     };
 
     const applyIdentity = (identity: AuthIdentity) => {
       if (!mounted) return;
+      advanceAuthenticationGeneration();
       identityRef.current = identity;
       setLogoutError("");
-      setAuthState({ status: "authenticated", identity });
+      updateAuthState({ status: "authenticated", identity });
+      markConnectivityConnected();
     };
 
     const handleAuthenticationError = (error: unknown) => {
@@ -2212,10 +2521,14 @@ export function App({ authService = browserAuthenticationService }: AppProps) {
           showUnauthenticated(error.message);
           return;
         }
-        showUnauthenticated(error.message, error.code === "AUTH_CONFIGURATION_UNAVAILABLE");
+        if (error.code === "AUTH_CONFIGURATION_UNAVAILABLE") {
+          showUnauthenticated(error.message, true);
+          return;
+        }
+        markConnectivityUnavailable();
         return;
       }
-      showUnauthenticated("No fue posible validar la sesión. Intenta nuevamente.");
+      markConnectivityUnavailable();
     };
 
     const validateCurrentSession = () => {
@@ -2227,6 +2540,7 @@ export function App({ authService = browserAuthenticationService }: AppProps) {
         if (identity) applyIdentity(identity);
         else {
           invalidateAuthenticationValidation();
+          markConnectivityConnected();
           showUnauthenticated();
         }
       }).catch((error: unknown) => {
@@ -2242,14 +2556,29 @@ export function App({ authService = browserAuthenticationService }: AppProps) {
     let unsubscribe: () => void = () => undefined;
     let subscriptionReady = true;
     try {
-      unsubscribe = authService.subscribe((event) => {
+      unsubscribe = authService.subscribe((event, eventUserId) => {
         if (event === "INITIAL_SESSION" || event === "PASSWORD_RECOVERY") return;
         if (event === "SIGNED_OUT") {
           invalidateAuthenticationValidation();
+          markConnectivityConnected();
           showUnauthenticated();
           return;
         }
         if (event === "SIGNED_IN" && loginInProgressRef.current) return;
+        const currentIdentity = identityRef.current;
+        const mustValidateWithoutExposingCurrentWorkspace = event === "SIGNED_IN"
+          ? eventUserId === null || eventUserId === undefined || currentIdentity?.id !== eventUserId
+          : event === "TOKEN_REFRESHED"
+            && eventUserId !== null
+            && eventUserId !== undefined
+            && currentIdentity?.id !== eventUserId;
+        if (mustValidateWithoutExposingCurrentWorkspace) {
+          invalidateAuthenticationValidation();
+          advanceAuthenticationGeneration();
+          identityRef.current = null;
+          markConnectivityChecking();
+          updateAuthState({ status: "checking" });
+        }
         validateCurrentSession();
       });
     } catch (error) {
@@ -2286,21 +2615,69 @@ export function App({ authService = browserAuthenticationService }: AppProps) {
       invalidateAuthenticationValidation();
       unsubscribe();
     };
-  }, [authService, invalidateAuthenticationValidation]);
+  }, [advanceAuthenticationGeneration, authRetrySequence, authService, invalidateAuthenticationValidation, markConnectivityChecking, markConnectivityConnected, markConnectivityUnavailable, updateAuthState]);
+
+  async function retryInitialConnectivity() {
+    if (
+      neutralHealthControllerRef.current
+      || authStatusRef.current !== "checking"
+      || connectivityStatusRef.current !== "unavailable"
+    ) return;
+    const controller = new AbortController();
+    const requestSequence = ++neutralHealthSequenceRef.current;
+    const authenticationGeneration = authenticationGenerationRef.current;
+    const expectedIdentity = identityRef.current?.id ?? null;
+    neutralHealthControllerRef.current = controller;
+    setNeutralHealthInProgress(true);
+    const isCurrentRequest = () => (
+      appMountedRef.current
+      && neutralHealthControllerRef.current === controller
+      && neutralHealthSequenceRef.current === requestSequence
+      && authenticationGenerationRef.current === authenticationGeneration
+      && (identityRef.current?.id ?? null) === expectedIdentity
+      && authStatusRef.current === "checking"
+      && !controller.signal.aborted
+    );
+    try {
+      await resolvedApiClient.checkHealth(controller.signal);
+      if (!isCurrentRequest()) return;
+      markConnectivityConnected();
+      setAuthRetrySequence((current) => current + 1);
+    } catch {
+      if (!isCurrentRequest()) return;
+      markConnectivityUnavailable();
+    } finally {
+      if (neutralHealthControllerRef.current === controller) {
+        neutralHealthControllerRef.current = null;
+        if (appMountedRef.current) setNeutralHealthInProgress(false);
+      }
+    }
+  }
 
   function handleAuthenticated(identity: AuthIdentity) {
     invalidateAuthenticationValidation();
+    advanceAuthenticationGeneration();
     identityRef.current = identity;
     setLogoutError("");
-    setAuthState({ status: "authenticated", identity });
+    markConnectivityConnected();
+    updateAuthState({ status: "authenticated", identity });
+  }
+
+  function handleValidationPending() {
+    invalidateAuthenticationValidation();
+    advanceAuthenticationGeneration();
+    identityRef.current = null;
+    markConnectivityUnavailable();
+    updateAuthState({ status: "checking" });
   }
 
   function handleInvalidSession() {
     if (invalidationInProgressRef.current) return;
     invalidationInProgressRef.current = true;
     invalidateAuthenticationValidation();
+    advanceAuthenticationGeneration();
     identityRef.current = null;
-    setAuthState({
+    updateAuthState({
       status: "unauthenticated",
       message: "Tu sesión ya no es válida. Inicia sesión nuevamente.",
       configurationUnavailable: false,
@@ -2312,15 +2689,27 @@ export function App({ authService = browserAuthenticationService }: AppProps) {
 
   async function handleLogout() {
     if (isLoggingOut) return;
+    const previousIdentity = identityRef.current;
     setIsLoggingOut(true);
     setLogoutError("");
+    invalidateAuthenticationValidation();
+    advanceAuthenticationGeneration();
+    identityRef.current = null;
+    markConnectivityChecking();
+    updateAuthState({ status: "checking" });
     try {
       await authService.signOutLocal();
-      invalidateAuthenticationValidation();
-      identityRef.current = null;
-      setAuthState({ status: "unauthenticated", message: "", configurationUnavailable: false });
+      markConnectivityConnected();
+      updateAuthState({ status: "unauthenticated", message: "", configurationUnavailable: false });
     } catch {
-      setLogoutError("No fue posible cerrar la sesión. Intenta nuevamente.");
+      markConnectivityConnected();
+      if (previousIdentity) {
+        identityRef.current = previousIdentity;
+        updateAuthState({ status: "authenticated", identity: previousIdentity });
+        setLogoutError("No fue posible cerrar la sesión. Intenta nuevamente.");
+      } else {
+        updateAuthState({ status: "unauthenticated", message: "", configurationUnavailable: false });
+      }
     } finally {
       setIsLoggingOut(false);
     }
@@ -2331,8 +2720,25 @@ export function App({ authService = browserAuthenticationService }: AppProps) {
       <main className="auth-shell">
         <section className="login-card auth-checking" role="status" aria-live="polite">
           <img className="login-logo" src={autodiagLogoUrl} alt="AutoDiag IA" width="2172" height="724" />
-          <span className="analysis-spinner" aria-hidden="true" />
-          <p>Verificando sesión segura…</p>
+          {connectivityStatus === "unavailable" ? (
+            <>
+              <h1>Servidor temporalmente no disponible</h1>
+              <p>{API_UNAVAILABLE_MESSAGE}</p>
+              <button
+                className="login-button"
+                type="button"
+                disabled={neutralHealthInProgress}
+                onClick={() => void retryInitialConnectivity()}
+              >
+                {neutralHealthInProgress ? "Comprobando conexión…" : "Comprobar conexión"}
+              </button>
+            </>
+          ) : (
+            <>
+              <span className="analysis-spinner" aria-hidden="true" />
+              <p>Verificando sesión segura…</p>
+            </>
+          )}
         </section>
       </main>
     );
@@ -2346,6 +2752,7 @@ export function App({ authService = browserAuthenticationService }: AppProps) {
         configurationUnavailable={authState.configurationUnavailable}
         initialMessage={authState.message}
         onAuthenticated={handleAuthenticated}
+        onValidationPending={handleValidationPending}
         onLoginActivity={(active) => { loginInProgressRef.current = active; }}
       />
     );
@@ -2354,12 +2761,17 @@ export function App({ authService = browserAuthenticationService }: AppProps) {
   return (
     <ReportWorkspace
       key={authState.identity.id}
-      authService={authService}
+      apiClient={resolvedApiClient}
       identity={authState.identity}
+      connectivityStatus={connectivityStatus}
+      connectionRestored={connectionRestored}
       isLoggingOut={isLoggingOut}
       logoutError={logoutError}
       onLogout={() => void handleLogout()}
       onSessionInvalid={handleInvalidSession}
+      onConnectivityChecking={markConnectivityChecking}
+      onConnectivityUnavailable={markConnectivityUnavailable}
+      onConnectivityConnected={markConnectivityConnected}
     />
   );
 }

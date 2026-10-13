@@ -8,7 +8,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { downloadReportPdf } from "./report-pdf";
 import { App } from "./App";
-import type { BrowserAuthenticationService, SupportedAuthEvent } from "./auth-service";
+import {
+  BrowserAuthenticationError,
+  type BrowserAuthenticationService,
+  type SupportedAuthEvent,
+} from "./auth-service";
 
 vi.mock("./report-pdf", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./report-pdf")>();
@@ -17,6 +21,7 @@ vi.mock("./report-pdf", async (importOriginal) => {
 
 const downloadReportPdfMock = vi.mocked(downloadReportPdf);
 const TEST_IDENTITY = { id: "6a103df0-8e4d-4c51-89f5-7030c5443d89", username: "usuario.sintetico" };
+const TEST_VIN_PSEUDONYM = `vin_v1_${"a".repeat(64)}`;
 
 function createTestAuthService(
   overrides: Partial<BrowserAuthenticationService> = {},
@@ -44,9 +49,10 @@ function createPdf(name: string) {
   return new File(["%PDF-1.7\n%%EOF"], name, { type: "application/pdf" });
 }
 
-function createJsonResponse(ok: boolean, body: unknown) {
+function createJsonResponse(ok: boolean, body: unknown, status = ok ? 200 : 400) {
   return {
     ok,
+    status,
     json: vi.fn().mockResolvedValue(body),
   } as unknown as Response;
 }
@@ -88,7 +94,7 @@ function successfulUpload(file: File) {
         engine: null,
         odometer: null,
         vinMasked: "*************6789",
-        vinPseudonym: "vin_v1_synthetic",
+        vinPseudonym: TEST_VIN_PSEUDONYM,
       },
       scanSummary: { declaredSystems: 1, parsedSystems: 1, declaredDtcs: 0, parsedDtcs: 0 },
       systems: [{ code: "PCM", name: "Módulo sintético", dtcCount: 0 }],
@@ -109,7 +115,7 @@ function extractedUpload(
   extraction: Record<string, unknown>,
   analysisPreparation: Record<string, unknown> = {
     available: false,
-    reasons: [{ code: "NOT_READY", message: "El reporte no está preparado para orientación por IA." }],
+    reasons: [{ code: "NO_VALID_DTCS", message: "El reporte no está preparado para orientación por IA." }],
     warnings: [],
   },
 ) {
@@ -147,7 +153,7 @@ function readyAnalysisUpload(file: File) {
         engine: "Motor privado",
         odometer: { value: 45678, unit: "km" },
         vinMasked: "*************6789",
-        vinPseudonym: "vin_v1_private",
+        vinPseudonym: TEST_VIN_PSEUDONYM,
       },
       scanSummary: { declaredSystems: 1, parsedSystems: 1, declaredDtcs: 1, parsedDtcs: 1 },
       systems: [{ code: "PCM", name: "Módulo motriz", dtcCount: 1 }],
@@ -474,7 +480,7 @@ describe("carga de reportes", () => {
   it("no rechaza por tamaño y muestra el error devuelto por el backend", async () => {
     const largeFile = createPdf("reporte-grande.pdf");
     Object.defineProperty(largeFile, "size", { value: 25 * 1024 * 1024 });
-    const backendMessage = "El archivo excede el límite permitido de 10485760 bytes.";
+    const backendMessage = "detalle contaminado sk-proj-synthetic-never-real";
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       createJsonResponse(false, {
         error: { code: "FILE_TOO_LARGE", message: backendMessage },
@@ -492,8 +498,106 @@ describe("carga de reportes", () => {
 
     await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
 
-    expect(await screen.findByText(backendMessage)).toBeTruthy();
+    expect(await screen.findByText("El archivo excede el límite permitido por el servidor.")).toBeTruthy();
+    expect(screen.queryByText(backendMessage)).toBeNull();
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rechaza una respuesta 200 vacía sin perder el archivo ni cerrar la sesión", async () => {
+    const file = createPdf("respuesta-vacia.pdf");
+    const signOutLocal = vi.fn(async () => undefined);
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(createJsonResponse(true, {}));
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const { container } = await renderAuthenticatedApp(createTestAuthService({ signOutLocal }));
+
+    await user.upload(getUploadElements(container).input, file);
+    await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+
+    expect(await screen.findByText("El servidor devolvió una respuesta de carga no válida.")).toBeTruthy();
+    expect(screen.getByText(file.name)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Iniciar sesión" })).toBeNull();
+    expect(signOutLocal).not.toHaveBeenCalled();
+  });
+
+  it("rechaza una respuesta 200 con extracción anidada incompleta", async () => {
+    const file = createPdf("respuesta-anidada.pdf");
+    const malformed = await successfulUpload(file).json() as {
+      extraction: { vehicle: Record<string, unknown> };
+    };
+    delete malformed.extraction.vehicle.make;
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(createJsonResponse(true, malformed));
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const { container } = await renderAuthenticatedApp();
+
+    await user.upload(getUploadElements(container).input, file);
+    await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+
+    expect(await screen.findByText("El servidor devolvió una respuesta de carga no válida.")).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Datos del reporte" })).toBeNull();
+    expect(screen.getByText(file.name)).toBeTruthy();
+  });
+
+  it("rechaza una respuesta 200 con un arreglo anidado de tipo incorrecto", async () => {
+    const file = createPdf("respuesta-arreglo.pdf");
+    const malformed = await successfulUpload(file).json() as {
+      extraction: { systems: unknown };
+    };
+    malformed.extraction.systems = { unexpected: true };
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(createJsonResponse(true, malformed));
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const { container } = await renderAuthenticatedApp();
+
+    await user.upload(getUploadElements(container).input, file);
+    await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+
+    expect(await screen.findByText("El servidor devolvió una respuesta de carga no válida.")).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Datos del reporte" })).toBeNull();
+    expect(screen.getByText(file.name)).toBeTruthy();
+  });
+
+  it("no muestra mensajes remotos para códigos de error desconocidos", async () => {
+    const file = createPdf("error-desconocido.pdf");
+    const remoteMessage = "detalle-remoto-sintetico-que-no-debe-mostrarse";
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(createJsonResponse(false, {
+      error: { code: "UNKNOWN_INTERNAL_CODE", message: remoteMessage },
+    }, 400));
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const { container } = await renderAuthenticatedApp();
+
+    await user.upload(getUploadElements(container).input, file);
+    await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+
+    expect(await screen.findByText("No fue posible enviar el reporte.")).toBeTruthy();
+    expect(screen.queryByText(remoteMessage)).toBeNull();
+  });
+
+  it("bloquea reintentos rápidos de una carga mientras el nuevo POST sigue activo", async () => {
+    const file = createPdf("reintento-rapido.pdf");
+    const pendingRetry = createDeferred<Response>();
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockRejectedValueOnce(new TypeError("synthetic network failure"))
+      .mockReturnValueOnce(pendingRetry.promise);
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const { container } = await renderAuthenticatedApp();
+
+    await user.upload(getUploadElements(container).input, file);
+    await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+    await screen.findByText("Servidor temporalmente no disponible");
+    const retry = screen.getAllByRole("button", { name: "Reintentar" })
+      .find((button) => button.classList.contains("submit-button"));
+    if (!retry) throw new Error("No se encontró el reintento de carga.");
+
+    fireEvent.click(retry);
+    fireEvent.click(retry);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await act(async () => pendingRetry.resolve(successfulUpload(file)));
+    expect(await screen.findByText("Reporte recibido correctamente.")).toBeTruthy();
   });
 
   it("muestra un resultado completo con vehículo, VIN protegido y tabla DTC", async () => {
@@ -511,7 +615,7 @@ describe("carga de reportes", () => {
           engine: "Motor Sintético",
           odometer: { value: 45678, unit: "km" },
           vinMasked: "*************6789",
-          vinPseudonym: "vin_v1_synthetic",
+          vinPseudonym: TEST_VIN_PSEUDONYM,
         },
         scanSummary: { declaredSystems: 2, parsedSystems: 2, declaredDtcs: 1, parsedDtcs: 1 },
         systems: [],
@@ -541,7 +645,7 @@ describe("carga de reportes", () => {
     expect(screen.getByRole("table")).toBeTruthy();
     expect(screen.getByText("U1000:01-AB")).toBeTruthy();
     expect(screen.queryByText(fullVin)).toBeNull();
-    expect(screen.queryByText("vin_v1_synthetic")).toBeNull();
+    expect(screen.queryByText(TEST_VIN_PSEUDONYM)).toBeNull();
   });
 
   it("presenta advertencias y necesidad de revisión para resultados parciales", async () => {
@@ -617,7 +721,7 @@ describe("carga de reportes", () => {
       },
       {
         available: false,
-        reasons: [{ code: "SYNTHETIC", message: "Razón activa sintética." }],
+        reasons: [{ code: "NO_VALID_DTCS", message: "Razón activa sintética." }],
         warnings: [],
         counts,
       },
@@ -687,7 +791,7 @@ describe("orientación asistida por IA", () => {
     expect(requestBody.historyContext).toMatchObject({
       reportReference: "5f02d19b-5fd2-4128-aeb6-c5eef33554a0",
       extraction: {
-        vehicle: { vinMasked: "*************6789", vinPseudonym: "vin_v1_private", odometer: { value: 45678, unit: "km" } },
+        vehicle: { vinMasked: "*************6789", vinPseudonym: TEST_VIN_PSEUDONYM, odometer: { value: 45678, unit: "km" } },
       },
     });
     expect(JSON.stringify(requestBody)).not.toMatch(/originalName|sha256|rawText|cliente/iu);
@@ -875,7 +979,7 @@ describe("orientación asistida por IA", () => {
     });
     expect(requestBody.historyContext).toMatchObject({
       reportReference: "5f02d19b-5fd2-4128-aeb6-c5eef33554a0",
-      extraction: { vehicle: { vinMasked: "*************6789", vinPseudonym: "vin_v1_private" } },
+      extraction: { vehicle: { vinMasked: "*************6789", vinPseudonym: TEST_VIN_PSEUDONYM } },
     });
     const serialized = JSON.stringify(requestBody).toLowerCase();
     for (const forbidden of ["originalname", "sha256", "customer", "cliente", "rawtext"]) {
@@ -991,7 +1095,7 @@ describe("orientación asistida por IA", () => {
 
     expect(await screen.findByText("La solicitud de orientación agotó el tiempo disponible.")).toBeTruthy();
     expect(screen.queryByText(rawMessage)).toBeNull();
-    expect(screen.getByRole("button", { name: "Intentar de nuevo" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Reintentar" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Descargar informe PDF" })).toBeNull();
     expect(fetchMock.mock.calls.filter(([url]) => url === "/api/reports/analyze")).toHaveLength(1);
     expect(screen.getByRole("heading", { name: "Datos del reporte" })).toBeTruthy();
@@ -1258,7 +1362,7 @@ describe("historial seguro de diagnósticos", () => {
     await user.click(screen.getByRole("button", { name: "Historial" }));
     await user.click(await screen.findByRole("button", { name: "Abrir diagnóstico de Marca Histórica Modelo Seguro" }));
 
-    expect((await screen.findByRole("alert")).textContent).toContain("El servidor devolvió un diagnóstico inválido.");
+    expect(await screen.findByText("El servidor devolvió un diagnóstico inválido.")).toBeTruthy();
     expect(screen.queryByText("API_KEY=valor-sintetico")).toBeNull();
     expect(screen.queryByRole("heading", { name: "Orientación guardada" })).toBeNull();
     expect(downloadReportPdfMock).not.toHaveBeenCalled();
@@ -1280,7 +1384,7 @@ describe("historial seguro de diagnósticos", () => {
   });
 
   it("descarta el historial anterior cuando cambia la identidad autenticada", async () => {
-    let authListener: ((event: SupportedAuthEvent) => void) | undefined;
+    let authListener: ((event: SupportedAuthEvent, userId?: string | null) => void) | undefined;
     const secondIdentity = { id: "8b34944b-afec-40ad-a1ee-e31978be731e", username: "otro.usuario" };
     const authenticatedFetch = vi.fn<BrowserAuthenticationService["authenticatedFetch"]>(async () => historyListResponse());
     const authService = createTestAuthService({
@@ -1297,7 +1401,7 @@ describe("historial seguro de diagnósticos", () => {
     expect(await screen.findByRole("button", { name: "Abrir diagnóstico de Marca Histórica Modelo Seguro" })).toBeTruthy();
 
     await act(async () => {
-      authListener?.("TOKEN_REFRESHED");
+      authListener?.("TOKEN_REFRESHED", secondIdentity.id);
     });
 
     expect(await screen.findByText("otro.usuario")).toBeTruthy();
@@ -1353,7 +1457,7 @@ describe("historial seguro de diagnósticos", () => {
 
   it("descarta una lista pendiente de A y permite cargar exclusivamente la lista de B", async () => {
     const pendingUserA = createDeferred<Response>();
-    let authListener: ((event: SupportedAuthEvent) => void) | undefined;
+    let authListener: ((event: SupportedAuthEvent, userId?: string | null) => void) | undefined;
     let listSignal: AbortSignal | undefined;
     const secondIdentity = { id: "8b34944b-afec-40ad-a1ee-e31978be731e", username: "otro.usuario" };
     const secondPage = await historyListResponse().json() as { items: Array<Record<string, unknown>>; nextCursor: null };
@@ -1382,7 +1486,7 @@ describe("historial seguro de diagnósticos", () => {
 
     await user.click(screen.getByRole("button", { name: "Historial" }));
     await waitFor(() => expect(authenticatedFetch).toHaveBeenCalledOnce());
-    await act(async () => authListener?.("TOKEN_REFRESHED"));
+    await act(async () => authListener?.("TOKEN_REFRESHED", secondIdentity.id));
     expect(await screen.findByText("otro.usuario")).toBeTruthy();
     expect(listSignal?.aborted).toBe(true);
     await act(async () => pendingUserA.resolve(historyListResponse()));
@@ -1395,7 +1499,7 @@ describe("historial seguro de diagnósticos", () => {
 
   it("descarta un detalle pendiente de A y permite cargar exclusivamente el historial de B", async () => {
     const pendingDetailA = createDeferred<Response>();
-    let authListener: ((event: SupportedAuthEvent) => void) | undefined;
+    let authListener: ((event: SupportedAuthEvent, userId?: string | null) => void) | undefined;
     let detailSignal: AbortSignal | undefined;
     const secondIdentity = { id: "8b34944b-afec-40ad-a1ee-e31978be731e", username: "otro.usuario" };
     const secondPage = await historyListResponse().json() as { items: Array<Record<string, unknown>>; nextCursor: null };
@@ -1427,7 +1531,7 @@ describe("historial seguro de diagnósticos", () => {
     await user.click(screen.getByRole("button", { name: "Historial" }));
     await user.click(await screen.findByRole("button", { name: "Abrir diagnóstico de Marca Histórica Modelo Seguro" }));
     await waitFor(() => expect(authenticatedFetch).toHaveBeenCalledTimes(2));
-    await act(async () => authListener?.("TOKEN_REFRESHED"));
+    await act(async () => authListener?.("TOKEN_REFRESHED", secondIdentity.id));
     expect(await screen.findByText("otro.usuario")).toBeTruthy();
     expect(detailSignal?.aborted).toBe(true);
     await act(async () => pendingDetailA.resolve(historyDetailResponse()));
@@ -1602,5 +1706,253 @@ describe("descarga local del informe PDF", () => {
     await user.upload(input, nextFile);
     expect(screen.queryByRole("button", { name: "Descargar informe PDF" })).toBeNull();
     expect(downloadReportPdfMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("resiliencia de comunicación con la API", () => {
+  it("un timeout durante análisis conserva sesión, observaciones y datos sin reintento automático", async () => {
+    const file = createPdf("timeout-analisis.pdf");
+    const signOutLocal = vi.fn(async () => undefined);
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(readyAnalysisUpload(file))
+      .mockResolvedValueOnce(createJsonResponse(false, { error: { code: "REQUEST_TIMEOUT" } }, 408));
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const { container } = await renderAuthenticatedApp(createTestAuthService({ signOutLocal }));
+    const { input } = getUploadElements(container);
+    const observations = "Vibración sintética al acelerar";
+
+    await user.upload(input, file);
+    await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+    const textarea = screen.getByRole("textbox", { name: "Observaciones del vehículo (opcional)" }) as HTMLTextAreaElement;
+    await user.type(textarea, observations);
+    await user.click(await screen.findByRole("button", { name: "Analizar DTC con IA" }));
+    await user.click(screen.getByRole("button", { name: "Confirmar y analizar" }));
+
+    expect(await screen.findByText("Servidor temporalmente no disponible")).toBeTruthy();
+    expect(screen.getByText("P0300")).toBeTruthy();
+    expect(textarea.value).toBe(observations);
+    expect(screen.getAllByRole("button", { name: "Reintentar" }).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: "Iniciar sesión" })).toBeNull();
+    expect(signOutLocal).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/reports/analyze")).toHaveLength(1);
+  });
+
+  it.each([
+    [500, "server"],
+    [429, "rate limit"],
+  ])("un HTTP %i durante análisis es recuperable y no repite el POST (%s)", async (status) => {
+    const file = createPdf(`http-${status}.pdf`);
+    const signOutLocal = vi.fn(async () => undefined);
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(readyAnalysisUpload(file))
+      .mockResolvedValueOnce(createJsonResponse(false, { error: { code: "TEMPORARY_FAILURE" } }, status));
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const { container } = await renderAuthenticatedApp(createTestAuthService({ signOutLocal }));
+
+    await user.upload(getUploadElements(container).input, file);
+    await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+    await user.click(await screen.findByRole("button", { name: "Analizar DTC con IA" }));
+    await user.click(screen.getByRole("button", { name: "Confirmar y analizar" }));
+
+    expect(await screen.findByRole("heading", { name: "No fue posible obtener la orientación" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Iniciar sesión" })).toBeNull();
+    expect(signOutLocal).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/reports/analyze")).toHaveLength(1);
+  });
+
+  it("restablece la conectividad con health sin borrar un resultado existente", async () => {
+    const file = createPdf("resultado-conservado.pdf");
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(readyAnalysisUpload(file))
+      .mockResolvedValueOnce(successfulAnalysis())
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValueOnce(createJsonResponse(true, { status: "ok" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const { container } = await renderAuthenticatedApp();
+
+    await user.upload(getUploadElements(container).input, file);
+    await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+    await user.click(await screen.findByRole("button", { name: "Analizar DTC con IA" }));
+    await user.click(screen.getByRole("button", { name: "Confirmar y analizar" }));
+    expect(await screen.findByRole("heading", { name: "Resumen técnico" })).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Historial" }));
+    expect(await screen.findByText("Servidor temporalmente no disponible")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Comprobar conexión" }));
+
+    await waitFor(() => expect(screen.queryByText("Servidor temporalmente no disponible")).toBeNull());
+    await user.click(screen.getByRole("button", { name: "Nuevo diagnóstico" }));
+    expect(screen.getByRole("heading", { name: "Resumen técnico" })).toBeTruthy();
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/health")).toHaveLength(1);
+  });
+
+  it("conserva el historial cargado si una página posterior falla", async () => {
+    const firstPage = await historyListResponse().json() as { items: unknown[] };
+    const authenticatedFetch = vi
+      .fn<BrowserAuthenticationService["authenticatedFetch"]>()
+      .mockResolvedValueOnce(createJsonResponse(true, { ...firstPage, nextCursor: "next-page" }))
+      .mockRejectedValueOnce(new TypeError("ECONNRESET"))
+      .mockRejectedValueOnce(new TypeError("ECONNRESET"));
+    const signOutLocal = vi.fn(async () => undefined);
+    const user = userEvent.setup();
+    await renderAuthenticatedApp(createTestAuthService({ authenticatedFetch, signOutLocal }));
+
+    await user.click(screen.getByRole("button", { name: "Historial" }));
+    const existing = await screen.findByRole("button", { name: "Abrir diagnóstico de Marca Histórica Modelo Seguro" });
+    await user.click(screen.getByRole("button", { name: "Cargar más" }));
+
+    expect(await screen.findByText("Servidor temporalmente no disponible")).toBeTruthy();
+    expect(existing).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Abrir diagnóstico de Marca Histórica Modelo Seguro" })).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: "Reintentar" }).length).toBeGreaterThan(0);
+    expect(authenticatedFetch).toHaveBeenCalledTimes(3);
+    expect(signOutLocal).not.toHaveBeenCalled();
+  });
+
+  it("bloquea reintentos rápidos del historial mientras la solicitud sigue activa", async () => {
+    const pendingRetry = createDeferred<Response>();
+    const authenticatedFetch = vi
+      .fn<BrowserAuthenticationService["authenticatedFetch"]>()
+      .mockRejectedValueOnce(new TypeError("synthetic network failure"))
+      .mockRejectedValueOnce(new TypeError("synthetic network failure"))
+      .mockReturnValueOnce(pendingRetry.promise);
+    const user = userEvent.setup();
+    await renderAuthenticatedApp(createTestAuthService({ authenticatedFetch }));
+
+    await user.click(screen.getByRole("button", { name: "Historial" }));
+    await waitFor(() => expect(document.querySelector(".history-error button")).toBeTruthy());
+    const retry = document.querySelector<HTMLButtonElement>(".history-error button");
+    if (!retry) throw new Error("No se encontró el reintento del historial.");
+
+    fireEvent.click(retry);
+    fireEvent.click(retry);
+
+    expect(authenticatedFetch).toHaveBeenCalledTimes(3);
+    await act(async () => pendingRetry.resolve(historyListResponse()));
+    expect(await screen.findByRole("button", { name: "Abrir diagnóstico de Marca Histórica Modelo Seguro" })).toBeTruthy();
+  });
+
+  it("ignora una respuesta tardía de health después de cerrar sesión", async () => {
+    const file = createPdf("health-logout.pdf");
+    const pendingHealth = createDeferred<Response>();
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockRejectedValueOnce(new TypeError("synthetic upload failure"))
+      .mockReturnValueOnce(pendingHealth.promise);
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const { container } = await renderAuthenticatedApp();
+
+    await user.upload(getUploadElements(container).input, file);
+    await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+    await screen.findByText("Servidor temporalmente no disponible");
+    await user.click(screen.getByRole("button", { name: "Comprobar conexión" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await user.click(screen.getByRole("button", { name: "Cerrar sesión" }));
+    expect(await screen.findByRole("button", { name: "Iniciar sesión" })).toBeTruthy();
+
+    await act(async () => pendingHealth.resolve(createJsonResponse(true, { status: "ok" })));
+
+    expect(screen.getByRole("button", { name: "Iniciar sesión" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Carga tu reporte Autel" })).toBeNull();
+  });
+
+  it("ignora health tardío del usuario A después de cambiar al UUID B", async () => {
+    const file = createPdf("health-identidad.pdf");
+    const pendingHealth = createDeferred<Response>();
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockRejectedValueOnce(new TypeError("synthetic upload failure"))
+      .mockReturnValueOnce(pendingHealth.promise);
+    vi.stubGlobal("fetch", fetchMock);
+    const secondIdentity = { id: "8b34944b-afec-40ad-a1ee-e31978be731e", username: "otro.usuario" };
+    let authListener: ((event: SupportedAuthEvent, userId?: string | null) => void) | undefined;
+    const authService = createTestAuthService({
+      validateCurrentSession: async () => secondIdentity,
+      subscribe: (listener) => {
+        authListener = listener;
+        return () => undefined;
+      },
+    });
+    const user = userEvent.setup();
+    const { container } = await renderAuthenticatedApp(authService);
+
+    await user.upload(getUploadElements(container).input, file);
+    await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+    await screen.findByText("Servidor temporalmente no disponible");
+    const check = screen.getByRole("button", { name: "Comprobar conexión" });
+    fireEvent.click(check);
+    fireEvent.click(check);
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await act(async () => authListener?.("SIGNED_IN", secondIdentity.id));
+    expect(await screen.findByText(secondIdentity.username)).toBeTruthy();
+
+    await act(async () => pendingHealth.resolve(createJsonResponse(true, { status: "ok" })));
+
+    expect(screen.getByText(secondIdentity.username)).toBeTruthy();
+    expect(screen.queryByText(TEST_IDENTITY.username)).toBeNull();
+    expect(screen.queryByText(file.name)).toBeNull();
+    expect(fetchMock.mock.calls.filter(([url]) => String(url) === "/api/health")).toHaveLength(1);
+  });
+
+  it("oculta PDF, análisis e historial de A durante la validación fallida de B y abre B limpio al reintentar", async () => {
+    const file = createPdf("privado-usuario-a.pdf");
+    const secondIdentity = { id: "8b34944b-afec-40ad-a1ee-e31978be731e", username: "otro.usuario" };
+    const initialize = vi.fn(async () => TEST_IDENTITY);
+    const validateCurrentSession = vi.fn<BrowserAuthenticationService["validateCurrentSession"]>();
+    let authListener: ((event: SupportedAuthEvent, userId?: string | null) => void) | undefined;
+    const authService = createTestAuthService({
+      initialize,
+      validateCurrentSession,
+      subscribe: (listener) => {
+        authListener = listener;
+        return () => undefined;
+      },
+    });
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url === "/api/reports/upload") return readyAnalysisUpload(file);
+      if (url === "/api/reports/analyze") return successfulAnalysis();
+      if (url === "/api/history?limit=20") return historyListResponse();
+      if (url === "/api/health") return createJsonResponse(true, { status: "ok" });
+      throw new Error(`Solicitud sintética inesperada: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const { container } = await renderAuthenticatedApp(authService);
+
+    await user.upload(getUploadElements(container).input, file);
+    await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+    await user.click(await screen.findByRole("button", { name: "Analizar DTC con IA" }));
+    await user.click(screen.getByRole("button", { name: "Confirmar y analizar" }));
+    expect(await screen.findByRole("heading", { name: "Resumen técnico" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Historial" }));
+    expect(await screen.findByRole("button", { name: "Abrir diagnóstico de Marca Histórica Modelo Seguro" })).toBeTruthy();
+
+    validateCurrentSession.mockRejectedValueOnce(new BrowserAuthenticationError(
+      "AUTH_PROVIDER_UNAVAILABLE",
+      "No fue posible iniciar sesión. Intenta nuevamente.",
+    ));
+    await act(async () => authListener?.("SIGNED_IN", secondIdentity.id));
+
+    expect(await screen.findByRole("heading", { name: "Servidor temporalmente no disponible" })).toBeTruthy();
+    expect(screen.queryByText(file.name)).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Resumen técnico" })).toBeNull();
+    expect(screen.queryByText("Marca Histórica")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Iniciar sesión" })).toBeNull();
+
+    initialize.mockResolvedValueOnce(secondIdentity);
+    await user.click(screen.getByRole("button", { name: "Comprobar conexión" }));
+
+    expect(await screen.findByText(secondIdentity.username)).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Carga tu reporte Autel" })).toBeTruthy();
+    expect(screen.queryByText(file.name)).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Resumen técnico" })).toBeNull();
+    expect(screen.queryByText("Marca Histórica")).toBeNull();
   });
 });
