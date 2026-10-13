@@ -212,6 +212,10 @@ export function createApp(options: AppOptions) {
     response.json({ status: "ok", service: "AutoDiag IA" });
   });
 
+  app.get("/api/health", (_request, response) => {
+    response.json({ status: "ok" });
+  });
+
   app.post(
     "/api/auth/login",
     (_request, response, next) => {

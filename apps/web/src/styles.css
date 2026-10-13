@@ -43,6 +43,17 @@ button, label { -webkit-tap-highlight-color: transparent; }
 .logout-button:focus-visible { outline: 3px solid rgb(236 91 50 / 24%); outline-offset: 2px; }
 .logout-error { width: min(100%, 820px); margin: -17px 0 17px; padding: 10px 13px; border: 1px solid #efc6bb; border-radius: 9px; color: #8d3724; background: #fff5f2; font-size: .8rem; text-align: center; }
 
+.connectivity-banner { display: flex; width: min(100%, 820px); align-items: center; justify-content: space-between; gap: 18px; margin: -14px 0 20px; padding: 13px 15px; border-radius: 11px; font-size: .8rem; line-height: 1.45; }
+.connectivity-banner.unavailable { border: 1px solid #efc18a; color: #704418; background: #fff8ed; }
+.connectivity-banner.checking { justify-content: center; color: #405d70; background: #edf4f7; }
+.connectivity-banner.restored { justify-content: center; border: 1px solid #acd6bd; color: #245d3d; background: #edf8f1; font-weight: 700; }
+.connectivity-banner strong { display: block; margin-bottom: 3px; color: #613813; font-size: .86rem; }
+.connectivity-banner p { margin: 0; }
+.connectivity-actions { display: flex; flex: 0 0 auto; gap: 8px; }
+.connectivity-actions button { min-height: 38px; cursor: pointer; padding: 8px 11px; border: 1px solid #d59a59; border-radius: 8px; color: #704418; background: #fff; font-size: .75rem; font-weight: 750; }
+.connectivity-actions button:hover { border-color: #c66b35; background: #fff4e8; }
+.connectivity-actions button:focus-visible { outline: 3px solid rgb(220 118 50 / 25%); outline-offset: 2px; }
+
 .brand-logo {
   display: block;
   width: min(100%, 340px);
@@ -295,6 +306,8 @@ td code { color: #c34628; font-family: ui-monospace, SFMono-Regular, Consolas, m
 .analysis-spinner { width: 20px; height: 20px; flex: 0 0 auto; border: 2px solid #cdd9e0; border-top-color: #dd552f; border-radius: 50%; animation: spin .75s linear infinite; }
 .analysis-error { border: 1px solid #efc6bb; color: #7c3e2d; background: #fff5f2; }
 .analysis-error p { margin: 0 0 13px; font-size: .81rem; line-height: 1.5; }
+.preserved-analysis { margin-top: 16px; }
+.preserved-analysis-note { margin: 0 0 12px; padding: 9px 12px; border-radius: 8px; color: #4e6575; background: #edf4f7; font-size: .78rem; }
 .analysis-summary { background: #eef5f7; }
 .analysis-summary p { margin: 0; color: #405567; font-size: .84rem; line-height: 1.6; }
 .analysis-summary p, .analysis-finding > p, .guidance-grid li, .analysis-warning li { overflow-wrap: anywhere; }

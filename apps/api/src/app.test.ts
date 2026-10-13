@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import request from "supertest";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { createApp } from "./app.js";
 import type { AuthenticationService } from "./auth-service.js";
@@ -80,6 +80,64 @@ function createTestApp(options: { maxFileSizeBytes?: number; pages?: ExtractedPd
 function postUpload(app = createTestApp()) {
   return request(app).post("/api/reports/upload").set("Authorization", AUTHORIZATION);
 }
+
+describe("GET /api/health", () => {
+  it("responde el contrato mínimo sin invocar autenticación ni servicios externos", async () => {
+    const authenticationService = {
+      login: vi.fn(),
+      authenticate: vi.fn(),
+    };
+    const analysisService = { analyze: vi.fn() };
+    const ragService = { retrieve: vi.fn() };
+    const historyService = { save: vi.fn(), list: vi.fn(), get: vi.fn() };
+    const app = createApp({
+      vinHmacSecret: TEST_SECRET,
+      authenticationService: authenticationService as never,
+      analysisService: analysisService as never,
+      ragEnabled: true,
+      ragService,
+      historyService: historyService as never,
+    });
+
+    const response = await request(app).get("/api/health");
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ status: "ok" });
+    expect(authenticationService.login).not.toHaveBeenCalled();
+    expect(authenticationService.authenticate).not.toHaveBeenCalled();
+    expect(analysisService.analyze).not.toHaveBeenCalled();
+    expect(ragService.retrieve).not.toHaveBeenCalled();
+    expect(historyService.save).not.toHaveBeenCalled();
+    expect(historyService.list).not.toHaveBeenCalled();
+    expect(historyService.get).not.toHaveBeenCalled();
+  });
+
+  it("continúa respondiendo después de que otra solicitud falla de forma controlada", async () => {
+    const app = createApp({
+      vinHmacSecret: TEST_SECRET,
+      authenticationService: testAuthenticationService,
+      extractPdfPages: async () => {
+        throw new Error("synthetic extraction failure");
+      },
+    });
+
+    const failedRequest = await request(app)
+      .post("/api/reports/upload")
+      .set("Authorization", AUTHORIZATION)
+      .attach("report", validPdf, { filename: "synthetic.pdf", contentType: "application/pdf" });
+    const healthAfterFailure = await request(app).get("/api/health");
+
+    expect(failedRequest.status).toBe(500);
+    expect(failedRequest.body).toEqual({
+      error: {
+        code: "PDF_EXTRACTION_ERROR",
+        message: "No fue posible extraer el contenido del PDF.",
+      },
+    });
+    expect(healthAfterFailure.status).toBe(200);
+    expect(healthAfterFailure.body).toEqual({ status: "ok" });
+  });
+});
 
 describe("POST /api/reports/upload", () => {
   it("recibe un PDF válido y devuelve sus metadatos", async () => {
