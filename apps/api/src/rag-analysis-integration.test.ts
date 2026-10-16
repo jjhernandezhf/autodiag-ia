@@ -60,7 +60,11 @@ const evidence = [{
 }];
 
 function post(app: ReturnType<typeof createApp>) {
-  return request(app).post("/api/reports/analyze").set("Authorization", "Bearer synthetic-access-token").send(input);
+  return request(app)
+    .post("/api/reports/analyze")
+    .set("Authorization", "Bearer synthetic-access-token")
+    .set("Idempotency-Key", "11111111-1111-4111-8111-111111111111")
+    .send(input);
 }
 
 function base(generate: ReturnType<typeof vi.fn>) {
@@ -200,6 +204,7 @@ describe("integración tolerante a fallos de RAG", () => {
     const response = await request(createApp({ ...base(generate), ragEnabled: true, ragService }))
       .post("/api/reports/analyze")
       .set("Authorization", "Bearer synthetic-access-token")
+      .set("Idempotency-Key", "11111111-1111-4111-8111-111111111111")
       .send(body);
 
     expect(response.status).toBe(200);
@@ -232,6 +237,7 @@ describe("integración tolerante a fallos de RAG", () => {
     const response = await request(app)
       .post("/api/reports/analyze")
       .set("Authorization", "Bearer synthetic-access-token")
+      .set("Idempotency-Key", "11111111-1111-4111-8111-111111111111")
       .send({ ...input, observations: sensitiveValue });
 
     expect(response.status).toBe(400);
@@ -253,6 +259,7 @@ describe("integración tolerante a fallos de RAG", () => {
     const response = await request(createApp({ ...base(generate), ragEnabled: true, ragService }))
       .post("/api/reports/analyze")
       .set("Authorization", "Bearer synthetic-access-token")
+      .set("Idempotency-Key", "11111111-1111-4111-8111-111111111111")
       .send({
         ...input,
         modules: [{ ...input.modules[0]!, dtcs: [{ ...input.modules[0]!.dtcs[0]!, description: sensitiveValue }] }],
@@ -285,7 +292,7 @@ describe("integración tolerante a fallos de RAG", () => {
     const response = await post(createApp({ ...base(generate), ragEnabled: true, ragService }));
 
     expect(response.status).toBe(200);
-    expect(createEmbeddings).toHaveBeenCalledExactlyOnceWith([semanticQuery]);
+    expect(createEmbeddings).toHaveBeenCalledExactlyOnceWith([semanticQuery], expect.any(AbortSignal));
     expect(generate).toHaveBeenCalledOnce();
     expect(generate.mock.calls[0]![0].knowledgeContext).toBeUndefined();
     expect(generate.mock.calls[0]![0].instructions).toBe(LEGACY_DIAGNOSTIC_INSTRUCTIONS);

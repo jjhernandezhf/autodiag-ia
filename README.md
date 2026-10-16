@@ -171,7 +171,7 @@ Los mensajes no incluyen texto del reporte, VIN, datos del cliente, rutas locale
 
 ## Orientación diagnóstica con OpenAI
 
-`POST /api/reports/analyze` es una operación privada separada de la carga y extracción. Requiere `Authorization: Bearer <Supabase access token>`, recibe JSON estructurado y admite observaciones técnicas opcionales del vehículo. No acepta PDF, VIN, odómetro, nombres de archivo, hashes ni identificadores del reporte.
+`POST /api/reports/analyze` es una operación privada separada de la carga y extracción. Requiere `Authorization: Bearer <Supabase access token>` y un encabezado `Idempotency-Key` con un UUID opaco, recibe JSON estructurado y admite observaciones técnicas opcionales del vehículo. No acepta PDF, VIN, odómetro, nombres de archivo, hashes ni identificadores del reporte.
 
 Entrada resumida:
 
@@ -212,13 +212,28 @@ La respuesta contiene un resumen técnico, hallazgos priorizados, una referencia
 
 El backend exige cero asociaciones para `not_provided` y `no_clear_match`, al menos una para `matches_found`, referencias existentes y no duplicadas, y coherencia entre la presencia de observaciones y el estado. Rechaza referencias ajenas a los DTC accionables y hallazgos duplicados para la misma combinación módulo+código. Es una orientación sugerida, no un diagnóstico definitivo.
 
-La integración usa el SDK oficial `openai` 6.49.0 y Responses API con Structured Outputs. El reporte estructurado y las observaciones se envían en mensajes separados; las observaciones se marcan como entrada no confiable y nunca pueden alterar el reporte ni agregar DTC. Las solicitudes usan `store: false`, cero reintentos, un timeout configurable y no incluyen herramientas externas.
+La integración usa el SDK oficial `openai` 6.49.0 y Responses API con Structured Outputs. El reporte estructurado y las observaciones se envían en mensajes separados; las observaciones se marcan como entrada no confiable y nunca pueden alterar el reporte ni agregar DTC. Las solicitudes usan `store: false`, `maxRetries: 0` en el SDK y no incluyen herramientas externas. El backend permite como máximo dos intentos físicos de la generación final ante transporte demostrado o HTTP 408, 429, 500, 502, 503 y 504, con espera abortable y presupuesto compartido. No repite embeddings, recuperación RAG ni guardado. Una respuesta incompleta, rechazada, sin texto o inválida no se reintenta automáticamente.
+
+Cada intento tiene un timeout propio de hasta 60 s que cubre la lectura del cuerpo y el procesamiento del SDK, dentro del deadline integral de 80 s. El consumidor recibe un error acotado aunque el proveedor ignore abort; la operación física permanece observada y bloquea otra generación equivalente hasta finalizar. La caché aplica su TTL desde la finalización física y no expulsa trabajo activo; si la capacidad está ocupada, responde con un error controlado. Los motivos de validación se registran como códigos enumerados sin contenido del modelo ni datos del reporte. La causa del HTTP 502 histórico sigue siendo desconocida.
 
 Variables necesarias:
 
 - `OPENAI_API_KEY`: clave del proyecto configurada solo en el entorno del backend.
 - `OPENAI_MODEL`: modelo compatible con Responses API y Structured Outputs disponible para el proyecto.
-- `OPENAI_TIMEOUT_MS`: timeout opcional; el valor predeterminado es 20,000 ms.
+- `OPENAI_TIMEOUT_MS`: timeout por intento, incluido el consumo del cuerpo; el valor predeterminado y máximo efectivo es 60,000 ms, y debe ser menor que el presupuesto total.
+- `ANALYSIS_TOTAL_TIMEOUT_MS`: presupuesto total del procesamiento en el backend; el valor predeterminado y máximo es 80,000 ms. Al agotarse, responde `ANALYSIS_TIMEOUT`; un timeout propio del intento anterior a ese deadline conserva `OPENAI_TIMEOUT`.
+
+La migración correctiva `20261016000100_correct_diagnostic_history_uniqueness.sql` sustituye exclusivamente la unicidad antigua por referencia: los registros legacy sin fingerprint siguen siendo únicos por usuario y referencia; las variantes con fingerprint se distinguen por usuario y huella de análisis. Debe revisarse y aplicarse manualmente después de la migración de fingerprints; no modifica filas, RLS ni permisos. Las búsquedas de reutilización usan la huella, nunca una referencia de upload potencialmente compartida.
+
+El presupuesto de guardado del historial cubre conjuntamente inserción, resolución de conflictos y recuperación y validación del ganador. Si se agota, se devuelve el análisis validado con historial `unavailable`, sin declarar `saved` anticipadamente. Si ya no queda margen integral para ese presupuesto completo, no se inicia el guardado y también se conserva el análisis con historial `unavailable`. Las operaciones físicas pendientes permanecen observadas y contabilizadas hasta terminar.
+- `ANALYSIS_IDEMPOTENCY_TTL_MS`: retención en memoria de resultados idempotentes; el valor predeterminado es 600,000 ms.
+- `ANALYSIS_IDEMPOTENCY_MAX_ENTRIES`: máximo de operaciones idempotentes retenidas por proceso; el valor predeterminado es 500.
+
+Las variables numéricas vacías o compuestas solo por espacios aplican sus valores predeterminados. La jerarquía predeterminada es OpenAI 60 s, backend 80 s y navegador 90 s, sin modificar los timeouts específicos de login, salud, carga o historial.
+
+La idempotencia de transporte se aísla por UUID autenticado y `Idempotency-Key`. Además, cargas independientes convergen cuando el backend verifica que pertenecen al mismo usuario y tienen la misma huella canónica de análisis. Esa huella considera el contenido del PDF, extracción sanitizada, DTO y observaciones normalizadas, modelos, versiones de prompt, esquema, corpus y pipeline, así como los parámetros RAG relevantes. Solicitudes simultáneas esperan la misma operación; un resultado persistido se reconstruye sin repetir OpenAI, embeddings, RPC RAG ni historial. Cambiar una entrada o versión genera otra huella y permite un análisis nuevo.
+
+El upload emite un token opaco autenticado por el backend. Se deriva del contenido mediante HMAC con claves separadas por dominio a partir de `VIN_HMAC_SECRET`, se liga al UUID autenticado y nunca se usa como autorización. El navegador solo lo devuelve al endpoint de análisis; no se muestra, registra, exporta ni almacena de forma persistente. El historial conserva exclusivamente las huellas HMAC privadas, nunca el SHA-256 bruto, el PDF o su nombre. La caché en memoria permanece acotada por tiempo y cantidad, y el índice persistente mantiene el aislamiento por `user_id`.
 
 Los errores seguros incluyen:
 
@@ -231,6 +246,10 @@ Los errores seguros incluyen:
 - `OPENAI_LIMIT_EXCEEDED` (`429`).
 - `OPENAI_RESPONSE_INVALID` (`502`).
 - `OPENAI_UNAVAILABLE` (`503`).
+- `ANALYSIS_TIMEOUT` (`504`): se agotó el presupuesto total del servidor.
+- `IDEMPOTENCY_KEY_INVALID` (`400`).
+- `IDEMPOTENCY_CONFLICT` (`409`).
+- `ANALYSIS_CAPACITY_EXCEEDED` (`503`).
 
 Ninguno expone la clave, el prompt interno, trazas o mensajes internos del proveedor.
 
@@ -246,7 +265,7 @@ La carga del PDF nunca solicita orientación automáticamente. Después de una e
 6. La orientación se presenta separada de la extracción y siempre muestra que requiere confirmación del técnico.
 7. Si las observaciones cambian después de obtener un resultado, este permanece visible y solo una acción explícita inicia una nueva confirmación y análisis.
 
-Si se cambia el reporte mientras existe una solicitud pendiente, el navegador la cancela con `AbortController`, limpia la orientación anterior e ignora cualquier respuesta tardía. Los reintentos requieren una acción explícita.
+Si se cambia el reporte mientras existe una solicitud pendiente, el navegador cancela solo su consumo HTTP con `AbortController`, limpia la orientación anterior e ignora cualquier respuesta tardía. La operación pertenece al servidor, conserva su propio presupuesto y puede finalizar aunque ese consumidor se desconecte; un reintento manual con la misma preparación reutiliza la misma clave y recupera o espera el resultado sin iniciar otro análisis. Cambiar el reporte, la preparación o las observaciones genera una clave nueva. El frontend no realiza reintentos automáticos del análisis.
 
 ### Identidad visual y descarga local del informe
 
@@ -264,7 +283,10 @@ Configura las variables solo en la terminal local:
 $env:VIN_HMAC_SECRET="valor-generado-localmente"
 $env:OPENAI_API_KEY="clave-configurada-localmente"
 $env:OPENAI_MODEL="modelo-habilitado-en-tu-proyecto"
-$env:OPENAI_TIMEOUT_MS="20000"
+$env:OPENAI_TIMEOUT_MS="60000"
+$env:ANALYSIS_TOTAL_TIMEOUT_MS="80000"
+$env:ANALYSIS_IDEMPOTENCY_TTL_MS="600000"
+$env:ANALYSIS_IDEMPOTENCY_MAX_ENTRIES="500"
 npm run dev --workspace @autodiag/api
 ```
 
@@ -285,7 +307,10 @@ $body = @{
   observations = "Vibración intermitente al acelerar."
 } | ConvertTo-Json -Depth 6
 
-$headers = @{ Authorization = "Bearer token-de-sesion-local" }
+$headers = @{
+  Authorization = "Bearer token-de-sesion-local"
+  "Idempotency-Key" = [guid]::NewGuid().ToString()
+}
 Invoke-RestMethod -Method Post -Uri "http://localhost:3000/api/reports/analyze" -Headers $headers -ContentType "application/json" -Body $body
 ```
 
@@ -295,7 +320,7 @@ Para probar el flujo manualmente, inicia API y frontend, carga un reporte Autel 
 
 ## Historial seguro de diagnósticos (FASE 3.4A)
 
-La migración pendiente `20260821000100_create_diagnostic_history.sql` define un registro inmutable por diagnóstico. Conserva escalares mínimos para el listado y snapshots JSONB validados de extracción, análisis y evidencia RAG. El backend intenta guardarlo solamente después de un análisis correcto; si Supabase no está configurado, la escritura falla o excede `DIAGNOSTIC_HISTORY_SAVE_TIMEOUT_MS`, la orientación mantiene HTTP 200 y devuelve `history.status = "unavailable"`. El límite predeterminado es 2,000 ms y solo acepta valores entre 100 y 10,000 ms.
+La migración pendiente `20260821000100_create_diagnostic_history.sql` define un registro inmutable por diagnóstico. La migración adicional `20261013000100_add_diagnostic_analysis_fingerprints.sql` agrega huellas privadas anulables y un índice único parcial por `(user_id, analysis_fingerprint)`; mantiene válidos y sin modificar los registros anteriores. Ninguna de estas migraciones se aplica automáticamente. El historial conserva escalares mínimos para el listado y snapshots JSONB validados de extracción, análisis y evidencia RAG. El backend intenta guardarlo solamente después de un análisis correcto; si Supabase no está configurado, la escritura falla o excede `DIAGNOSTIC_HISTORY_SAVE_TIMEOUT_MS`, la orientación mantiene HTTP 200 y devuelve `history.status = "unavailable"`. El límite predeterminado es 2,000 ms y solo acepta valores entre 100 y 10,000 ms.
 
 El historial almacena marca, modelo, año, odómetro opcional, códigos DTC, observaciones sanitizadas, modelos utilizados y el VIN exclusivamente como HMAC existente y, cuando está disponible, sus últimos cuatro caracteres. No almacena el PDF, nombre o ruta del archivo, texto bruto, VIN completo, embeddings, respuestas sin validar, datos del usuario, credenciales ni tokens. El snapshot público conserva únicamente el VIN enmascarado y nunca expone su seudónimo HMAC.
 

@@ -22,6 +22,7 @@ vi.mock("./report-pdf", async (importOriginal) => {
 const downloadReportPdfMock = vi.mocked(downloadReportPdf);
 const TEST_IDENTITY = { id: "6a103df0-8e4d-4c51-89f5-7030c5443d89", username: "usuario.sintetico" };
 const TEST_VIN_PSEUDONYM = `vin_v1_${"a".repeat(64)}`;
+const TEST_CONTENT_TOKEN = `pdf_v1_${"c".repeat(64)}.${"d".repeat(64)}`;
 
 function createTestAuthService(
   overrides: Partial<BrowserAuthenticationService> = {},
@@ -81,6 +82,7 @@ function successfulUpload(file: File) {
     originalName: file.name,
     size: file.size,
     sha256: "a".repeat(64),
+    contentToken: TEST_CONTENT_TOKEN,
     type: "application/pdf",
     status: "received",
     extraction: {
@@ -118,6 +120,7 @@ function extractedUpload(
     reasons: [{ code: "NO_VALID_DTCS", message: "El reporte no está preparado para orientación por IA." }],
     warnings: [],
   },
+  reportId = "5f02d19b-5fd2-4128-aeb6-c5eef33554a0",
 ) {
   const scanSummary = extraction.scanSummary as { parsedDtcs?: number } | undefined;
   const availableInput = analysisPreparation.available
@@ -125,10 +128,11 @@ function extractedUpload(
     : undefined;
   const actionable = availableInput?.modules?.reduce((total, module) => total + (module.dtcs?.length ?? 0), 0) ?? 0;
   return createJsonResponse(true, {
-    id: "5f02d19b-5fd2-4128-aeb6-c5eef33554a0",
+    id: reportId,
     originalName: file.name,
     size: file.size,
     sha256: "b".repeat(64),
+    contentToken: TEST_CONTENT_TOKEN,
     type: "application/pdf",
     status: "received",
     extraction,
@@ -139,7 +143,7 @@ function extractedUpload(
   });
 }
 
-function readyAnalysisUpload(file: File) {
+function readyAnalysisUpload(file: File, reportId?: string) {
   return extractedUpload(
     file,
     {
@@ -187,6 +191,7 @@ function readyAnalysisUpload(file: File) {
       warnings: [],
       counts: { detected: 1, actionable: 1, historical: 0 },
     },
+    reportId,
   );
 }
 
@@ -202,9 +207,10 @@ function successfulAnalysis(observationCorrelation: Record<string, unknown> = {
   status: "not_provided",
   summary: "No se proporcionaron observaciones del vehículo.",
   matches: [],
-}, rag: Record<string, unknown> = DISABLED_RAG) {
+}, rag: Record<string, unknown> = DISABLED_RAG, reused = false) {
   return createJsonResponse(true, {
     status: "completed",
+    reused,
     analysis: {
       technicalSummary: "Orientación sintética sobre una falla de encendido que debe comprobarse.",
       findings: [{
@@ -773,6 +779,8 @@ describe("orientación asistida por IA", () => {
     expect(await screen.findByText("No se encontró una relación clara.")).toBeTruthy();
     const analysisCalls = fetchMock.mock.calls.filter(([url]) => url === "/api/reports/analyze");
     expect(analysisCalls).toHaveLength(1);
+    const analysisHeaders = (analysisCalls[0]?.[1] as RequestInit).headers as Record<string, string>;
+    expect(analysisHeaders["Idempotency-Key"]).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu);
     const requestBody = JSON.parse(String((analysisCalls[0]?.[1] as RequestInit).body)) as Record<string, unknown>;
     expect(requestBody.input).toEqual({
       vehicle: { make: "Marca Sintética", model: "Modelo Académico", year: 2024 },
@@ -882,7 +890,70 @@ describe("orientación asistida por IA", () => {
     expect(screen.getByRole("heading", { name: "Resumen técnico" })).toBeTruthy();
     expect(screen.getByText(/debe verificarse mediante comprobaciones profesionales/)).toBeTruthy();
     expect(fetchMock.mock.calls.filter(([url]) => url === "/api/reports/analyze")).toHaveLength(2);
+    const analysisCalls = fetchMock.mock.calls.filter(([url]) => url === "/api/reports/analyze");
+    const firstKey = ((analysisCalls[0]?.[1] as RequestInit).headers as Record<string, string>)["Idempotency-Key"];
+    const secondKey = ((analysisCalls[1]?.[1] as RequestInit).headers as Record<string, string>)["Idempotency-Key"];
+    expect(secondKey).not.toBe(firstKey);
   });
+
+  it("genera una clave nueva al reemplazar el PDF por otra preparación", async () => {
+    const firstFile = createPdf("primero-idempotencia.pdf");
+    const secondFile = createPdf("segundo-idempotencia.pdf");
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(readyAnalysisUpload(firstFile, "5f02d19b-5fd2-4128-aeb6-c5eef33554a0"))
+      .mockResolvedValueOnce(successfulAnalysis())
+      .mockResolvedValueOnce(readyAnalysisUpload(secondFile, "6f02d19b-5fd2-4128-aeb6-c5eef33554a1"))
+      .mockResolvedValueOnce(successfulAnalysis());
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const { container } = await renderAuthenticatedApp();
+    const { input } = getUploadElements(container);
+
+    await user.upload(input, firstFile);
+    await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+    await user.click(await screen.findByRole("button", { name: "Analizar DTC con IA" }));
+    await user.click(screen.getByRole("button", { name: "Confirmar y analizar" }));
+    await screen.findByRole("button", { name: "Descargar informe PDF" });
+
+    await user.upload(input, secondFile);
+    await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+    await user.click(await screen.findByRole("button", { name: "Analizar DTC con IA" }));
+    await user.click(screen.getByRole("button", { name: "Confirmar y analizar" }));
+    await screen.findByRole("button", { name: "Descargar informe PDF" });
+
+    const analysisCalls = fetchMock.mock.calls.filter(([url]) => url === "/api/reports/analyze");
+    const firstKey = ((analysisCalls[0]?.[1] as RequestInit).headers as Record<string, string>)["Idempotency-Key"];
+    const secondKey = ((analysisCalls[1]?.[1] as RequestInit).headers as Record<string, string>)["Idempotency-Key"];
+    expect(analysisCalls).toHaveLength(2);
+    expect(secondKey).not.toBe(firstKey);
+  });
+
+  it("presenta de forma accesible un resultado recuperado sin exponer el token privado", async () => {
+    const file = createPdf("reporte-recuperado.pdf");
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(readyAnalysisUpload(file))
+      .mockResolvedValueOnce(successfulAnalysis(undefined, DISABLED_RAG, true));
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const { container } = await renderAuthenticatedApp();
+    const { input } = getUploadElements(container);
+
+    await user.upload(input, file);
+    await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+    await user.click(await screen.findByRole("button", { name: "Analizar DTC con IA" }));
+    await user.click(screen.getByRole("button", { name: "Confirmar y analizar" }));
+
+    const message = await screen.findByText(/Se recuperó el resultado existente sin repetir el procesamiento/u);
+    expect(message.getAttribute("role")).toBe("status");
+    expect(container.textContent).not.toContain(TEST_CONTENT_TOKEN);
+    const analysisCall = fetchMock.mock.calls.find(([url]) => url === "/api/reports/analyze");
+    const body = JSON.parse(String((analysisCall?.[1] as RequestInit).body)) as {
+      historyContext: { contentToken: string };
+    };
+    expect(body.historyContext.contentToken).toBe(TEST_CONTENT_TOKEN);
+  });
+
   it("gestiona el foco al abrir y cancelar la confirmación", async () => {
     const file = createPdf("foco-confirmacion.pdf");
     vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValueOnce(readyAnalysisUpload(file)));
@@ -1711,12 +1782,18 @@ describe("descarga local del informe PDF", () => {
 
 describe("resiliencia de comunicación con la API", () => {
   it("un timeout durante análisis conserva sesión, observaciones y datos sin reintento automático", async () => {
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
     const file = createPdf("timeout-analisis.pdf");
     const signOutLocal = vi.fn(async () => undefined);
     const fetchMock = vi
       .fn<typeof fetch>()
       .mockResolvedValueOnce(readyAnalysisUpload(file))
-      .mockResolvedValueOnce(createJsonResponse(false, { error: { code: "REQUEST_TIMEOUT" } }, 408));
+      .mockResolvedValueOnce(createJsonResponse(false, { error: { code: "ANALYSIS_TIMEOUT" } }, 504))
+      .mockResolvedValueOnce(successfulAnalysis({
+        status: "no_clear_match",
+        summary: "Resultado recuperado sin duplicar la operación.",
+        matches: [],
+      }));
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
     const { container } = await renderAuthenticatedApp(createTestAuthService({ signOutLocal }));
@@ -1734,9 +1811,20 @@ describe("resiliencia de comunicación con la API", () => {
     expect(screen.getByText("P0300")).toBeTruthy();
     expect(textarea.value).toBe(observations);
     expect(screen.getAllByRole("button", { name: "Reintentar" }).length).toBeGreaterThan(0);
+    expect(screen.getByText(/Puede continuar procesándose/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Iniciar sesión" })).toBeNull();
     expect(signOutLocal).not.toHaveBeenCalled();
     expect(fetchMock.mock.calls.filter(([url]) => url === "/api/reports/analyze")).toHaveLength(1);
+    expect(setTimeoutSpy.mock.calls.some(([, delay]) => delay === 90_000)).toBe(true);
+
+    await user.click(screen.getAllByRole("button", { name: "Reintentar" })[0]!);
+    await user.click(await screen.findByRole("button", { name: "Confirmar y analizar" }));
+    expect(await screen.findByText("Resultado recuperado sin duplicar la operación.")).toBeTruthy();
+    const analysisCalls = fetchMock.mock.calls.filter(([url]) => url === "/api/reports/analyze");
+    expect(analysisCalls).toHaveLength(2);
+    const firstKey = ((analysisCalls[0]?.[1] as RequestInit).headers as Record<string, string>)["Idempotency-Key"];
+    const retryKey = ((analysisCalls[1]?.[1] as RequestInit).headers as Record<string, string>)["Idempotency-Key"];
+    expect(retryKey).toBe(firstKey);
   });
 
   it.each([

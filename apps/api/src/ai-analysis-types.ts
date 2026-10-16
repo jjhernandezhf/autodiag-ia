@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export const DIAGNOSTIC_OUTPUT_SCHEMA_VERSION = "diagnostic_output_schema_v1";
+
 const MAX_MODULES = 40;
 const MAX_DTCS_PER_MODULE = 20;
 const MAX_TOTAL_DTCS = 100;
@@ -48,7 +50,9 @@ export const diagnosticAnalysisInputSchema = z
         if (typeof value !== "string") return value;
         return value.trim().length === 0 ? undefined : value;
       },
-      z.string().max(MAX_VEHICLE_OBSERVATIONS_LENGTH).transform((value) => value.trim()).optional(),
+      z.string().max(MAX_VEHICLE_OBSERVATIONS_LENGTH)
+        .transform((value) => value.replace(/\r\n?/gu, "\n").trim())
+        .optional(),
     ),
   })
   .strict()

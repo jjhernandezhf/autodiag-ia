@@ -146,18 +146,28 @@ describe("modelo seguro del informe PDF", () => {
       vin: "dato-que-no-debe-copiarse",
       originalName: "archivo-privado.pdf",
       sha256: "hash-privado",
+      contentToken: `pdf_v1_${"a".repeat(64)}.${"b".repeat(64)}`,
+      analysisFingerprint: `analysis_v1_${"c".repeat(64)}`,
       rawResponse: "respuesta-interna",
     });
 
     const model = buildReportExportModel(sourceWithPrivateFields);
 
-    expect(source).toEqual({ ...before, vin: "dato-que-no-debe-copiarse", originalName: "archivo-privado.pdf", sha256: "hash-privado", rawResponse: "respuesta-interna" });
+    expect(source).toEqual({
+      ...before,
+      vin: "dato-que-no-debe-copiarse",
+      originalName: "archivo-privado.pdf",
+      sha256: "hash-privado",
+      contentToken: `pdf_v1_${"a".repeat(64)}.${"b".repeat(64)}`,
+      analysisFingerprint: `analysis_v1_${"c".repeat(64)}`,
+      rawResponse: "respuesta-interna",
+    });
     expect(Object.keys(model)).toEqual(["vehicle", "summary", "actionableDtcs", "historicalDtcs", "analysis", "observations", "rag"]);
     expect(model.actionableDtcs.map((dtc) => [dtc.moduleCode, dtc.code])).toEqual([["PCM", "P0300"]]);
     expect(model.actionableDtcs[0]?.alsoHistorical).toBe(true);
     expect(model.historicalDtcs.map((dtc) => [dtc.moduleCode, dtc.code])).toEqual([["SRS", "B1000"]]);
     expect(model.observations.used).toBe("Vibración al acelerar.");
-    expect(JSON.stringify(model)).not.toMatch(/dato-que-no|archivo-privado|hash-privado|respuesta-interna/iu);
+    expect(JSON.stringify(model)).not.toMatch(/dato-que-no|archivo-privado|hash-privado|respuesta-interna|pdf_v1_|analysis_v1_/iu);
   });
 
   it.each(["not_provided", "no_clear_match", "matches_found"] as const)(

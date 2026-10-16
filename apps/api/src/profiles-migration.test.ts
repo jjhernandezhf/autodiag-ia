@@ -62,6 +62,8 @@ describe("migración local de perfiles autorizados", () => {
       "20260821000100_create_diagnostic_history.sql",
       "20260917000100_create_profiles.sql",
       "20260922000100_create_rag_knowledge.sql",
+      "20261013000100_add_diagnostic_analysis_fingerprints.sql",
+      "20261016000100_correct_diagnostic_history_uniqueness.sql",
     ]);
     expect(sql.startsWith("begin;")).toBe(true);
     expect(sql.trim().endsWith("commit;")).toBe(true);

@@ -60,13 +60,14 @@ describe("cliente de embeddings", () => {
     const client = new OpenAiEmbeddingClient("synthetic-key", "text-embedding-3-small", 2_000, {
       embeddings: { create },
     } as never);
-    await expect(client.createEmbeddings(["consulta sintética"])).resolves.toEqual([vector]);
+    const controller = new AbortController();
+    await expect(client.createEmbeddings(["consulta sintética"], controller.signal)).resolves.toEqual([vector]);
     expect(create).toHaveBeenCalledWith({
       model: "text-embedding-3-small",
       input: ["consulta sintética"],
       encoding_format: "float",
       dimensions: 1_536,
-    }, { timeout: 2_000 });
+    }, { timeout: 2_000, signal: controller.signal });
   });
 
   it("rechaza una dimensión incompatible", async () => {
@@ -88,6 +89,18 @@ describe("recuperación pgvector", () => {
       match_threshold: 0.72,
       match_count: 4,
     });
+  });
+
+  it("propaga AbortSignal al RPC cuando el cliente lo admite", async () => {
+    const controller = new AbortController();
+    const response = Promise.resolve({ data: [], error: null });
+    const abortSignal = vi.fn(() => response);
+    const rpc = vi.fn(() => ({ then: response.then.bind(response), abortSignal }));
+    const client = new SupabaseKnowledgeMatchClient({ rpc });
+
+    await client.matchKnowledge({ embedding: vector, threshold: 0.7, count: 3 }, controller.signal);
+
+    expect(abortSignal).toHaveBeenCalledWith(controller.signal);
   });
 
   it("ordena, deduplica, aplica umbral, cantidad y presupuesto de contexto", async () => {

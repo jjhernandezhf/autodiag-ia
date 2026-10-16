@@ -125,6 +125,7 @@ export interface UploadResponseBody {
   originalName: string;
   size: number;
   sha256: string;
+  contentToken: string;
   type: "application/pdf";
   status: "received";
   extraction: AutelExtraction;

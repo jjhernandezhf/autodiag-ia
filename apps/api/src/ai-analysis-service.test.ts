@@ -196,6 +196,216 @@ describe("DiagnosticAnalysisService", () => {
     await expect(service.analyze(validInput)).rejects.toEqual(new AiAnalysisError("OPENAI_UNAVAILABLE"));
   });
 
+  it("reintenta una sola vez un HTTP 502 del proveedor y reutiliza la misma solicitud", async () => {
+    let now = 1_000;
+    const wait = vi.fn(async (delayMs: number) => { now += delayMs; });
+    const log = vi.fn();
+    const generate = vi.fn()
+      .mockRejectedValueOnce(new AiAnalysisError("OPENAI_UNAVAILABLE", {
+        retryable: true,
+        providerStatus: 502,
+        category: "provider_server",
+      }))
+      .mockResolvedValueOnce(JSON.stringify(validOutput));
+    const service = new DiagnosticAnalysisService(
+      { generate },
+      "modelo-sintetico",
+      60_000,
+      { now: () => now, wait, log },
+    );
+    const evidence = [{
+      id: "11111111-1111-4111-8111-111111111111",
+      title: "Fuente sintética",
+      label: "Corpus sintético",
+      similarity: 0.9,
+      excerpt: "Comprobar alimentación.",
+      content: "Comprobar alimentación y tierra bajo carga.",
+    }];
+
+    await expect(service.analyze(validInput, evidence, undefined, 81_000)).resolves.toEqual(validOutput);
+
+    expect(generate).toHaveBeenCalledTimes(2);
+    expect(generate.mock.calls[1]?.[0].report).toEqual(generate.mock.calls[0]?.[0].report);
+    expect(generate.mock.calls[1]?.[0].instructions).toBe(generate.mock.calls[0]?.[0].instructions);
+    expect(generate.mock.calls[1]?.[0].knowledgeContext).toBe(generate.mock.calls[0]?.[0].knowledgeContext);
+    expect(wait).toHaveBeenCalledWith(750, undefined);
+    expect(log).toHaveBeenCalledWith("AI_ANALYSIS_RETRY_SCHEDULED", expect.objectContaining({
+      attempt: 1,
+      maxAttempts: 2,
+      category: "provider_server",
+      status: 502,
+    }));
+  });
+
+  it("reintenta un error de red tipado y luego completa", async () => {
+    const create = vi.fn()
+      .mockRejectedValueOnce(new OpenAI.APIConnectionError({ message: "detalle sintético" }))
+      .mockResolvedValueOnce({ status: "completed", output: [], output_text: JSON.stringify(validOutput) });
+    const client = new OpenAiResponsesClient("synthetic-key", { responses: { create } } as never);
+    const service = new DiagnosticAnalysisService(client, "modelo-sintetico", 60_000, {
+      wait: async () => undefined,
+      log: vi.fn(),
+    });
+
+    await expect(service.analyze(validInput, [], undefined, Date.now() + 80_000)).resolves.toEqual(validOutput);
+    expect(create).toHaveBeenCalledTimes(2);
+  });
+
+  it("respeta Retry-After válido en HTTP 429 antes del segundo intento", async () => {
+    let now = 10_000;
+    const wait = vi.fn(async (delayMs: number) => { now += delayMs; });
+    const create = vi.fn()
+      .mockRejectedValueOnce(new OpenAI.RateLimitError(
+        429,
+        { code: "rate_limit_exceeded" },
+        "detalle sintético",
+        new Headers({ "retry-after": "2" }),
+      ))
+      .mockResolvedValueOnce({ status: "completed", output: [], output_text: JSON.stringify(validOutput) });
+    const client = new OpenAiResponsesClient(
+      "synthetic-key",
+      { responses: { create } } as never,
+      () => now,
+    );
+    const service = new DiagnosticAnalysisService(client, "modelo-sintetico", 60_000, {
+      now: () => now,
+      wait,
+      log: vi.fn(),
+    });
+
+    await expect(service.analyze(validInput, [], undefined, 90_000)).resolves.toEqual(validOutput);
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(wait).toHaveBeenCalledWith(2_000, undefined);
+  });
+
+  it("agota exactamente dos fallos temporales sin validar una respuesta inexistente", async () => {
+    const failure = new AiAnalysisError("OPENAI_UNAVAILABLE", {
+      retryable: true,
+      providerStatus: 503,
+      category: "provider_server",
+    });
+    const generate = vi.fn().mockRejectedValue(failure);
+    const log = vi.fn();
+    const service = new DiagnosticAnalysisService({ generate }, "modelo-sintetico", 60_000, {
+      wait: async () => undefined,
+      log,
+    });
+
+    await expect(service.analyze(validInput, [], undefined, Date.now() + 80_000)).rejects.toBe(failure);
+    expect(generate).toHaveBeenCalledTimes(2);
+    expect(log).toHaveBeenLastCalledWith("AI_ANALYSIS_RETRY_EXHAUSTED", expect.objectContaining({
+      attempt: 2,
+      maxAttempts: 2,
+      status: 503,
+    }));
+  });
+
+  it.each([400, 401, 403, 404, 409, 422])("no reintenta un HTTP %s permanente del proveedor", async (status) => {
+    const create = vi.fn().mockRejectedValue(OpenAI.APIError.generate(
+      status,
+      { code: "synthetic_permanent_error" },
+      "detalle sintético",
+      new Headers(),
+    ));
+    const client = new OpenAiResponsesClient("synthetic-key", { responses: { create } } as never);
+    const wait = vi.fn(async () => undefined);
+    const service = new DiagnosticAnalysisService(client, "modelo-sintetico", 60_000, { wait, log: vi.fn() });
+
+    await expect(service.analyze(validInput, [], undefined, Date.now() + 80_000)).rejects.toMatchObject({
+      code: "OPENAI_UNAVAILABLE",
+      retryable: false,
+      providerStatus: status,
+    });
+    expect(create).toHaveBeenCalledOnce();
+    expect(wait).not.toHaveBeenCalled();
+  });
+
+  it("no inicia el segundo intento cuando el presupuesto restante es insuficiente", async () => {
+    let now = 0;
+    const failure = new AiAnalysisError("OPENAI_UNAVAILABLE", {
+      retryable: true,
+      providerStatus: 504,
+      category: "provider_server",
+    });
+    const generate = vi.fn(async () => {
+      now = 79_000;
+      throw failure;
+    });
+    const wait = vi.fn(async () => undefined);
+    const service = new DiagnosticAnalysisService({ generate }, "modelo-sintetico", 60_000, {
+      now: () => now,
+      wait,
+      log: vi.fn(),
+    });
+
+    await expect(service.analyze(validInput, [], undefined, 80_000)).rejects.toBe(failure);
+    expect(generate).toHaveBeenCalledOnce();
+    expect(wait).not.toHaveBeenCalled();
+  });
+
+  it("la cancelación durante la espera impide el segundo intento", async () => {
+    const controller = new AbortController();
+    const failure = new AiAnalysisError("OPENAI_UNAVAILABLE", {
+      retryable: true,
+      providerStatus: 502,
+      category: "provider_server",
+    });
+    const generate = vi.fn().mockRejectedValue(failure);
+    const waitStarted = vi.fn();
+    const wait = vi.fn((_delayMs: number, signal?: AbortSignal) => new Promise<void>((_resolve, reject) => {
+      waitStarted();
+      signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+    }));
+    const service = new DiagnosticAnalysisService({ generate }, "modelo-sintetico", 60_000, {
+      wait,
+      log: vi.fn(),
+    });
+
+    const result = service.analyze(validInput, [], controller.signal, Date.now() + 80_000);
+    await vi.waitFor(() => expect(waitStarted).toHaveBeenCalledOnce());
+    controller.abort(new DOMException("cancelado", "AbortError"));
+
+    await expect(result).rejects.toMatchObject({ name: "AbortError" });
+    expect(generate).toHaveBeenCalledOnce();
+  });
+
+  it("no inicia el segundo intento si la espera consume el presupuesto restante", async () => {
+    let now = 0;
+    const failure = new AiAnalysisError("OPENAI_UNAVAILABLE", {
+      retryable: true,
+      providerStatus: 502,
+      category: "provider_server",
+    });
+    const generate = vi.fn().mockRejectedValue(failure);
+    const service = new DiagnosticAnalysisService({ generate }, "modelo-sintetico", 60_000, {
+      now: () => now,
+      wait: async () => { now = 80_000; },
+      log: vi.fn(),
+    });
+
+    await expect(service.analyze(validInput, [], undefined, 80_000)).rejects.toMatchObject({ code: "ANALYSIS_TIMEOUT" });
+    expect(generate).toHaveBeenCalledOnce();
+  });
+
+  it("no adelanta un Retry-After superior al máximo prudente", async () => {
+    const failure = new AiAnalysisError("OPENAI_LIMIT_EXCEEDED", {
+      retryable: true,
+      providerStatus: 429,
+      retryAfterMs: 20_000,
+      category: "rate_limit",
+    });
+    const generate = vi.fn().mockRejectedValue(failure);
+    const wait = vi.fn(async () => undefined);
+    const service = new DiagnosticAnalysisService({ generate }, "modelo-sintetico", 60_000, {
+      wait,
+      log: vi.fn(),
+    });
+
+    await expect(service.analyze(validInput, [], undefined, Date.now() + 80_000)).rejects.toBe(failure);
+    expect(generate).toHaveBeenCalledOnce();
+    expect(wait).not.toHaveBeenCalled();
+  });
+
   it("acepta correlaciones prudentes con uno o varios DTC accionables", async () => {
     const secondInput = {
       ...validInput,
@@ -375,9 +585,10 @@ describe("contrato de relatedDtc", () => {
 });
 
 describe("OpenAiResponsesClient", () => {
-  it("usa Responses API con salida JSON estricta, sin almacenamiento y con timeout", async () => {
-    const create = vi.fn(async () => ({ output_text: JSON.stringify(validOutput) }));
+  it("usa Responses API con salida JSON estricta, sin almacenamiento, timeout y AbortSignal", async () => {
+    const create = vi.fn(async () => ({ status: "completed", output: [], output_text: JSON.stringify(validOutput) }));
     const client = new OpenAiResponsesClient("synthetic-key", { responses: { create } } as never);
+    const controller = new AbortController();
 
     const output = await client.generate({
       model: "modelo-sintetico",
@@ -385,6 +596,7 @@ describe("OpenAiResponsesClient", () => {
       report: validInput,
       observations: "Vibración sintética.",
       timeoutMs: 3_000,
+      signal: controller.signal,
     });
 
     expect(output).toBe(JSON.stringify(validOutput));
@@ -398,12 +610,12 @@ describe("OpenAiResponsesClient", () => {
         ],
         text: { format: expect.objectContaining({ type: "json_schema", strict: true }) },
       }),
-      { timeout: 3_000 },
+      { timeout: 3_000, signal: controller.signal },
     );
   });
 
   it("omite por completo el mensaje de observaciones cuando no existen", async () => {
-    const create = vi.fn(async () => ({ output_text: JSON.stringify(validOutput) }));
+    const create = vi.fn(async () => ({ status: "completed", output: [], output_text: JSON.stringify(validOutput) }));
     const client = new OpenAiResponsesClient("synthetic-key", { responses: { create } } as never);
 
     await client.generate({
@@ -450,6 +662,54 @@ describe("OpenAiResponsesClient", () => {
 
     expect(caught).toMatchObject({ code: expectedCode });
     expect(caught).not.toHaveProperty("message", "detalle sensible");
+  });
+
+  it.each([408, 500, 502, 503, 504])("clasifica HTTP %s del proveedor como temporal", async (status) => {
+    const sdkError = OpenAI.APIError.generate(
+      status,
+      { code: "synthetic_provider_error" },
+      "detalle sensible",
+      new Headers(),
+    );
+    const client = new OpenAiResponsesClient("synthetic-key", {
+      responses: { create: async () => Promise.reject(sdkError) },
+    } as never);
+
+    await expect(client.generate({
+      model: "modelo",
+      instructions: "instrucciones",
+      report: validInput,
+      timeoutMs: 1_000,
+    })).rejects.toMatchObject({
+      code: "OPENAI_UNAVAILABLE",
+      retryable: true,
+      providerStatus: status,
+      category: "provider_server",
+    });
+  });
+
+  it("clasifica insufficient_quota como permanente aunque use HTTP 429", async () => {
+    const sdkError = new OpenAI.RateLimitError(
+      429,
+      { code: "insufficient_quota" },
+      "detalle sensible",
+      new Headers({ "retry-after": "1" }),
+    );
+    const client = new OpenAiResponsesClient("synthetic-key", {
+      responses: { create: async () => Promise.reject(sdkError) },
+    } as never);
+
+    await expect(client.generate({
+      model: "modelo",
+      instructions: "instrucciones",
+      report: validInput,
+      timeoutMs: 1_000,
+    })).rejects.toMatchObject({
+      code: "OPENAI_LIMIT_EXCEEDED",
+      retryable: false,
+      providerStatus: 429,
+      category: "quota",
+    });
   });
 });
 
