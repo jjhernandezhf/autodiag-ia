@@ -171,6 +171,8 @@ Los mensajes no incluyen texto del reporte, VIN, datos del cliente, rutas locale
 
 ## Orientación diagnóstica con OpenAI
 
+La [base de evaluación de calidad (FASE 3.7A)](docs/evaluacion-calidad/README.md) separa extracción, recuperación RAG, análisis y fiabilidad/latencia. Incluye un evaluador desconectado de resultados previamente obtenidos y casos sintéticos para probarlo; sus pruebas no demuestran precisión diagnóstica. Etiquetas o mediciones ausentes se informan como no evaluables, sin umbrales de aceptación inventados.
+
 La evaluación exploratoria de las FASES 3.5A y 3.5B queda cerrada: se mantiene el modelo anterior para el uso actual y se pospone `gpt-6.1-sol`, según el comportamiento manual reportado por el usuario. Los tiempos, su procedencia y limitaciones están documentados en [Evaluación controlada del modelo](docs/evaluacion-gpt-6-1-sol.md#cierre-de-las-fases-35a-y-35b). Las repeticiones rápidas son consistentes con reutilización, no con velocidad de generación; las pocas muestras no demuestran superioridad general.
 
 La selección operativa de `OPENAI_MODEL` pertenece al `.env` privado del backend, no a un cambio de valor predeterminado en el código. Este cierre no lee ni modifica ese archivo ni realiza llamadas reales.
