@@ -18,6 +18,29 @@ import {
 } from "./config.js";
 
 describe("configuración sensible", () => {
+  it.each([undefined, "", "   "])("conserva esfuerzo omitido para %s", (effort) => {
+    const env = loadEnv({ VIN_HMAC_SECRET: "synthetic-config-secret-with-32-bytes", OPENAI_MODEL: "modelo-previo",
+      ...(effort === undefined ? {} : { OPENAI_REASONING_EFFORT: effort }) });
+    expect(env.OPENAI_REASONING_EFFORT).toBeUndefined();
+  });
+
+  it.each(["gpt-6.1-sol", "gpt-5.6-luna"])("acepta low explícito en %s", (model) => {
+    const env = loadEnv({ VIN_HMAC_SECRET: "synthetic-config-secret-with-32-bytes", OPENAI_MODEL: ` ${model} `,
+      OPENAI_REASONING_EFFORT: " low " });
+    expect(env.OPENAI_REASONING_EFFORT).toBe("low");
+    expect(env.OPENAI_MODEL).toBe(model);
+  });
+
+  it.each(["none", "minimal", "medium", "high", "max", "LOW", "invalid"])("rechaza esfuerzo fuera del alcance %s", (effort) => {
+    expect(() => loadEnv({ VIN_HMAC_SECRET: "synthetic-config-secret-with-32-bytes", OPENAI_MODEL: "gpt-6.1-sol",
+      OPENAI_REASONING_EFFORT: effort })).toThrow();
+  });
+
+  it.each([undefined, "", "gpt-4.1", "modelo-no-verificado"])("rechaza low sin compatibilidad verificada: %s", (model) => {
+    expect(() => loadEnv({ VIN_HMAC_SECRET: "synthetic-config-secret-with-32-bytes", OPENAI_MODEL: model,
+      OPENAI_REASONING_EFFORT: "low" })).toThrow();
+  });
+
   it.each([80_001, 89_000, 1.5, 0, -1, Number.NaN, Number.POSITIVE_INFINITY])("rechaza presupuesto integral inválido %s en ambos esquemas", (value) => {
     expect(() => resolveAnalysisTotalTimeout(value)).toThrow();
     expect(() => loadEnv({ VIN_HMAC_SECRET: "synthetic-config-secret-with-32-bytes", ANALYSIS_TOTAL_TIMEOUT_MS: String(value) })).toThrow();

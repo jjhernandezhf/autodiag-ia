@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { optionalReasoningEffortSchema, resolveOpenAiReasoningEffort } from "./analysis-generation.js";
 
 export const DEFAULT_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
 export const DEFAULT_OPENAI_TIMEOUT_MS = 60_000;
@@ -105,6 +106,7 @@ const envSchema = z.object({
     z.string().trim().min(1).max(100).optional(),
   ),
   OPENAI_TIMEOUT_MS: optionalIntegerFromEnvironment(1_000, 120_000, DEFAULT_OPENAI_TIMEOUT_MS),
+  OPENAI_REASONING_EFFORT: optionalReasoningEffortSchema,
   ANALYSIS_TOTAL_TIMEOUT_MS: optionalIntegerFromEnvironment(1_000, 80_000, DEFAULT_ANALYSIS_TOTAL_TIMEOUT_MS),
   ANALYSIS_IDEMPOTENCY_TTL_MS: optionalIntegerFromEnvironment(
     60_000,
@@ -133,6 +135,12 @@ const envSchema = z.object({
     message: "VIN_HMAC_SECRET debe contener al menos 32 bytes.",
   }),
 }).superRefine((value, context) => {
+  try {
+    resolveOpenAiReasoningEffort(value.OPENAI_MODEL, value.OPENAI_REASONING_EFFORT);
+  } catch {
+    context.addIssue({ code: "custom", path: ["OPENAI_REASONING_EFFORT"],
+      message: "low requiere un modelo documentado para esta evaluación: gpt-6.1-sol o gpt-5.6-luna." });
+  }
   if (value.OPENAI_TIMEOUT_MS >= value.ANALYSIS_TOTAL_TIMEOUT_MS) {
     context.addIssue({
       code: "custom",

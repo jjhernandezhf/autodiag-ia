@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { resolveOpenAiReasoningEffort, type AnalysisReasoningEffort } from "./analysis-generation.js";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { rateLimit } from "express-rate-limit";
 import multer from "multer";
@@ -127,6 +128,7 @@ export interface AppOptions {
   extractPdfPages?: PdfPageExtractor;
   openAiApiKey?: string;
   openAiModel?: string;
+  openAiReasoningEffort?: AnalysisReasoningEffort;
   openAiTimeoutMs?: number;
   analysisTotalTimeoutMs?: number;
   analysisIdempotencyTtlMs?: number;
@@ -169,6 +171,7 @@ export function createApp(options: AppOptions) {
   const pageExtractor = options.extractPdfPages ?? ((buffer: Buffer) => extractPdfPages(buffer, pdfExtractionLimits));
   const openAiApiKey = options.openAiApiKey?.trim();
   const openAiModel = options.openAiModel?.trim();
+  const openAiReasoningEffort = resolveOpenAiReasoningEffort(openAiModel, options.openAiReasoningEffort);
   const authenticationService = options.authenticationService ?? createAuthenticationService();
   const diagnosticHistorySaveTimeoutMs = resolveDiagnosticHistorySaveTimeout(
     options.diagnosticHistorySaveTimeoutMs,
@@ -337,6 +340,7 @@ export function createApp(options: AppOptions) {
         new OpenAiResponsesClient(openAiApiKey),
         openAiModel,
         options.openAiTimeoutMs ?? DEFAULT_OPENAI_TIMEOUT_MS,
+        { reasoningEffort: openAiReasoningEffort },
       );
     }
 
@@ -357,6 +361,7 @@ export function createApp(options: AppOptions) {
             },
           },
           analysisModel: openAiModel,
+          ...(openAiReasoningEffort === undefined ? {} : { reasoningEffort: openAiReasoningEffort }),
           promptVersion: DIAGNOSTIC_PROMPT_VERSION,
           outputSchemaVersion: DIAGNOSTIC_OUTPUT_SCHEMA_VERSION,
           embeddingModel: options.openAiEmbeddingModel?.trim() || DEFAULT_OPENAI_EMBEDDING_MODEL,
@@ -368,7 +373,8 @@ export function createApp(options: AppOptions) {
             maxContextCharacters: options.ragMaxContextCharacters ?? DEFAULT_RAG_MAX_CONTEXT_CHARACTERS,
           },
         }, options.vinHmacSecret)
-      : fingerprintAnalysisRequest({ input, historyContext: parsedRequest.historyContext ?? null });
+      : fingerprintAnalysisRequest({ input, historyContext: parsedRequest.historyContext ?? null,
+          ...(openAiReasoningEffort === undefined ? {} : { reasoningEffort: openAiReasoningEffort }) });
     const result = await analysisCoordinator.execute(userId, idempotencyKey, analysisFingerprint, () =>
       runWithAnalysisBudget(async (signal, deadlineAtMs, observePhysical) => {
         if (options.historyService && contentFingerprint !== null && analysisFingerprint.startsWith("analysis_v1_")) {

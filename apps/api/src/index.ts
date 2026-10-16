@@ -17,6 +17,7 @@ const app = createApp({
   },
   openAiApiKey: env.OPENAI_API_KEY,
   openAiModel: env.OPENAI_MODEL,
+  openAiReasoningEffort: env.OPENAI_REASONING_EFFORT,
   openAiTimeoutMs: env.OPENAI_TIMEOUT_MS,
   analysisTotalTimeoutMs: env.ANALYSIS_TOTAL_TIMEOUT_MS,
   analysisIdempotencyTtlMs: env.ANALYSIS_IDEMPOTENCY_TTL_MS,
