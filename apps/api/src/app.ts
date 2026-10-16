@@ -6,14 +6,36 @@ import multer from "multer";
 import {
   AiAnalysisError,
   DiagnosticAnalysisService,
+  DIAGNOSTIC_PROMPT_VERSION,
   OpenAiResponsesClient,
   validateDiagnosticAnalysisInput,
 } from "./ai-analysis-service.js";
+import { DIAGNOSTIC_OUTPUT_SCHEMA_VERSION, type DiagnosticAnalysisOutput } from "./ai-analysis-types.js";
 import { prepareAiAnalysis } from "./ai-analysis-adapter.js";
+import {
+  AnalysisCoordinationError,
+  AnalysisIdempotencyCoordinator,
+  fingerprintAnalysisRequest,
+  parseAnalysisIdempotencyKey,
+  runWithAnalysisBudget,
+} from "./analysis-coordinator.js";
+import {
+  AnalysisFingerprintError,
+  createAnalysisFingerprint,
+  createPdfContentToken,
+  verifyPdfContentToken,
+} from "./analysis-fingerprint.js";
 import { AutelFormatError, extractAutelReport, type PdfPageExtractor } from "./autel-extraction.js";
 import {
   DEFAULT_MAX_FILE_SIZE_BYTES,
+  DEFAULT_ANALYSIS_IDEMPOTENCY_MAX_ENTRIES,
+  DEFAULT_ANALYSIS_IDEMPOTENCY_TTL_MS,
   DEFAULT_OPENAI_TIMEOUT_MS,
+  DEFAULT_OPENAI_EMBEDDING_MODEL,
+  DEFAULT_RAG_MATCH_COUNT,
+  DEFAULT_RAG_MATCH_THRESHOLD,
+  DEFAULT_RAG_MAX_CONTEXT_CHARACTERS,
+  resolveAnalysisTotalTimeout,
   resolveDiagnosticHistorySaveTimeout,
   resolvePdfExtractionLimits,
   type PdfExtractionLimits,
@@ -36,6 +58,8 @@ import {
   unavailableRagResult,
   type RagRetrievalService,
 } from "./rag-service.js";
+import type { RagMetadata } from "./rag-types.js";
+import { KNOWLEDGE_CORPUS_VERSION } from "./knowledge-corpus.js";
 
 const PDF_MIME_TYPE = "application/pdf";
 const PDF_SIGNATURE = Buffer.from("%PDF-");
@@ -63,6 +87,11 @@ type ErrorCode =
   | "OPENAI_LIMIT_EXCEEDED"
   | "OPENAI_RESPONSE_INVALID"
   | "OPENAI_UNAVAILABLE"
+  | "ANALYSIS_TIMEOUT"
+  | "IDEMPOTENCY_KEY_INVALID"
+  | "IDEMPOTENCY_CONFLICT"
+  | "ANALYSIS_CAPACITY_EXCEEDED"
+  | "CONTENT_TOKEN_INVALID"
   | "AUTH_REQUEST_INVALID"
   | "AUTH_CREDENTIALS_INVALID"
   | "AUTH_SESSION_INVALID"
@@ -83,6 +112,14 @@ interface ApiErrorBody {
   };
 }
 
+interface AnalysisResponsePayload {
+  status: "completed";
+  reused: boolean;
+  analysis: DiagnosticAnalysisOutput;
+  rag: RagMetadata;
+  history: { status: "saved"; id: string } | { status: "unavailable" };
+}
+
 export interface AppOptions {
   maxFileSizeBytes?: number;
   pdfExtractionLimits?: Partial<PdfExtractionLimits>;
@@ -91,9 +128,15 @@ export interface AppOptions {
   openAiApiKey?: string;
   openAiModel?: string;
   openAiTimeoutMs?: number;
+  analysisTotalTimeoutMs?: number;
+  analysisIdempotencyTtlMs?: number;
+  analysisIdempotencyMaxEntries?: number;
   openAiEmbeddingModel?: string;
   analysisService?: DiagnosticAnalysisService;
   ragEnabled?: boolean;
+  ragMatchCount?: number;
+  ragMatchThreshold?: number;
+  ragMaxContextCharacters?: number;
   ragService?: Pick<RagRetrievalService, "retrieve">;
   authenticationService?: AuthenticationService;
   historyService?: DiagnosticHistoryService;
@@ -111,8 +154,13 @@ class UploadValidationError extends Error {
 }
 
 function sendError(response: Response, status: number, code: ErrorCode, message: string) {
+  if (response.headersSent || response.writableEnded || response.destroyed) return;
   const body: ApiErrorBody = { error: { code, message } };
   response.status(status).json(body);
+}
+
+function responseIsAvailable(response: Response) {
+  return !response.headersSent && !response.writableEnded && !response.destroyed;
 }
 
 export function createApp(options: AppOptions) {
@@ -125,6 +173,11 @@ export function createApp(options: AppOptions) {
   const diagnosticHistorySaveTimeoutMs = resolveDiagnosticHistorySaveTimeout(
     options.diagnosticHistorySaveTimeoutMs,
   );
+  const analysisTotalTimeoutMs = resolveAnalysisTotalTimeout(options.analysisTotalTimeoutMs);
+  const analysisCoordinator = new AnalysisIdempotencyCoordinator<AnalysisResponsePayload>({
+    ttlMs: options.analysisIdempotencyTtlMs ?? DEFAULT_ANALYSIS_IDEMPOTENCY_TTL_MS,
+    maxEntries: options.analysisIdempotencyMaxEntries ?? DEFAULT_ANALYSIS_IDEMPOTENCY_MAX_ENTRIES,
+  });
   let analysisService = options.analysisService;
   if (Buffer.byteLength(options.vinHmacSecret, "utf8") < 32) {
     throw new Error("VIN_HMAC_SECRET debe contener al menos 32 bytes.");
@@ -258,6 +311,7 @@ export function createApp(options: AppOptions) {
       originalName: file.originalname,
       size: file.size,
       sha256: createHash("sha256").update(file.buffer).digest("hex"),
+      contentToken: createPdfContentToken(file.buffer, options.vinHmacSecret, request.usuario!.id),
       type: PDF_MIME_TYPE,
       status: "received",
       extraction,
@@ -268,6 +322,7 @@ export function createApp(options: AppOptions) {
   app.post("/api/reports/analyze", requireAuthentication, async (request, response) => {
     const parsedRequest = parseAnalysisRequest(request.body);
     const input = validateDiagnosticAnalysisInput(parsedRequest.input);
+    const idempotencyKey = parseAnalysisIdempotencyKey(request.get("Idempotency-Key"));
 
     if (!analysisService) {
       if (!openAiApiKey) {
@@ -285,49 +340,136 @@ export function createApp(options: AppOptions) {
       );
     }
 
-    let ragResult = options.ragEnabled ? NOT_CONFIGURED_RAG_RESULT : DISABLED_RAG_RESULT;
-    if (options.ragEnabled && options.ragService) {
-      try {
-        ragResult = await options.ragService.retrieve(input);
-      } catch {
-        ragResult = unavailableRagResult();
-      }
-    }
-
-    const analysis = await analysisService.analyze(input, ragResult.evidence);
-    let history: { status: "saved"; id: string } | { status: "unavailable" } = { status: "unavailable" };
-    if (
-      options.historyService &&
-      parsedRequest.historyContext &&
-      request.usuario &&
-      openAiModel
-    ) {
-      try {
-        const abortController = new AbortController();
-        let timeout: ReturnType<typeof setTimeout> | undefined;
-        const timeoutPromise = new Promise<never>((_resolve, reject) => {
-          timeout = setTimeout(() => {
-            abortController.abort();
-            reject(new DiagnosticHistoryError("HISTORY_UNAVAILABLE"));
-          }, diagnosticHistorySaveTimeoutMs);
-        });
-        const savePromise = options.historyService.save(request.usuario.id, {
-          context: parsedRequest.historyContext,
+    const userId = request.usuario!.id;
+    const contentFingerprint = parsedRequest.historyContext?.contentToken === undefined
+      ? null
+      : verifyPdfContentToken(parsedRequest.historyContext.contentToken, options.vinHmacSecret, userId);
+    const analysisFingerprint = contentFingerprint !== null && openAiModel
+      ? createAnalysisFingerprint({
+          contentFingerprint,
           input,
-          analysis,
-          rag: ragResult.metadata,
+          extraction: {
+            ...parsedRequest.historyContext!.extraction,
+            vehicle: {
+              ...parsedRequest.historyContext!.extraction.vehicle,
+              vinMasked: undefined,
+              vinPseudonym: undefined,
+            },
+          },
           analysisModel: openAiModel,
-          embeddingModel: options.openAiEmbeddingModel?.trim() || null,
-        }, abortController.signal);
-        const id = await Promise.race([savePromise, timeoutPromise]).finally(() => {
-          if (timeout !== undefined) clearTimeout(timeout);
-        });
-        history = { status: "saved", id };
-      } catch {
-        console.warn("DIAGNOSTIC_HISTORY_SAVE_FAILED");
-      }
-    }
-    response.json({ status: "completed", analysis, rag: ragResult.metadata, history });
+          promptVersion: DIAGNOSTIC_PROMPT_VERSION,
+          outputSchemaVersion: DIAGNOSTIC_OUTPUT_SCHEMA_VERSION,
+          embeddingModel: options.openAiEmbeddingModel?.trim() || DEFAULT_OPENAI_EMBEDDING_MODEL,
+          corpusVersion: KNOWLEDGE_CORPUS_VERSION,
+          rag: {
+            enabled: options.ragEnabled ?? false,
+            matchCount: options.ragMatchCount ?? DEFAULT_RAG_MATCH_COUNT,
+            matchThreshold: options.ragMatchThreshold ?? DEFAULT_RAG_MATCH_THRESHOLD,
+            maxContextCharacters: options.ragMaxContextCharacters ?? DEFAULT_RAG_MAX_CONTEXT_CHARACTERS,
+          },
+        }, options.vinHmacSecret)
+      : fingerprintAnalysisRequest({ input, historyContext: parsedRequest.historyContext ?? null });
+    const result = await analysisCoordinator.execute(userId, idempotencyKey, analysisFingerprint, () =>
+      runWithAnalysisBudget(async (signal, deadlineAtMs, observePhysical) => {
+        if (options.historyService && contentFingerprint !== null && analysisFingerprint.startsWith("analysis_v1_")) {
+          try {
+            const existing = await options.historyService.findByAnalysisFingerprint(
+              userId,
+              analysisFingerprint,
+              signal,
+            );
+            if (existing) {
+              return {
+                status: "completed" as const,
+                reused: true,
+                analysis: existing.snapshot.analysis.output,
+                rag: existing.snapshot.rag,
+                history: { status: "saved" as const, id: existing.id },
+              };
+            }
+          } catch (error) {
+            if (error instanceof AnalysisCoordinationError) throw error;
+            // History is best-effort; an unavailable lookup must not block analysis.
+          }
+        }
+
+        signal.throwIfAborted();
+        let ragResult = options.ragEnabled ? NOT_CONFIGURED_RAG_RESULT : DISABLED_RAG_RESULT;
+        if (options.ragEnabled && options.ragService) {
+          try {
+            ragResult = await options.ragService.retrieve(input, signal);
+          } catch {
+            if (signal.aborted) throw signal.reason;
+            ragResult = unavailableRagResult();
+          }
+        }
+
+        signal.throwIfAborted();
+        const analysis = await analysisService!.analyze(input, ragResult.evidence, signal, deadlineAtMs, observePhysical);
+        signal.throwIfAborted();
+        const history: AnalysisResponsePayload["history"] = { status: "unavailable" };
+        const historyDeadlineAtMs = Date.now() + diagnosticHistorySaveTimeoutMs;
+        // Best-effort history must fit before the integral deadline; otherwise
+        // return the validated analysis without starting another physical job.
+        if (options.historyService && parsedRequest.historyContext && openAiModel && historyDeadlineAtMs < deadlineAtMs) {
+          const abortController = new AbortController();
+          const abortFromBudget = () => abortController.abort(signal.reason);
+          signal.addEventListener("abort", abortFromBudget, { once: true });
+          let timeout: ReturnType<typeof setTimeout> | undefined;
+          const assertHistoryBudget = () => {
+            if (Date.now() >= historyDeadlineAtMs) {
+              abortController.abort(new DiagnosticHistoryError("HISTORY_UNAVAILABLE"));
+            }
+            abortController.signal.throwIfAborted();
+          };
+          try {
+            const timeoutPromise = new Promise<never>((_resolve, reject) => {
+              timeout = setTimeout(() => {
+                abortController.abort();
+                reject(new DiagnosticHistoryError("HISTORY_UNAVAILABLE"));
+              }, Math.max(0, historyDeadlineAtMs - Date.now()));
+            });
+            const persistenceJob = (async () => {
+              const saved = await options.historyService!.save(userId, {
+                context: parsedRequest.historyContext!,
+                ...(contentFingerprint === null ? {} : { contentFingerprint }),
+                ...(analysisFingerprint.startsWith("analysis_v1_") ? { analysisFingerprint } : {}),
+                input,
+                analysis,
+                rag: ragResult.metadata,
+                analysisModel: openAiModel,
+                embeddingModel: options.openAiEmbeddingModel?.trim() || null,
+              }, abortController.signal);
+              assertHistoryBudget();
+              if (saved.reused && analysisFingerprint.startsWith("analysis_v1_")) {
+                const winner = await options.historyService!.findByAnalysisFingerprint(userId, analysisFingerprint, abortController.signal);
+                assertHistoryBudget();
+                if (!winner) throw new DiagnosticHistoryError("HISTORY_UNAVAILABLE");
+                return {
+                  status: "completed" as const,
+                  reused: true,
+                  analysis: winner.snapshot.analysis.output,
+                  rag: winner.snapshot.rag,
+                  history: { status: "saved" as const, id: winner.id },
+                };
+              }
+              return { status: "completed" as const, reused: false, analysis, rag: ragResult.metadata,
+                history: { status: "saved" as const, id: saved.id } };
+            })();
+            observePhysical(persistenceJob);
+            return await Promise.race([persistenceJob, timeoutPromise]);
+          } catch {
+            console.warn("DIAGNOSTIC_HISTORY_SAVE_FAILED");
+          } finally {
+            if (timeout !== undefined) clearTimeout(timeout);
+            signal.removeEventListener("abort", abortFromBudget);
+          }
+        }
+        signal.throwIfAborted();
+        return { status: "completed", reused: false, analysis, rag: ragResult.metadata, history };
+      }, analysisTotalTimeoutMs)
+    );
+    if (responseIsAvailable(response)) response.json(result);
   });
 
   app.get("/api/history", requireAuthentication, async (request, response) => {
@@ -424,6 +566,23 @@ export function createApp(options: AppOptions) {
         OPENAI_UNAVAILABLE: 503,
       };
       sendError(response, statusByCode[error.code], error.code, error.message);
+      return;
+    }
+
+    if (error instanceof AnalysisCoordinationError) {
+      const mapping: Record<typeof error.code, { status: number; message: string }> = {
+        ANALYSIS_TIMEOUT: { status: 504, message: "El anÃ¡lisis excediÃ³ el tiempo disponible en el servidor." },
+        IDEMPOTENCY_KEY_INVALID: { status: 400, message: "La clave de idempotencia no es vÃ¡lida." },
+        IDEMPOTENCY_CONFLICT: { status: 409, message: "La clave de idempotencia ya fue utilizada con otra solicitud." },
+        ANALYSIS_CAPACITY_EXCEEDED: { status: 503, message: "El servicio de anÃ¡lisis estÃ¡ temporalmente ocupado." },
+      };
+      const mapped = mapping[error.code];
+      sendError(response, mapped.status, error.code, mapped.message);
+      return;
+    }
+
+    if (error instanceof AnalysisFingerprintError) {
+      sendError(response, 400, "CONTENT_TOKEN_INVALID", "La referencia privada del reporte no es válida.");
       return;
     }
 

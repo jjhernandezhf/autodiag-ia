@@ -148,6 +148,7 @@ interface DiagnosticAnalysis {
 
 interface AnalysisResponse {
   status: "completed";
+  reused: boolean;
   analysis: DiagnosticAnalysis;
   rag: RagMetadata;
   history: { status: "saved"; id: string } | { status: "unavailable" };
@@ -166,6 +167,7 @@ interface UploadResponse {
   originalName: string;
   size: number;
   sha256: string;
+  contentToken: string;
   type: string;
   status: "received";
   extraction: ExtractionResult;
@@ -569,7 +571,7 @@ function parseAnalysisPreparation(value: unknown): AnalysisPreparation | null {
 function parseUploadResponse(value: unknown): UploadResponse | null {
   if (!value || typeof value !== "object") return null;
   const candidate = value as Partial<UploadResponse>;
-  if (!hasOnlyKeys(candidate, ["id", "originalName", "size", "sha256", "type", "status", "extraction", "analysisPreparation"])) return null;
+  if (!hasOnlyKeys(candidate, ["id", "originalName", "size", "sha256", "contentToken", "type", "status", "extraction", "analysisPreparation"])) return null;
   const extraction = parseUploadExtraction(candidate.extraction);
   const analysisPreparation = parseAnalysisPreparation(candidate.analysisPreparation);
   if (
@@ -577,6 +579,7 @@ function parseUploadResponse(value: unknown): UploadResponse | null {
     || typeof candidate.originalName !== "string" || candidate.originalName.trim().length === 0 || candidate.originalName.length > 255
     || typeof candidate.size !== "number" || !Number.isInteger(candidate.size) || candidate.size <= 0
     || typeof candidate.sha256 !== "string" || !/^[0-9a-f]{64}$/u.test(candidate.sha256)
+    || typeof candidate.contentToken !== "string" || !/^pdf_v1_[0-9a-f]{64}\.[0-9a-f]{64}$/u.test(candidate.contentToken)
     || candidate.type !== PDF_MIME_TYPE
     || candidate.status !== "received"
     || !extraction
@@ -718,7 +721,11 @@ function parseHistoryListResponse(value: unknown): HistoryListResponse | null {
 function parseAnalysisResponse(value: unknown): AnalysisResponse | null {
   if (!value || typeof value !== "object") return null;
   const candidate = value as Partial<AnalysisResponse>;
-  if (candidate.status !== "completed" || !isDiagnosticAnalysis(candidate.analysis) || !isRagMetadata(candidate.rag)) return null;
+  if (
+    !hasOnlyKeys(candidate, ["status", "reused", "analysis", "rag", "history"]) ||
+    candidate.status !== "completed" || typeof candidate.reused !== "boolean" ||
+    !isDiagnosticAnalysis(candidate.analysis) || !isRagMetadata(candidate.rag)
+  ) return null;
   const history = candidate.history;
   if (history !== undefined && (
     !history || typeof history !== "object" ||
@@ -728,7 +735,13 @@ function parseAnalysisResponse(value: unknown): AnalysisResponse | null {
       ? !("id" in history) || !isUuid(history.id)
       : "id" in history)
   )) return null;
-  return { status: candidate.status, analysis: candidate.analysis, rag: candidate.rag, history: history ?? { status: "unavailable" } };
+  return {
+    status: candidate.status,
+    reused: candidate.reused,
+    analysis: candidate.analysis,
+    rag: candidate.rag,
+    history: history ?? { status: "unavailable" },
+  };
 }
 
 function dtcIdentity(value: { code: string; moduleCode: string | null; moduleName: string }) {
@@ -749,7 +762,15 @@ const AI_ERROR_MESSAGES: Record<string, string> = {
   OPENAI_LIMIT_EXCEEDED: "El servicio de orientación alcanzó su límite de uso o saldo.",
   OPENAI_RESPONSE_INVALID: "El servicio devolvió una orientación que no pudo validarse.",
   OPENAI_UNAVAILABLE: "El servicio de orientación por IA no está disponible temporalmente.",
+  ANALYSIS_TIMEOUT: "El análisis está tardando más de lo esperado. Puede continuar procesándose. Usa Reintentar para recuperar el mismo resultado sin iniciar un análisis duplicado.",
+  IDEMPOTENCY_KEY_INVALID: "No fue posible identificar de forma segura este intento de análisis.",
+  IDEMPOTENCY_CONFLICT: "Este intento de análisis ya fue utilizado con datos diferentes. Revisa el reporte y vuelve a intentarlo.",
+  CONTENT_TOKEN_INVALID: "La referencia privada del reporte no es válida. Vuelve a cargar el PDF.",
 };
+
+const ANALYSIS_HTTP_TIMEOUT_MS = 90_000;
+const ANALYSIS_TIMEOUT_MESSAGE =
+  "El análisis está tardando más de lo esperado. Puede continuar procesándose. Usa Reintentar para recuperar el mismo resultado sin iniciar un análisis duplicado.";
 
 const PRIORITY_LABELS: Record<AnalysisPriority, string> = {
   critical: "Crítica",
@@ -1000,12 +1021,13 @@ interface AiAnalysisSectionProps {
 }
 
 function normalizeObservations(value: string) {
-  return value.trim();
+  return value.replace(/\r\n?/gu, "\n").trim();
 }
 
-function buildHistoryContext(reportReference: string, extraction: ExtractionResult) {
+function buildHistoryContext(reportReference: string, contentToken: string, extraction: ExtractionResult) {
   return {
     reportReference,
+    contentToken,
     extraction: {
       status: extraction.status,
       format: extraction.format,
@@ -1199,6 +1221,10 @@ function AiAnalysisSection({
             </div>
           )}
 
+          {state.status === "completed" && state.message && (
+            <p className="analysis-reused" role="status" aria-live="polite">{state.message}</p>
+          )}
+
           {state.status !== "completed" && state.analysis && state.rag && (
             <div className="preserved-analysis">
               <p className="preserved-analysis-note" role="status">
@@ -1303,6 +1329,7 @@ function ReportWorkspace({
   const analysisInProgressRef = useRef(false);
   const analysisSequenceRef = useRef(0);
   const activeAnalysisRef = useRef<{ id: number; reportId: string; controller: AbortController } | null>(null);
+  const analysisIdempotencyRef = useRef<{ signature: string; key: string } | null>(null);
   const pdfGenerationInProgressRef = useRef(false);
   const pdfSequenceRef = useRef(0);
   const activePdfGenerationRef = useRef<{ id: number; reportId: string } | null>(null);
@@ -1325,6 +1352,7 @@ function ReportWorkspace({
     healthControllerRef.current?.abort();
     activeUploadRef.current = null;
     activeAnalysisRef.current = null;
+    analysisIdempotencyRef.current = null;
     uploadInProgressRef.current = false;
     analysisInProgressRef.current = false;
     pdfGenerationInProgressRef.current = false;
@@ -1347,6 +1375,7 @@ function ReportWorkspace({
     healthControllerRef.current?.abort();
     activeUploadRef.current = null;
     activeAnalysisRef.current = null;
+    analysisIdempotencyRef.current = null;
     activePdfGenerationRef.current = null;
     historyListControllerRef.current = null;
     historyDetailControllerRef.current = null;
@@ -1413,6 +1442,7 @@ function ReportWorkspace({
     analysisSequenceRef.current += 1;
     activeAnalysisRef.current?.controller.abort();
     activeAnalysisRef.current = null;
+    analysisIdempotencyRef.current = null;
     analysisInProgressRef.current = false;
     setAnalysisState(
       showCancellation
@@ -1583,6 +1613,14 @@ function ReportWorkspace({
       ...preparation.input,
       ...(normalizedObservations.length === 0 ? {} : { observations: normalizedObservations }),
     };
+    const idempotencySignature = JSON.stringify({ reportReference: uploadResult.id, input: requestInput });
+    if (analysisIdempotencyRef.current?.signature !== idempotencySignature) {
+      analysisIdempotencyRef.current = {
+        signature: idempotencySignature,
+        key: globalThis.crypto.randomUUID(),
+      };
+    }
+    const idempotencyKey = analysisIdempotencyRef.current.key;
     const preservedAnalysis = analysisState.analysis;
     const preservedRag = analysisState.rag;
     const preservedObservations = analysisState.submittedObservations;
@@ -1610,14 +1648,18 @@ function ReportWorkspace({
       const result = await apiClient.requestJson<AnalysisResponse>("/api/reports/analyze", {
         init: {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": idempotencyKey,
+          },
           body: JSON.stringify({
             input: requestInput,
-            historyContext: buildHistoryContext(uploadResult.id, uploadResult.extraction),
+            historyContext: buildHistoryContext(uploadResult.id, uploadResult.contentToken, uploadResult.extraction),
           }),
           signal: controller.signal,
         },
         retry: "none",
+        timeoutMs: ANALYSIS_HTTP_TIMEOUT_MS,
         parse: parseAnalysisResponse,
         invalidResponseMessage: AI_ERROR_MESSAGES.OPENAI_RESPONSE_INVALID,
         errorMessage: (value) => getAiErrorMessage((value as ErrorResponse | null)?.error?.code),
@@ -1656,6 +1698,9 @@ function ReportWorkspace({
         status: "completed",
         analysis: result.analysis,
         rag: result.rag,
+        ...(result.reused
+          ? { message: "Este reporte ya había sido analizado. Se recuperó el resultado existente sin repetir el procesamiento." }
+          : {}),
         submittedObservations: normalizedObservations,
       });
       if (result.history.status === "saved") {
@@ -1668,7 +1713,9 @@ function ReportWorkspace({
       if (handleApiFailure(error, requestAnalysisConfirmation)) return;
       setAnalysisState({
         status: "error",
-        message: error instanceof Error ? error.message : "No fue posible obtener la orientación por IA.",
+        message: error instanceof ApiRequestError && error.type === "timeout"
+          ? ANALYSIS_TIMEOUT_MESSAGE
+          : error instanceof Error ? error.message : "No fue posible obtener la orientación por IA.",
         ...(preservedAnalysis ? { analysis: preservedAnalysis } : {}),
         ...(preservedRag ? { rag: preservedRag } : {}),
         ...(preservedObservations !== undefined ? { submittedObservations: preservedObservations } : {}),

@@ -207,7 +207,7 @@ describe("historial de diagnósticos", () => {
       findById: vi.fn(async () => null),
     };
     const service = new DiagnosticHistoryService(repository);
-    await expect(service.save(USER_ID, saveInput())).resolves.toBe(HISTORY_ID);
+    await expect(service.save(USER_ID, saveInput())).resolves.toEqual({ id: HISTORY_ID, reused: false });
     expect(insert).toHaveBeenCalledOnce();
     expect(insert.mock.calls[0]![0]).toBe(USER_ID);
   });

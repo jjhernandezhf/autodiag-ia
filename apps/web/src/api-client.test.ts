@@ -63,6 +63,7 @@ describe("cliente API tipado", () => {
 
   it.each([
     [408, "timeout", true],
+    [504, "timeout", true],
     [429, "rate_limited", true],
     [500, "server", true],
     [503, "server", true],

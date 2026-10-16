@@ -117,6 +117,38 @@ describe("adaptador Supabase del historial", () => {
     await expect(missingRepository.findById(USER_ID, IDS[0]!)).resolves.toBeNull();
   });
 
+  it("reemplaza la búsqueda ambigua por referencia con huella y señal del propietario", async () => {
+    const builder = fluentBuilder({ data: { id: IDS[0] }, error: null });
+    const { client } = clientFor(builder);
+    const repository = new SupabaseDiagnosticHistoryRepository(client);
+
+    const signal = new AbortController().signal;
+    const fingerprint = `analysis_v1_${"c".repeat(64)}`;
+    await expect(repository.findIdByAnalysisFingerprint(USER_ID, fingerprint, signal)).resolves.toEqual({ id: IDS[0] });
+    expect(builder.abortSignal).toHaveBeenCalledExactlyOnceWith(signal);
+    expect(repository).not.toHaveProperty("findIdByReportReference");
+    expect(builder.select).toHaveBeenCalledExactlyOnceWith("id");
+    expect(builder.eq.mock.calls).toEqual([
+      ["user_id", USER_ID],
+      ["analysis_fingerprint", fingerprint],
+    ]);
+    expect(builder.maybeSingle).toHaveBeenCalledOnce();
+  });
+
+  it("busca la huella del análisis exclusivamente dentro del usuario autenticado", async () => {
+    const builder = fluentBuilder({ data: { id: IDS[0] }, error: null });
+    const { client } = clientFor(builder);
+    const repository = new SupabaseDiagnosticHistoryRepository(client);
+    const fingerprint = `analysis_v1_${"a".repeat(64)}`;
+
+    await expect(repository.findIdByAnalysisFingerprint(USER_ID, fingerprint)).resolves.toEqual({ id: IDS[0] });
+    expect(builder.select).toHaveBeenCalledExactlyOnceWith("id");
+    expect(builder.eq.mock.calls).toEqual([
+      ["user_id", USER_ID],
+      ["analysis_fingerprint", fingerprint],
+    ]);
+  });
+
   it("inserta el usuario autenticado, propaga AbortSignal y no solicita escritura mutable", async () => {
     const builder = fluentBuilder({ data: { id: IDS[0] }, error: null });
     const { client } = clientFor(builder);
@@ -124,6 +156,8 @@ describe("adaptador Supabase del historial", () => {
     const controller = new AbortController();
     const record = {
       reportReference: IDS[1],
+      contentFingerprint: `pdf_v1_${"a".repeat(64)}`,
+      analysisFingerprint: `analysis_v1_${"b".repeat(64)}`,
       make: "Marca segura",
       model: "Modelo seguro",
       year: 2026,
@@ -139,10 +173,12 @@ describe("adaptador Supabase del historial", () => {
       embeddingModel: null,
     } as unknown as Parameters<SupabaseDiagnosticHistoryRepository["insert"]>[1];
 
-    await expect(repository.insert(USER_ID, record, controller.signal)).resolves.toEqual({ id: IDS[0] });
+    await expect(repository.insert(USER_ID, record, controller.signal)).resolves.toEqual({ id: IDS[0], reused: false });
 
     const payload = builder.insert.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(payload.user_id).toBe(USER_ID);
+    expect(payload.content_fingerprint).toBe(record.contentFingerprint);
+    expect(payload.analysis_fingerprint).toBe(record.analysisFingerprint);
     expect(payload).not.toHaveProperty("userId");
     expect(JSON.stringify(payload.extraction_snapshot)).not.toContain("user_id");
     expect(builder.abortSignal).toHaveBeenCalledExactlyOnceWith(controller.signal);
@@ -150,6 +186,45 @@ describe("adaptador Supabase del historial", () => {
     expect(builder.single).toHaveBeenCalledOnce();
     expect(builder.update).not.toHaveBeenCalled();
     expect(builder.delete).not.toHaveBeenCalled();
+  });
+
+  it("ante conflicto del índice recupera el registro ganador aislado por usuario y huella", async () => {
+    const insertBuilder = fluentBuilder({ data: null, error: { code: "23505" } });
+    const winnerBuilder = fluentBuilder({ data: { id: IDS[0] }, error: null });
+    const from = vi.fn()
+      .mockReturnValueOnce(insertBuilder)
+      .mockReturnValueOnce(winnerBuilder);
+    const repository = new SupabaseDiagnosticHistoryRepository({ from } as unknown as SupabaseClient);
+    const record = {
+      reportReference: IDS[1],
+      contentFingerprint: `pdf_v1_${"a".repeat(64)}`,
+      analysisFingerprint: `analysis_v1_${"b".repeat(64)}`,
+      make: "Marca segura",
+      model: "Modelo seguro",
+      year: 2026,
+      odometer: null,
+      vinHmac: null,
+      vinLast4: null,
+      dtcCodes: ["P0300"],
+      ragStatus: "disabled",
+      extractionSnapshot: {},
+      analysisSnapshot: {},
+      ragSnapshot: {},
+      analysisModel: "synthetic-analysis-model",
+      embeddingModel: null,
+    } as unknown as Parameters<SupabaseDiagnosticHistoryRepository["insert"]>[1];
+
+    const signal = new AbortController().signal;
+    await expect(repository.insert(USER_ID, record, signal)).resolves.toEqual({ id: IDS[0], reused: true });
+    expect(insertBuilder.abortSignal).toHaveBeenCalledExactlyOnceWith(signal);
+    expect(winnerBuilder.abortSignal).toHaveBeenCalledExactlyOnceWith(signal);
+    expect(from).toHaveBeenCalledTimes(2);
+    expect(winnerBuilder.eq.mock.calls).toEqual([
+      ["user_id", USER_ID],
+      ["analysis_fingerprint", record.analysisFingerprint],
+    ]);
+    expect(insertBuilder.update).not.toHaveBeenCalled();
+    expect(insertBuilder.delete).not.toHaveBeenCalled();
   });
 
   it("pagina sin repeticiones ni pérdidas cuando tres filas comparten created_at", async () => {

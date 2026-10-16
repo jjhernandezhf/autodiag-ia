@@ -80,6 +80,7 @@ export const historyExtractionInputSchema = z.object({
 
 export const historyCaptureContextSchema = z.object({
   reportReference: z.string().uuid(),
+  contentToken: z.string().regex(/^pdf_v1_[0-9a-f]{64}\.[0-9a-f]{64}$/u).optional(),
   extraction: historyExtractionInputSchema,
 }).strict();
 
@@ -188,6 +189,8 @@ const storedDetailRowSchema = storedListRowSchema.extend({
 
 interface HistoryInsertRecord {
   reportReference: string;
+  contentFingerprint: string | null;
+  analysisFingerprint: string | null;
   make: string;
   model: string;
   year: number;
@@ -205,6 +208,8 @@ interface HistoryInsertRecord {
 
 export interface HistorySaveInput {
   context: HistoryCaptureContext;
+  contentFingerprint?: string;
+  analysisFingerprint?: string;
   input: DiagnosticAnalysisInput;
   analysis: DiagnosticAnalysisOutput;
   rag: RagMetadata;
@@ -218,9 +223,10 @@ interface StoredHistoryPage {
 }
 
 export interface DiagnosticHistoryRepository {
-  insert(userId: string, record: HistoryInsertRecord, signal?: AbortSignal): Promise<{ id: string }>;
+  insert(userId: string, record: HistoryInsertRecord, signal?: AbortSignal): Promise<{ id: string; reused?: boolean }>;
   list(userId: string, limit: number, cursor?: HistoryCursor): Promise<StoredHistoryPage>;
-  findById(userId: string, id: string): Promise<unknown | null>;
+  findById(userId: string, id: string, signal?: AbortSignal): Promise<unknown | null>;
+  findIdByAnalysisFingerprint?(userId: string, analysisFingerprint: string, signal?: AbortSignal): Promise<unknown | null>;
 }
 
 interface HistoryCursor {
@@ -350,7 +356,16 @@ export function buildHistoryInsertRecord(raw: HistorySaveInput): HistoryInsertRe
   const analysis = diagnosticAnalysisOutputSchema.safeParse(raw.analysis);
   const analysisModel = nonBlank(100).safeParse(raw.analysisModel);
   const embeddingModel = raw.embeddingModel === null ? { success: true as const, data: null } : nonBlank(100).safeParse(raw.embeddingModel);
-  if (!context.success || !input.success || !analysis.success || !analysisModel.success || !embeddingModel.success) {
+  const contentFingerprint = z.string().regex(/^pdf_v1_[0-9a-f]{64}$/u).nullable()
+    .safeParse(raw.contentFingerprint ?? null);
+  const analysisFingerprint = z.string().regex(/^analysis_v1_[0-9a-f]{64}$/u).nullable()
+    .safeParse(raw.analysisFingerprint ?? null);
+  if (
+    !context.success || !input.success || !analysis.success || !analysisModel.success ||
+    !embeddingModel.success || !contentFingerprint.success || !analysisFingerprint.success ||
+    ((contentFingerprint.success && contentFingerprint.data === null) !==
+      (analysisFingerprint.success && analysisFingerprint.data === null))
+  ) {
     throw new DiagnosticHistoryError("HISTORY_DATA_INVALID");
   }
   const preparation = prepareAiAnalysis(context.data.extraction);
@@ -399,6 +414,8 @@ export function buildHistoryInsertRecord(raw: HistorySaveInput): HistoryInsertRe
   const vinLast4 = vinMasked?.slice(-4) ?? null;
   return {
     reportReference: context.data.reportReference,
+    contentFingerprint: contentFingerprint.data,
+    analysisFingerprint: analysisFingerprint.data,
     make: input.data.vehicle.make,
     model: input.data.vehicle.model,
     year: input.data.vehicle.year,
@@ -439,14 +456,34 @@ export class DiagnosticHistoryService {
     if (!z.string().uuid().safeParse(userId).success) throw new DiagnosticHistoryError("HISTORY_DATA_INVALID");
     const record = buildHistoryInsertRecord(input);
     try {
-      const saved = z.object({ id: z.string().uuid() }).strict().parse(
+      const saved = z.object({ id: z.string().uuid(), reused: z.boolean().optional().default(false) }).strict().parse(
         await this.repository.insert(userId, record, signal),
       );
-      return saved.id;
+      return saved;
     } catch (error) {
       if (error instanceof DiagnosticHistoryError) throw error;
       throw new DiagnosticHistoryError("HISTORY_UNAVAILABLE");
     }
+  }
+
+  async findByAnalysisFingerprint(userId: string, analysisFingerprint: string, signal?: AbortSignal): Promise<HistoryDetail | null> {
+    if (
+      !z.string().uuid().safeParse(userId).success ||
+      !z.string().regex(/^analysis_v1_[0-9a-f]{64}$/u).safeParse(analysisFingerprint).success
+    ) throw new DiagnosticHistoryError("HISTORY_DATA_INVALID");
+    if (!this.repository.findIdByAnalysisFingerprint) return null;
+    let value: unknown | null;
+    try {
+      signal?.throwIfAborted();
+      value = await this.repository.findIdByAnalysisFingerprint(userId, analysisFingerprint, signal);
+      signal?.throwIfAborted();
+    } catch {
+      throw new DiagnosticHistoryError("HISTORY_UNAVAILABLE");
+    }
+    if (value === null) return null;
+    const parsed = z.object({ id: z.string().uuid() }).strict().safeParse(value);
+    if (!parsed.success) throw new DiagnosticHistoryError("HISTORY_DATA_INVALID");
+    return this.get(userId, parsed.data.id, signal);
   }
 
   async list(userId: string, query: ReturnType<typeof parseHistoryListQuery>) {
@@ -467,12 +504,14 @@ export class DiagnosticHistoryService {
     };
   }
 
-  async get(userId: string, id: string): Promise<HistoryDetail> {
+  async get(userId: string, id: string, signal?: AbortSignal): Promise<HistoryDetail> {
     if (!z.string().uuid().safeParse(userId).success) throw new DiagnosticHistoryError("HISTORY_DATA_INVALID");
     if (!z.string().uuid().safeParse(id).success) throw new DiagnosticHistoryError("HISTORY_ID_INVALID");
     let value: unknown | null;
     try {
-      value = await this.repository.findById(userId, id);
+      signal?.throwIfAborted();
+      value = await this.repository.findById(userId, id, signal);
+      signal?.throwIfAborted();
     } catch {
       throw new DiagnosticHistoryError("HISTORY_UNAVAILABLE");
     }
@@ -540,6 +579,8 @@ export class SupabaseDiagnosticHistoryRepository implements DiagnosticHistoryRep
     let query = this.client.from("diagnostic_history").insert({
       user_id: safeUserId,
       report_reference: record.reportReference,
+      content_fingerprint: record.contentFingerprint,
+      analysis_fingerprint: record.analysisFingerprint,
       make: record.make,
       model: record.model,
       year: record.year,
@@ -559,8 +600,18 @@ export class SupabaseDiagnosticHistoryRepository implements DiagnosticHistoryRep
     }).select("id");
     if (signal) query = query.abortSignal(signal);
     const { data, error } = await query.single();
-    if (error) throw new Error("HISTORY_INSERT_FAILED");
-    return data;
+    if (error) {
+      const errorCode = typeof error === "object" && error !== null && "code" in error
+        ? String(error.code)
+        : "";
+      if (errorCode === "23505" && record.analysisFingerprint !== null) {
+        const winner = await this.findIdByAnalysisFingerprint(safeUserId, record.analysisFingerprint, signal);
+        const parsedWinner = z.object({ id: z.string().uuid() }).strict().safeParse(winner);
+        if (parsedWinner.success) return { id: parsedWinner.data.id, reused: true };
+      }
+      throw new Error("HISTORY_INSERT_FAILED");
+    }
+    return { ...data, reused: false };
   }
 
   async list(userId: string, limit: number, cursor?: HistoryCursor): Promise<StoredHistoryPage> {
@@ -580,15 +631,29 @@ export class SupabaseDiagnosticHistoryRepository implements DiagnosticHistoryRep
     return { rows: data.slice(0, limit), hasMore: data.length > limit };
   }
 
-  async findById(userId: string, id: string) {
+  async findById(userId: string, id: string, signal?: AbortSignal) {
     const safeUserId = z.string().uuid().parse(userId);
     const safeId = z.string().uuid().parse(id);
-    const { data, error } = await this.client.from("diagnostic_history")
+    let query = this.client.from("diagnostic_history")
       .select(DETAIL_COLUMNS)
       .eq("user_id", safeUserId)
-      .eq("id", safeId)
-      .maybeSingle();
+      .eq("id", safeId);
+    if (signal) query = query.abortSignal(signal);
+    const { data, error } = await query.maybeSingle();
     if (error) throw new Error("HISTORY_DETAIL_FAILED");
+    return data;
+  }
+
+  async findIdByAnalysisFingerprint(userId: string, analysisFingerprint: string, signal?: AbortSignal) {
+    const safeUserId = z.string().uuid().parse(userId);
+    const safeFingerprint = z.string().regex(/^analysis_v1_[0-9a-f]{64}$/u).parse(analysisFingerprint);
+    let query = this.client.from("diagnostic_history")
+      .select("id")
+      .eq("user_id", safeUserId)
+      .eq("analysis_fingerprint", safeFingerprint);
+    if (signal) query = query.abortSignal(signal);
+    const { data, error } = await query.maybeSingle();
+    if (error) throw new Error("HISTORY_LOOKUP_FAILED");
     return data;
   }
 }

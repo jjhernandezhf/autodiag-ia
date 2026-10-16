@@ -7,6 +7,7 @@ import type { AuthenticationService } from "./auth-service.js";
 
 const TEST_SECRET = "synthetic-analysis-secret-at-least-32-bytes";
 const AUTHORIZATION = "Bearer synthetic-access-token";
+const IDEMPOTENCY_KEY = "11111111-1111-4111-8111-111111111111";
 const testAuthenticationService: AuthenticationService = {
   login: async () => ({ access_token: "synthetic-access-token", refresh_token: "synthetic-refresh-token" }),
   authenticate: async () => ({ id: "6a103df0-8e4d-4c51-89f5-7030c5443d89", username: "usuario.sintetico" }),
@@ -54,7 +55,10 @@ function createAuthenticatedApp(options: AppOptions) {
 }
 
 function postAnalyze(app: ReturnType<typeof createApp>) {
-  return request(app).post("/api/reports/analyze").set("Authorization", AUTHORIZATION);
+  return request(app)
+    .post("/api/reports/analyze")
+    .set("Authorization", AUTHORIZATION)
+    .set("Idempotency-Key", IDEMPOTENCY_KEY);
 }
 
 function appWithClient(client: AiAnalysisClient) {
@@ -81,6 +85,7 @@ describe("POST /api/reports/analyze", () => {
     expect(response.status).toBe(200);
     expect(response.body).toEqual({
       status: "completed",
+      reused: false,
       analysis: validOutput,
       rag: {
         enabled: false,
@@ -107,6 +112,15 @@ describe("POST /api/reports/analyze", () => {
     expect(generate).toHaveBeenCalledOnce();
     expect(generate.mock.calls[0]![0].observations).toBeUndefined();
     expect(generate.mock.calls[0]![0].report).not.toHaveProperty("observations");
+  });
+
+  it("normaliza finales de línea y conserva espacios internos significativos", async () => {
+    const generate = vi.fn(async () => JSON.stringify(outputWithObservations));
+    const response = await postAnalyze(appWithClient({ generate }))
+      .send({ ...validInput, observations: "  Ruido  leve\r\nal acelerar\r  " });
+
+    expect(response.status).toBe(200);
+    expect(generate.mock.calls[0]![0].observations).toBe("Ruido  leve\nal acelerar");
   });
 
   it("acepta Unicode y saltos internos en el límite exacto de 1,000 caracteres", async () => {
@@ -321,11 +335,13 @@ describe("POST /api/reports/analyze", () => {
   });
 
   it("valida en integración la respuesta del modelo", async () => {
-    const response = await postAnalyze(appWithClient({ generate: async () => JSON.stringify({ texto: "sin estructura" }) }))
+    const generate = vi.fn(async () => JSON.stringify({ texto: "sin estructura" }));
+    const response = await postAnalyze(appWithClient({ generate }))
       .send(validInput);
 
     expect(response.status).toBe(502);
     expect(response.body.error.code).toBe("OPENAI_RESPONSE_INVALID");
+    expect(generate).toHaveBeenCalledOnce();
   });
 
   it("mantiene la API disponible después de un error del proveedor", async () => {

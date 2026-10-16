@@ -68,7 +68,7 @@ function createAbortError() {
 function classifyStatus(status: number, publicMessage?: string) {
   if (status === 401) return new ApiRequestError("unauthorized", AUTHENTICATION_MESSAGE, false, status);
   if (status === 403) return new ApiRequestError("forbidden", AUTHORIZATION_MESSAGE, false, status);
-  if (status === 408) return new ApiRequestError("timeout", API_UNAVAILABLE_MESSAGE, true, status);
+  if (status === 408 || status === 504) return new ApiRequestError("timeout", API_UNAVAILABLE_MESSAGE, true, status);
   if (status === 429) return new ApiRequestError("rate_limited", publicMessage ?? RATE_LIMIT_MESSAGE, true, status);
   if (status >= 500 && status <= 599) {
     return new ApiRequestError("server", API_UNAVAILABLE_MESSAGE, true, status);

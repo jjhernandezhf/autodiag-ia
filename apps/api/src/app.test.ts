@@ -150,6 +150,7 @@ describe("POST /api/reports/upload", () => {
       originalName: "reporte-autel.pdf",
       size: validPdf.length,
       sha256: createHash("sha256").update(validPdf).digest("hex"),
+      contentToken: expect.stringMatching(/^pdf_v1_[0-9a-f]{64}\.[0-9a-f]{64}$/u),
       type: "application/pdf",
       status: "received",
       extraction: expect.objectContaining({
@@ -164,6 +165,29 @@ describe("POST /api/reports/upload", () => {
       }),
     });
     expect(response.body.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+  });
+
+  it("emite el mismo token opaco para los mismos bytes y otro para bytes distintos", async () => {
+    const repeated = await postUpload().attach(
+      "report",
+      validPdf,
+      { filename: "repetido.pdf", contentType: "application/pdf" },
+    );
+    const differentPdf = Buffer.from("%PDF-1.7\nDifferent synthetic fixture\n%%EOF");
+    const different = await postUpload().attach(
+      "report",
+      differentPdf,
+      { filename: "diferente.pdf", contentType: "application/pdf" },
+    );
+    const original = await postUpload().attach(
+      "report",
+      validPdf,
+      { filename: "original.pdf", contentType: "application/pdf" },
+    );
+
+    expect(repeated.body.contentToken).toBe(original.body.contentToken);
+    expect(different.body.contentToken).not.toBe(original.body.contentToken);
+    expect(original.body.contentToken).not.toContain(original.body.sha256);
   });
 
   it("incluye un DTO de análisis sanitizado sin datos sensibles ni propiedades desconocidas", async () => {

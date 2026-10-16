@@ -38,7 +38,7 @@ export interface RagConfiguration {
 }
 
 export interface EmbeddingClient {
-  createEmbeddings(input: string[]): Promise<number[][]>;
+  createEmbeddings(input: string[], signal?: AbortSignal): Promise<number[][]>;
 }
 
 export interface KnowledgeMatchClient {
@@ -46,7 +46,7 @@ export interface KnowledgeMatchClient {
     embedding: number[];
     threshold: number;
     count: number;
-  }): Promise<unknown>;
+  }, signal?: AbortSignal): Promise<unknown>;
 }
 
 interface EmbeddingsClient {
@@ -70,7 +70,7 @@ export class OpenAiEmbeddingClient implements EmbeddingClient {
     this.client = client ?? new OpenAI({ apiKey, maxRetries: 0 });
   }
 
-  async createEmbeddings(input: string[]) {
+  async createEmbeddings(input: string[], signal?: AbortSignal) {
     const response = await this.client.embeddings.create(
       {
         model: this.model,
@@ -78,7 +78,7 @@ export class OpenAiEmbeddingClient implements EmbeddingClient {
         encoding_format: "float",
         dimensions: RAG_EMBEDDING_DIMENSIONS,
       },
-      { timeout: this.timeoutMs },
+      { timeout: this.timeoutMs, ...(signal === undefined ? {} : { signal }) },
     );
     const ordered = [...response.data].sort((left, right) => left.index - right.index).map((item) => item.embedding);
     if (
@@ -91,19 +91,25 @@ export class OpenAiEmbeddingClient implements EmbeddingClient {
   }
 }
 
+interface SupabaseRpcRequest extends PromiseLike<{ data: unknown; error: unknown }> {
+  abortSignal?(signal: AbortSignal): PromiseLike<{ data: unknown; error: unknown }>;
+}
+
 interface SupabaseRpcClient {
-  rpc(name: string, parameters: Record<string, unknown>): PromiseLike<{ data: unknown; error: unknown }>;
+  rpc(name: string, parameters: Record<string, unknown>): SupabaseRpcRequest;
 }
 
 export class SupabaseKnowledgeMatchClient implements KnowledgeMatchClient {
   constructor(private readonly client: SupabaseRpcClient) {}
 
-  async matchKnowledge(input: { embedding: number[]; threshold: number; count: number }) {
-    const { data, error } = await this.client.rpc("match_knowledge_chunks", {
+  async matchKnowledge(input: { embedding: number[]; threshold: number; count: number }, signal?: AbortSignal) {
+    const rpc = this.client.rpc("match_knowledge_chunks", {
       query_embedding: input.embedding,
       match_threshold: input.threshold,
       match_count: input.count,
     });
+    const request = signal && rpc.abortSignal ? rpc.abortSignal(signal) : rpc;
+    const { data, error } = await request;
     if (error) throw new Error("RAG_RPC_UNAVAILABLE");
     return data;
   }
@@ -250,15 +256,15 @@ export class RagRetrievalService {
     private readonly config: RagConfiguration,
   ) {}
 
-  async retrieve(input: DiagnosticAnalysisInput): Promise<RagRetrievalResult> {
+  async retrieve(input: DiagnosticAnalysisInput, signal?: AbortSignal): Promise<RagRetrievalResult> {
     const query = buildSemanticQuery(input);
-    const [embedding] = await this.embeddings.createEmbeddings([query]);
+    const [embedding] = await this.embeddings.createEmbeddings([query], signal);
     if (!embedding || embedding.length !== RAG_EMBEDDING_DIMENSIONS) throw new Error("RAG_EMBEDDING_INVALID");
     const rawRows = await this.knowledge.matchKnowledge({
       embedding,
       threshold: this.config.matchThreshold,
       count: this.config.matchCount,
-    });
+    }, signal);
     const parsed = z.array(knowledgeRowSchema).safeParse(rawRows);
     if (!parsed.success) throw new Error("RAG_RESPONSE_INVALID");
 

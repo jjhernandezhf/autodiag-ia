@@ -2,6 +2,7 @@ import request from "supertest";
 import { describe, expect, it, vi } from "vitest";
 
 import { DiagnosticAnalysisService } from "./ai-analysis-service.js";
+import { createPdfContentToken } from "./analysis-fingerprint.js";
 import type { AuthenticationService } from "./auth-service.js";
 import { createApp, type AppOptions } from "./app.js";
 import {
@@ -55,6 +56,7 @@ const output = {
 
 const historyContext: HistoryCaptureContext = {
   reportReference: REPORT_ID,
+  contentToken: createPdfContentToken(Buffer.from("%PDF-synthetic-history"), SECRET, USER_A),
   extraction: {
     status: "completed",
     format: "autel_vehicle_diagnostic_report",
@@ -91,15 +93,28 @@ const authentication: AuthenticationService = {
   }),
 };
 
-function createMemoryRepository(options: { failInsert?: boolean } = {}) {
+function createMemoryRepository(options: { failInsert?: boolean; legacyUploadUniqueness?: boolean } = {}) {
   const rows: Array<Record<string, unknown> & { user_id: string }> = [];
   const insert = vi.fn<DiagnosticHistoryRepository["insert"]>(async (userId, record) => {
     if (options.failInsert) throw new Error("synthetic persistence failure");
+    const existing = rows.find((row) =>
+      row.user_id === userId &&
+      record.analysisFingerprint !== null &&
+      row.analysis_fingerprint === record.analysisFingerprint
+    );
+    if (existing) return { id: String(existing.id), reused: true };
+    if (rows.some((row) => row.user_id === userId && row.report_reference === record.reportReference &&
+      (options.legacyUploadUniqueness || (record.analysisFingerprint === null && row.analysis_fingerprint === null)))) {
+      throw Object.assign(new Error("synthetic unique conflict"), { code: "23505" });
+    }
+    const id = rows.length === 0 ? HISTORY_ID : `44444444-4444-4444-8444-${String(rows.length).padStart(12, "0")}`;
     rows.push({
-      id: HISTORY_ID,
+      id,
       user_id: userId,
       created_at: "2026-10-04T12:00:00.000Z",
       report_reference: record.reportReference,
+      content_fingerprint: record.contentFingerprint,
+      analysis_fingerprint: record.analysisFingerprint,
       make: record.make,
       model: record.model,
       year: record.year,
@@ -114,7 +129,7 @@ function createMemoryRepository(options: { failInsert?: boolean } = {}) {
       embedding_model: record.embeddingModel,
       schema_version: 1,
     });
-    return { id: HISTORY_ID };
+    return { id };
   });
   const repository: DiagnosticHistoryRepository = {
     insert,
@@ -141,7 +156,13 @@ function createMemoryRepository(options: { failInsert?: boolean } = {}) {
       if (!found) return null;
       const row: Record<string, unknown> = { ...found };
       delete row.user_id;
+      delete row.content_fingerprint;
+      delete row.analysis_fingerprint;
       return row;
+    },
+    async findIdByAnalysisFingerprint(userId, fingerprint) {
+      const found = rows.find((row) => row.user_id === userId && row.analysis_fingerprint === fingerprint);
+      return found ? { id: found.id } : null;
     },
   };
   return { rows, insert, service: new DiagnosticHistoryService(repository) };
@@ -171,10 +192,59 @@ function analyze(app: ReturnType<typeof createApp>, body: unknown = { input, his
   return request(app)
     .post("/api/reports/analyze")
     .set("Authorization", "Bearer user-a-token")
+    .set("Idempotency-Key", "11111111-1111-4111-8111-111111111111")
     .send(body);
 }
 
 describe("integración HTTP del historial", () => {
+  it.each([false, true])("modela restricciones nuevas y antiguas (legacy=%s) para variantes y reinicio", async (legacyUploadUniqueness) => {
+    const memory = createMemoryRepository({ legacyUploadUniqueness });
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      const variants = ["Vibración al acelerar.", "Vibración en reposo."];
+      const generate = vi.fn(async (request) => JSON.stringify({ ...output, technicalSummary: request.observations }));
+      const { app } = createTestApp(memory.service, generate);
+      const post = (target: typeof app, index: number) => request(target).post("/api/reports/analyze")
+        .set("Authorization", "Bearer user-a-token")
+        .set("Idempotency-Key", `77777777-7777-4777-8777-${String(index + 1).padStart(12, "0")}`)
+        .send({ input: { ...input, observations: variants[index] }, historyContext });
+      const first = await post(app, 0);
+      const second = await post(app, 1);
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      expect(generate).toHaveBeenCalledTimes(2);
+      expect(memory.rows).toHaveLength(legacyUploadUniqueness ? 1 : 2);
+      expect(first.body.history.status).toBe("saved");
+      expect(second.body.history.status).toBe(legacyUploadUniqueness ? "unavailable" : "saved");
+      if (!legacyUploadUniqueness) {
+        expect(first.body.history.id).not.toBe(second.body.history.id);
+        const restarted = createTestApp(memory.service);
+        for (const index of [0, 1]) {
+          const repeated = await post(restarted.app, index);
+          expect(repeated.status).toBe(200);
+          expect(repeated.body.reused).toBe(true);
+          expect(repeated.body.analysis.technicalSummary).toBe(variants[index]);
+          expect(repeated.body.history.id).toBe(index === 0 ? first.body.history.id : second.body.history.id);
+        }
+        expect(restarted.generate).not.toHaveBeenCalled();
+        expect(memory.insert).toHaveBeenCalledTimes(2);
+      }
+    } finally { warning.mockRestore(); }
+  });
+
+  it("conserva unicidad legacy por propietario y no confunde variantes con la referencia", async () => {
+    const memory = createMemoryRepository();
+    const value = { context: historyContext, input: structuredClone(input), analysis: structuredClone(output),
+      rag: { enabled: false, used: false, status: "disabled", querySummary: "RAG desactivado.", sources: [] },
+      analysisModel: "synthetic-analysis-model", embeddingModel: null };
+    await memory.service.save(USER_A, value as never);
+    await expect(memory.service.save(USER_A, value as never)).rejects.toMatchObject({ code: "HISTORY_UNAVAILABLE" });
+    await memory.service.save(USER_B, value as never);
+    expect(memory.rows).toHaveLength(2);
+    expect(memory.service).not.toHaveProperty("findByReportReference");
+    expect(await memory.service.findByAnalysisFingerprint(USER_A, `analysis_v1_${"f".repeat(64)}`)).toBeNull();
+  });
+
   it("guarda el análisis exitoso con el usuario autenticado y lista solo sus filas", async () => {
     const memory = createMemoryRepository();
     const { app } = createTestApp(memory.service);
@@ -189,8 +259,39 @@ describe("integración HTTP del historial", () => {
     const other = await request(app).get("/api/history").set("Authorization", "Bearer user-b-token");
     expect(own.status).toBe(200);
     expect(own.body.items).toHaveLength(1);
+    expect(JSON.stringify(own.body)).not.toMatch(/content_fingerprint|analysis_fingerprint|pdf_v1_|analysis_v1_/iu);
     expect(other.status).toBe(200);
     expect(other.body.items).toEqual([]);
+  });
+
+  it("recrea el coordinador y recupera por huella persistente sin repetir IA, embeddings, RAG ni historial", async () => {
+    const memory = createMemoryRepository();
+    const first = createTestApp(memory.service);
+    expect((await analyze(first.app)).status).toBe(200);
+
+    const generate = vi.fn(async () => JSON.stringify(output));
+    const retrieve = vi.fn();
+    const restarted = createTestApp(memory.service, generate, {
+      ragEnabled: false,
+      ragService: { retrieve },
+    });
+    const secondContext = {
+      ...historyContext,
+      reportReference: "55555555-5555-4555-8555-555555555555",
+    };
+    const response = await request(restarted.app)
+      .post("/api/reports/analyze")
+      .set("Authorization", "Bearer user-a-token")
+      .set("Idempotency-Key", "66666666-6666-4666-8666-666666666666")
+      .send({ input, historyContext: secondContext });
+
+    expect(response.status).toBe(200);
+    expect(response.body.reused).toBe(true);
+    expect(response.body.analysis).toEqual(output);
+    expect(memory.rows).toHaveLength(1);
+    expect(memory.insert).toHaveBeenCalledOnce();
+    expect(generate).not.toHaveBeenCalled();
+    expect(retrieve).not.toHaveBeenCalled();
   });
 
   it("oculta como no encontrado el historial de otro usuario", async () => {

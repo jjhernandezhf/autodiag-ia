@@ -3,6 +3,7 @@ import { z } from "zod";
 import { containsSensitiveValue, normalizeSafeHttpsUrl } from "./sensitive-data.js";
 
 export const DEMO_SOURCE_LABEL = "AutoDiag IA — Corpus demostrativo interno";
+export const KNOWLEDGE_CORPUS_VERSION = "demonstration_corpus_v1";
 
 export const knowledgeChunkSchema = z
   .object({
