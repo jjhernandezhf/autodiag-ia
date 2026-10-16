@@ -58,6 +58,16 @@ describe("huella privada del PDF", () => {
 });
 
 describe("huella canónica del análisis", () => {
+  it("separa low del default sin invalidar las huellas anteriores al omitir esfuerzo", () => {
+    const base = fingerprintInput({ analysisModel: "gpt-6.1-sol" });
+    const previous = createAnalysisFingerprint(base, SECRET);
+    expect(createAnalysisFingerprint({ ...base, reasoningEffort: undefined }, SECRET)).toBe(previous);
+    const low = createAnalysisFingerprint({ ...base, reasoningEffort: "low" }, SECRET);
+    expect(low).not.toBe(previous);
+    expect(createAnalysisFingerprint({ ...base, reasoningEffort: "low" }, SECRET)).toBe(low);
+    expect(createAnalysisFingerprint(base, SECRET)).toBe(previous);
+  });
+
   it("es estable ante el orden de propiedades pero cambia con cada versión o entrada relevante", () => {
     const base = fingerprintInput();
     const expected = createAnalysisFingerprint(base, SECRET);

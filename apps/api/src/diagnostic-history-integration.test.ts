@@ -197,6 +197,47 @@ function analyze(app: ReturnType<typeof createApp>, body: unknown = { input, his
 }
 
 describe("integración HTTP del historial", () => {
+  it("separa default y low del mismo modelo y recupera cada variante tras reiniciar", async () => {
+    const memory = createMemoryRepository();
+    const make = (reasoningEffort: "low" | undefined) => {
+      const generate = vi.fn(async (request: unknown) => {
+        void request;
+        return JSON.stringify({ ...output,
+          technicalSummary: reasoningEffort === "low" ? "Resultado de evaluación low." : "Resultado de referencia default." });
+      });
+      const { app } = createTestApp(memory.service, generate, {
+        openAiModel: "gpt-6.1-sol", openAiReasoningEffort: reasoningEffort,
+        analysisService: new DiagnosticAnalysisService({ generate }, "gpt-6.1-sol", 1_000, { reasoningEffort }),
+      });
+      return { app, generate };
+    };
+    const reference = make(undefined);
+    const first = await analyze(reference.app);
+    const evaluation = make("low");
+    const second = await analyze(evaluation.app);
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(first.body.history.status).toBe("saved");
+    expect(second.body.history.status).toBe("saved");
+    expect(second.body.history.id).not.toBe(first.body.history.id);
+    expect(second.body.analysis).not.toEqual(first.body.analysis);
+    expect(reference.generate).toHaveBeenCalledOnce();
+    expect(evaluation.generate).toHaveBeenCalledOnce();
+    expect(reference.generate.mock.calls[0]![0]).not.toHaveProperty("reasoningEffort");
+    expect(evaluation.generate.mock.calls[0]![0]).toHaveProperty("reasoningEffort", "low");
+    for (const [effort, expected] of [["low", second], [undefined, first]] as const) {
+      const restarted = make(effort);
+      const recovered = await analyze(restarted.app);
+      expect(recovered.status).toBe(200);
+      expect(recovered.body.reused).toBe(true);
+      expect(recovered.body.history).toEqual(expected.body.history);
+      expect(recovered.body.analysis).toEqual(expected.body.analysis);
+      expect(restarted.generate).not.toHaveBeenCalled();
+    }
+    expect(memory.rows).toHaveLength(2);
+    expect(memory.insert).toHaveBeenCalledTimes(2);
+  });
+
   it.each([false, true])("modela restricciones nuevas y antiguas (legacy=%s) para variantes y reinicio", async (legacyUploadUniqueness) => {
     const memory = createMemoryRepository({ legacyUploadUniqueness });
     const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);

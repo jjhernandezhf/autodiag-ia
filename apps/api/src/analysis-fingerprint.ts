@@ -3,6 +3,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 
 import type { DiagnosticAnalysisInput } from "./ai-analysis-types.js";
+import type { AnalysisReasoningEffort } from "./analysis-generation.js";
 
 export const ANALYSIS_PIPELINE_VERSION = "analysis_pipeline_v1";
 export const PDF_CONTENT_FINGERPRINT_VERSION = "pdf_v1";
@@ -77,6 +78,7 @@ export interface AnalysisFingerprintInput {
   input: DiagnosticAnalysisInput;
   extraction: unknown;
   analysisModel: string;
+  reasoningEffort?: AnalysisReasoningEffort;
   promptVersion: string;
   outputSchemaVersion: string;
   embeddingModel: string;

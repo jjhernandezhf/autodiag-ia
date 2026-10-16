@@ -83,6 +83,33 @@ async function flushMicrotasks() {
 }
 
 describe("arbitraje absoluto compartido de timeouts", () => {
+  it("reproduce intento 1 con 17706 ms restantes sin solapar una operación física pendiente", async () => {
+    const scheduler = controlledScheduler();
+    const physical = deferred<string>();
+    const generate = vi.fn(() => physical.promise);
+    const log = vi.fn();
+    const wait = vi.fn(async () => undefined);
+    const service = new DiagnosticAnalysisService({ generate }, "gpt-6.1-sol", 60_000, { reasoningEffort: "low", log, wait });
+    const work = runWithAnalysisBudget((signal, deadline, observe) => {
+      scheduler.setClock(2_279);
+      return service.analyze(input, [], signal, deadline, observe);
+    }, 80_000);
+    const result = work.result.catch((error: unknown) => error);
+    await flushMicrotasks();
+    scheduler.setClock(62_294);
+    scheduler.timers[1]!.callback();
+    expect(await result).toMatchObject({ code: "OPENAI_TIMEOUT" });
+    expect(log).toHaveBeenCalledExactlyOnceWith("AI_ANALYSIS_RETRY_EXHAUSTED", {
+      attempt: 1, maxAttempts: 2, category: "timeout", durationMs: 60_015, remainingMs: 17_706,
+    });
+    expect(generate).toHaveBeenCalledOnce();
+    expect(wait).not.toHaveBeenCalled();
+    physical.reject(new Error("synthetic late rejection"));
+    await work.drained;
+    expect(generate).toHaveBeenCalledOnce();
+    expect(scheduler.timers.every((timer) => timer.cleared)).toBe(true);
+  });
+
   for (const [totalMs, expected] of [[60_001, "OPENAI_TIMEOUT"], [59_999, "ANALYSIS_TIMEOUT"], [60_000, "ANALYSIS_TIMEOUT"]] as const) {
     it.each(["coordinator-first", "attempt-first"])(`propio 60000, integral ${totalMs}, callbacks retrasados: %s → ${expected}`, async (order) => {
       const scheduler = controlledScheduler();
@@ -204,6 +231,58 @@ describe("arbitraje absoluto compartido de timeouts", () => {
 });
 
 describe("Responses SDK: finalización, cuerpo y exclusión física", () => {
+  it("envía reasoning low en ambos intentos físicos con el SDK real y transporte simulado", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetch = vi.fn<typeof globalThis.fetch>(async (_url, init) => {
+      bodies.push(JSON.parse(init!.body as string));
+      return bodies.length === 1
+        ? new Response('{"error":{"code":"synthetic_unavailable"}}', { status: 503, headers: { "content-type": "application/json" } })
+        : jsonResponse();
+    });
+    const sdk = new OpenAI({ apiKey: "synthetic-test-key", maxRetries: 0, fetch });
+    const service = new DiagnosticAnalysisService(new OpenAiResponsesClient("synthetic-test-key", sdk),
+      "gpt-6.1-sol", 60_000, { reasoningEffort: "low", wait: async () => undefined, log: vi.fn() });
+    await expect(service.analyze(input, [], undefined, Date.now() + 80_000)).resolves.toEqual(output);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(bodies[1]).toEqual(bodies[0]);
+    for (const body of bodies) {
+      expect(body.model).toBe("gpt-6.1-sol");
+      expect(body.reasoning).toEqual({ effort: "low" });
+      expect(body.store).toBe(false);
+      expect(body.text).toMatchObject({ format: { type: "json_schema", strict: true } });
+      expect(Object.keys(body).sort()).toEqual(["model", "reasoning", "instructions", "input", "store", "text"].sort());
+    }
+  });
+
+  it.each([undefined, "", "   "])("omite reasoning para configuración ausente o blanca: %s", async (reasoningEffort) => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const fetch = vi.fn<typeof globalThis.fetch>(async (_url, init) => {
+      bodies.push(JSON.parse(init!.body as string));
+      return jsonResponse();
+    });
+    const sdk = new OpenAI({ apiKey: "synthetic-test-key", maxRetries: 0, fetch });
+    const service = new DiagnosticAnalysisService(new OpenAiResponsesClient("synthetic-test-key", sdk),
+      "gpt-6.1-sol", 60_000, { reasoningEffort: reasoningEffort as never });
+    await expect(service.analyze(input)).resolves.toEqual(output);
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(bodies[0]).not.toHaveProperty("reasoning");
+    expect(Object.keys(bodies[0]!).sort()).toEqual(["model", "instructions", "input", "store", "text"].sort());
+  });
+
+  it("rechaza low incompatible antes del transporte y conserva rechazo incomplete en low", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () => jsonResponse(responseBody("incomplete")));
+    const sdk = new OpenAI({ apiKey: "synthetic-test-key", maxRetries: 0, fetch });
+    const client = new OpenAiResponsesClient("synthetic-test-key", sdk);
+    await expect(client.generate({ model: "gpt-4.1", reasoningEffort: "low", instructions: "synthetic",
+      report: input, timeoutMs: 60_000 } as never)).rejects.toThrow();
+    expect(fetch).not.toHaveBeenCalled();
+    const service = new DiagnosticAnalysisService(client, "gpt-6.1-sol", 60_000, {
+      reasoningEffort: "low", validationLog: vi.fn(), log: vi.fn(),
+    });
+    await expect(service.analyze(input)).rejects.toMatchObject({ code: "OPENAI_RESPONSE_INVALID", validationReason: "INCOMPLETE" });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
   it.each(["integral-first", "attempt-first"])("clasifica el deadline con desfase de 1 ms y orden %s", async (order) => {
     vi.useFakeTimers();
     const physical = deferred<string>();

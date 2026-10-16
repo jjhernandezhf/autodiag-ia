@@ -171,6 +171,12 @@ Los mensajes no incluyen texto del reporte, VIN, datos del cliente, rutas locale
 
 ## Orientación diagnóstica con OpenAI
 
+La evaluación exploratoria de las FASES 3.5A y 3.5B queda cerrada: se mantiene el modelo anterior para el uso actual y se pospone `gpt-6.1-sol`, según el comportamiento manual reportado por el usuario. Los tiempos, su procedencia y limitaciones están documentados en [Evaluación controlada del modelo](docs/evaluacion-gpt-6-1-sol.md#cierre-de-las-fases-35a-y-35b). Las repeticiones rápidas son consistentes con reutilización, no con velocidad de generación; las pocas muestras no demuestran superioridad general.
+
+La selección operativa de `OPENAI_MODEL` pertenece al `.env` privado del backend, no a un cambio de valor predeterminado en el código. Este cierre no lee ni modifica ese archivo ni realiza llamadas reales.
+
+La [FASE 3.5B del protocolo](docs/evaluacion-gpt-6-1-sol.md#fase-35b--preparación-opcional-de-low) añade `OPENAI_REASONING_EFFORT=low` como opción del backend. Ausente o en blanco conserva la petición y huellas anteriores; `low` se separa en la huella y no cambia timeouts ni garantiza resolver demoras.
+
 `POST /api/reports/analyze` es una operación privada separada de la carga y extracción. Requiere `Authorization: Bearer <Supabase access token>` y un encabezado `Idempotency-Key` con un UUID opaco, recibe JSON estructurado y admite observaciones técnicas opcionales del vehículo. No acepta PDF, VIN, odómetro, nombres de archivo, hashes ni identificadores del reporte.
 
 Entrada resumida:
@@ -220,6 +226,7 @@ Variables necesarias:
 
 - `OPENAI_API_KEY`: clave del proyecto configurada solo en el entorno del backend.
 - `OPENAI_MODEL`: modelo compatible con Responses API y Structured Outputs disponible para el proyecto.
+- `OPENAI_REASONING_EFFORT`: opcional; esta evaluación admite solo `low` con `gpt-6.1-sol` o `gpt-5.6-luna`. Ausente/vacío/espacios omite `reasoning` y mantiene el comportamiento anterior. Otros valores o modelos se rechazan al validar la configuración, sin fallback.
 - `OPENAI_TIMEOUT_MS`: timeout por intento, incluido el consumo del cuerpo; el valor predeterminado y máximo efectivo es 60,000 ms, y debe ser menor que el presupuesto total.
 - `ANALYSIS_TOTAL_TIMEOUT_MS`: presupuesto total del procesamiento en el backend; el valor predeterminado y máximo es 80,000 ms. Al agotarse, responde `ANALYSIS_TIMEOUT`; un timeout propio del intento anterior a ese deadline conserva `OPENAI_TIMEOUT`.
 

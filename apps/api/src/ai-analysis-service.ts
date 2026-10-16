@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { resolveOpenAiReasoningEffort, type AnalysisReasoningEffort } from "./analysis-generation.js";
 import { AnalysisCoordinationError, assertAnalysisDeadline, registerAnalysisAttemptTimeout } from "./analysis-coordinator.js";
 
 import {
@@ -89,6 +90,7 @@ export class AiAnalysisError extends Error {
 }
 
 export interface AiAnalysisRequest {
+  reasoningEffort?: AnalysisReasoningEffort;
   model: string;
   instructions: string;
   report: Omit<DiagnosticAnalysisInput, "observations">;
@@ -172,10 +174,12 @@ export class OpenAiResponsesClient implements AiAnalysisClient {
   }
 
   async generate(request: AiAnalysisRequest) {
+    const reasoningEffort = resolveOpenAiReasoningEffort(request.model, request.reasoningEffort);
     try {
       const response = await this.client.responses.create(
         {
           model: request.model,
+          ...(reasoningEffort === undefined ? {} : { reasoning: { effort: reasoningEffort } }),
           instructions: request.instructions,
           input: [
             {
@@ -312,6 +316,7 @@ interface AnalysisRetryLogDetails {
 }
 
 interface DiagnosticAnalysisServiceDependencies {
+  reasoningEffort?: AnalysisReasoningEffort;
   now?: () => number;
   wait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
   log?: (event: "AI_ANALYSIS_RETRY_SCHEDULED" | "AI_ANALYSIS_RETRY_EXHAUSTED", details: AnalysisRetryLogDetails) => void;
@@ -406,6 +411,7 @@ function defaultRetryLog(
 }
 
 export class DiagnosticAnalysisService {
+  private readonly reasoningEffort: AnalysisReasoningEffort | undefined;
   private readonly now: () => number;
   private readonly wait: (delayMs: number, signal?: AbortSignal) => Promise<void>;
   private readonly log: DiagnosticAnalysisServiceDependencies["log"];
@@ -417,6 +423,7 @@ export class DiagnosticAnalysisService {
     private readonly timeoutMs: number,
     dependencies: DiagnosticAnalysisServiceDependencies = {},
   ) {
+    this.reasoningEffort = resolveOpenAiReasoningEffort(model, dependencies.reasoningEffort);
     this.now = dependencies.now ?? Date.now;
     this.wait = dependencies.wait ?? waitForRetry;
     this.log = dependencies.log ?? defaultRetryLog;
@@ -438,6 +445,7 @@ export class DiagnosticAnalysisService {
     const deadline = deadlineAtMs ?? startedAt + this.timeoutMs;
     const requestBase = {
       model: this.model,
+      ...(this.reasoningEffort === undefined ? {} : { reasoningEffort: this.reasoningEffort }),
       instructions: knowledgeContext === undefined
         ? DIAGNOSTIC_INSTRUCTIONS
         : `${DIAGNOSTIC_INSTRUCTIONS}\n${RAG_SAFETY_INSTRUCTIONS}`,
