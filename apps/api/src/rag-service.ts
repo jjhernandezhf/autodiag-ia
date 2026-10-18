@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import { z } from "zod";
 
 import type { DiagnosticAnalysisInput } from "./ai-analysis-types.js";
+import { incompatibleWithVehicle, parseStoredProvenance } from "./rag-provenance.js";
 import {
   RAG_EMBEDDING_DIMENSIONS,
   RAG_SOURCE_EXCERPT_MAX_LENGTH,
@@ -180,8 +181,9 @@ function escapeControlMarkers(value: string) {
 
 export function formatRagEvidence(evidence: RagEvidenceSource[]) {
   if (evidence.length === 0) return undefined;
+  if (evidence.some((source) => source.provenance?.applicability === "incompatible")) return undefined;
   const blocks = evidence.map((source, index) =>
-    `[K${index + 1}]\nTítulo: ${escapeControlMarkers(source.title)}\nReferencia: ${escapeControlMarkers(source.label)}\nContenido:\n${escapeControlMarkers(source.content)}`
+    `[K${index + 1}]\nTítulo: ${escapeControlMarkers(source.title)}\nReferencia: ${escapeControlMarkers(source.label)}\nURL: ${escapeControlMarkers(source.url ?? "desconocida")}\nProcedencia: ${escapeControlMarkers(source.provenance ? JSON.stringify(source.provenance) : "Legacy; conservar etiqueta original; no verificada para el vehículo.")}\nAplicabilidad desconocida: esta evidencia no autoriza procedimientos específicos.\nContenido:\n${escapeControlMarkers(source.content)}`
   );
   return [
     "BEGIN_UNTRUSTED_RETRIEVED_KNOWLEDGE",
@@ -285,6 +287,11 @@ export class RagRetrievalService {
       const title = compactText(row.title);
       const label = compactText(row.source_label);
       const normalizedUrl = row.source_url === null ? undefined : normalizeSafeHttpsUrl(row.source_url);
+      let provenance;
+      try {
+        provenance = parseStoredProvenance(row.metadata, normalizedUrl);
+        if (provenance && incompatibleWithVehicle(provenance, input.vehicle)) continue;
+      } catch { continue; }
       if (
         content.length === 0 || title.length === 0 || label.length === 0 ||
         containsSensitiveText(content, "source_text") ||
@@ -301,6 +308,7 @@ export class RagRetrievalService {
         similarity: row.similarity,
         excerpt: excerpt(content),
         content,
+        ...(provenance === undefined ? {} : { provenance }),
       };
       const bounded = fitEvidenceWithinBudget(evidence, candidate, this.config.maxContextCharacters);
       if (bounded !== undefined) evidence.push(bounded);
@@ -321,6 +329,7 @@ export class RagRetrievalService {
       ...(source.url === undefined ? {} : { url: source.url }),
       similarity: source.similarity,
       excerpt: source.excerpt,
+      ...(source.provenance === undefined ? {} : { provenance: source.provenance }),
     }));
     return { metadata: ragMetadata("used", summary, sources), evidence };
   }

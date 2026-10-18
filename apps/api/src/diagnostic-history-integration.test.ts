@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import request from "supertest";
 import { describe, expect, it, vi } from "vitest";
 
@@ -11,6 +12,7 @@ import {
   type HistoryCaptureContext,
 } from "./diagnostic-history.js";
 import { RagRetrievalService } from "./rag-service.js";
+import { ragProvenanceSchema } from "./rag-provenance.js";
 
 const USER_A = "11111111-1111-4111-8111-111111111111";
 const USER_B = "22222222-2222-4222-8222-222222222222";
@@ -197,6 +199,31 @@ function analyze(app: ReturnType<typeof createApp>, body: unknown = { input, his
 }
 
 describe("integración HTTP del historial", () => {
+  it("conserva alcance en prompt, respuesta y snapshot sin llamadas nuevas al abrir historial", async () => {
+    const provenance = ragProvenanceSchema.parse(JSON.parse(readFileSync(new URL("../../../fixtures/rag-provenance.synthetic.json", import.meta.url), "utf8")));
+    const memory = createMemoryRepository();
+    const createEmbeddings = vi.fn(async () => [Array.from({ length: 1536 }, () => 0)]);
+    const matchKnowledge = vi.fn(async () => [{
+      id: USER_B, title: "Fuente sintética", source_label: "Resumen sintético",
+      source_url: "https://example.test/manual", content: "Evidencia ficticia para probar el transporte.",
+      metadata: { reviewStatus: "approved", provenance: JSON.stringify(provenance) }, similarity: 0.9,
+    }]);
+    const ragService = new RagRetrievalService({ createEmbeddings }, { matchKnowledge },
+      { embeddingModel: "fixture", timeoutMs: 1000, matchCount: 3, matchThreshold: 0.7, maxContextCharacters: 6000 });
+    const generate = vi.fn<(...args: unknown[]) => Promise<string>>(async () => JSON.stringify(output));
+    const { app } = createTestApp(memory.service, generate, { ragEnabled: true, ragService });
+    const response = await analyze(app);
+    expect(response.status).toBe(200);
+    expect(response.body.rag.sources[0].provenance).toEqual(provenance);
+    expect(generate.mock.calls[0]?.[0]).toMatchObject({ knowledgeContext: expect.stringContaining(JSON.stringify(provenance)) });
+    const detail = await request(app).get(`/api/history/${HISTORY_ID}`).set("Authorization", "Bearer user-a-token");
+    expect(detail.status).toBe(200);
+    expect(detail.body.history.snapshot.rag.sources[0].provenance).toEqual(provenance);
+    expect(createEmbeddings).toHaveBeenCalledOnce(); expect(matchKnowledge).toHaveBeenCalledOnce();
+    expect(generate).toHaveBeenCalledOnce(); expect(memory.insert).toHaveBeenCalledOnce();
+    expect(JSON.stringify(response.body.rag)).not.toContain("reviewStatus");
+  });
+
   it("separa default y low del mismo modelo y recupera cada variante tras reiniciar", async () => {
     const memory = createMemoryRepository();
     const make = (reasoningEffort: "low" | undefined) => {

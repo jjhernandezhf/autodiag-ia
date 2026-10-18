@@ -434,6 +434,8 @@ El script valida el corpus con Zod y calcula dos SHA-256: `content_hash` identif
 
 El corpus contiene 16 chunks originales y se identifica honestamente como **AutoDiag IA — Corpus demostrativo interno**. Sirve para demostrar recuperación semántica sobre prácticas generales de diagnóstico; no representa ni sustituye manuales de Autel, Mazda, SAE u otros fabricantes.
 
+La [procedencia y aplicabilidad de fuentes RAG](docs/rag-provenance.md) se conserva en el contexto, fuentes públicas, historial y PDF mediante metadata opcional acotada. Una fuente incompatible se excluye; una de aplicabilidad desconocida no autoriza procedimientos específicos. Los registros legacy mantienen su atribución original, sin promoverse a oficiales. Los [tres candidatos TPMS](docs/conocimiento-candidato/README.md) siguen fuera del corpus activo y bloqueados para ingestión mientras su revisión esté pendiente. Las nuevas reglas se identifican como `analysis_pipeline_v2_rag_provenance` en la huella de análisis, sin cambiar `demonstration_corpus_v1`.
+
 Estados devueltos:
 
 - `used`: se recuperaron y utilizaron fuentes.

@@ -2,6 +2,8 @@
 
 Esta fase prepara instrumentos, no publica una medida de precisión diagnóstica. No ejecuta el parser, embeddings, RPC ni análisis generativo: consume proyecciones saneadas de resultados obtenidos anteriormente. No hay una evaluación real de modelo o RAG en este directorio. Las pruebas unitarias comprueban el evaluador; sus puntuaciones ficticias no son resultados del producto.
 
+El [registro exploratorio Mazda3 2019](exploratorio-mazda3-2019.md) incorpora evidencia parcial reportada por el usuario, separada de los fixtures. No constituye una evaluación técnica del modelo/RAG: conserva como desconocidos el input realmente enviado y los metadatos no capturados, y no fuerza métricas de calidad. Es un caso de desarrollo ya inspeccionado, no una reserva ciega.
+
 ## Capacidades y evidencia disponible
 
 | Etapa implementada | Evidencia disponible | Lo que todavía no demuestra |

@@ -1,0 +1,37 @@
+{
+  "schemaVersion": "quality_cases_v1",
+  "cases": [
+    {
+      "id": "exploratory-mazda3-2019",
+      "split": "development",
+      "origin": {
+        "kind": "authorized_sanitized",
+        "usePermission": "Autorización del usuario para incorporar este resumen anonimizado en el repositorio, sin originales ni datos personales.",
+        "reference": "user-reported-mazda3-exploratory"
+      },
+      "scenario": "Caso exploratorio ya inspeccionado por el usuario. Correspondencia documental reportada de cuatro referencias Autel con cuatro hallazgos JSON, uno por referencia. No es evaluación ciega ni validación de causas.",
+      "observations": "luz de tpms encendido en el tablero.",
+      "expected": {
+        "vehicle": { "make": "Mazda", "model": "Mazda3", "year": 2019 },
+        "dtcs": [
+          { "code": "C1A56:87-0B", "moduleCode": "BCM", "moduleName": "Body Control Module", "status": "current" },
+          { "code": "C1A58:87-0B", "moduleCode": "BCM", "moduleName": "Body Control Module", "status": "current" },
+          { "code": "C1A60:87-0B", "moduleCode": "BCM", "moduleName": "Body Control Module", "status": "current" },
+          { "code": "C1A62:87-0B", "moduleCode": "BCM", "moduleName": "Body Control Module", "status": "current" }
+        ],
+        "actionableDtcs": [
+          { "code": "C1A56:87-0B", "moduleCode": "BCM", "moduleName": "Body Control Module" },
+          { "code": "C1A58:87-0B", "moduleCode": "BCM", "moduleName": "Body Control Module" },
+          { "code": "C1A60:87-0B", "moduleCode": "BCM", "moduleName": "Body Control Module" },
+          { "code": "C1A62:87-0B", "moduleCode": "BCM", "moduleName": "Body Control Module" }
+        ],
+        "extractionDisposition": null,
+        "sources": null,
+        "sourceLabelsExhaustive": false,
+        "withoutEvidence": "acknowledge_limits"
+      },
+      "humanReview": "pending",
+      "versions": null
+    }
+  ]
+}

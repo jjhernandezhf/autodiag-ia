@@ -1,0 +1,61 @@
+{
+  "schemaVersion": "knowledge_incorporation_proposal_v1",
+  "status": "proposal_not_approved_not_ingested",
+  "proposedCorpusVersion": "demonstration_corpus_v2_mazda3_2019_tpms",
+  "proposedTotalChunks": 19,
+  "experimentalUseAcceptance": {
+    "acceptedOn": "2026-10-17",
+    "statement": "Revisé los resúmenes y acepto su uso experimental como información para el propietario.",
+    "scope": "Registrar esta decisión y preparar localmente la incorporación de los tres resúmenes; no activar ni ingerir.",
+    "doesNotEstablish": ["professional_technical_review", "manufacturer_license", "vehicle_compatibility"],
+    "doesNotAuthorize": ["paid_calls", "external_ingestion"]
+  },
+  "admissionDecision": "pending_requirements",
+  "sourceVerification": {
+    "consultedOn": "2026-10-17",
+    "documentTitle": "2019 Mazda3 Owner's Manual",
+    "originalLanguage": "en",
+    "summaryLanguage": "es",
+    "method": "direct_official_page_read_by_assistant_not_human_technical_review"
+  },
+  "humanTechnicalReview": null,
+  "usagePermissionReview": null,
+  "chunks": [
+    {
+      "sourceId": "mazda-usa-mazda3-2019-tpms",
+      "chunkIndex": 0,
+      "title": "TPMS Mazda3 2019: funcionamiento y límites según manual Mazda USA",
+      "sourceLabel": "AutoDiag IA — resumen propio del manual de propietario Mazda USA; aplicabilidad desconocida",
+      "sourceUrl": "https://www.mazdausa.com/static/manuals/2019/mazda3/contents/05120200.html",
+      "content": "Uso experimental de información para el propietario, sin validación técnica profesional. Alcance: manual Mazda USA para Mazda3 2019; aplicabilidad desconocida al vehículo. Sin interpretación de DTC ni procedimientos de reparación. El TPMS recibe por radio datos de sensores en las ruedas. No sustituye la inspección periódica ni registra instantáneamente una pérdida rápida de presión.",
+      "metadata": {
+        "reviewStatus": "pending_technical_review",
+        "provenance": "{\"version\":\"rag_provenance_v1\",\"origin\":\"official_documentation\",\"publisher\":\"Mazda USA\",\"documentType\":\"owner_manual\",\"section\":\"Tire Pressure Monitoring System (TPMS): introduction, note and caution\",\"make\":\"Mazda\",\"model\":\"Mazda3\",\"year\":2019,\"publicationMarket\":\"USA\",\"vehicleMarket\":null,\"applicability\":\"unknown\",\"limitations\":\"Uso experimental de información para el propietario, sin validación técnica profesional. Sin interpretación de DTC ni procedimientos de reparación. Mercado y equipamiento del vehículo sin confirmar; no generalizar ni confirmar causas.\",\"derivation\":\"summary\"}"
+      }
+    },
+    {
+      "sourceId": "mazda-usa-mazda3-2019-tpms",
+      "chunkIndex": 1,
+      "title": "TPMS Mazda3 2019: advertencia de presión y anomalía según manual Mazda USA",
+      "sourceLabel": "AutoDiag IA — resumen propio del manual de propietario Mazda USA; aplicabilidad desconocida",
+      "sourceUrl": "https://www.mazdausa.com/static/manuals/2019/mazda3/contents/05120200.html",
+      "content": "Uso experimental de información para el propietario, sin validación técnica profesional. Alcance: manual Mazda USA para Mazda3 2019; aplicabilidad desconocida al vehículo. Sin interpretación de DTC ni procedimientos de reparación. La luz encendida puede indicar presión baja. Una anomalía produce aproximadamente un minuto de parpadeo y después luz fija; el sistema podría no advertir presión baja correctamente.",
+      "metadata": {
+        "reviewStatus": "pending_technical_review",
+        "provenance": "{\"version\":\"rag_provenance_v1\",\"origin\":\"official_documentation\",\"publisher\":\"Mazda USA\",\"documentType\":\"owner_manual\",\"section\":\"TPMS: caution; If there is a problem; When a tire pressure decreases\",\"make\":\"Mazda\",\"model\":\"Mazda3\",\"year\":2019,\"publicationMarket\":\"USA\",\"vehicleMarket\":null,\"applicability\":\"unknown\",\"limitations\":\"Uso experimental de información para el propietario, sin validación técnica profesional. Sin interpretación de DTC ni procedimientos de reparación. Mercado y equipamiento sin confirmar. Una luz fija aislada no acredita la secuencia previa ni identifica causas.\",\"derivation\":\"summary\"}"
+      }
+    },
+    {
+      "sourceId": "mazda-usa-mazda3-2019-tpms",
+      "chunkIndex": 2,
+      "title": "TPMS Mazda3 2019: identificación de sensores según manual Mazda USA",
+      "sourceLabel": "AutoDiag IA — resumen propio del manual de propietario Mazda USA; aplicabilidad desconocida",
+      "sourceUrl": "https://www.mazdausa.com/static/manuals/2019/mazda3/contents/05120200.html",
+      "content": "Uso experimental de información para el propietario, sin validación técnica profesional. Alcance: manual Mazda USA para Mazda3 2019; aplicabilidad desconocida al vehículo. Sin interpretación de DTC ni procedimientos de reparación. Los sensores tienen identificadores únicos registrados en el sistema. El manual contempla registro al cambiar neumáticos o ruedas y al instalar un sensor nuevo. Este resumen omite los pasos operativos.",
+      "metadata": {
+        "reviewStatus": "pending_technical_review",
+        "provenance": "{\"version\":\"rag_provenance_v1\",\"origin\":\"official_documentation\",\"publisher\":\"Mazda USA\",\"documentType\":\"owner_manual\",\"section\":\"Tires and Wheels: When changing tires and wheels; When replacing tires and wheels\",\"make\":\"Mazda\",\"model\":\"Mazda3\",\"year\":2019,\"publicationMarket\":\"USA\",\"vehicleMarket\":null,\"applicability\":\"unknown\",\"limitations\":\"Uso experimental de información para el propietario, sin validación técnica profesional. Sin interpretación de DTC ni procedimientos de reparación o registro. Mercado y equipamiento sin confirmar. No prescribe recambio, frecuencias o compatibilidad de piezas.\",\"derivation\":\"summary\"}"
+      }
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { normalizeSafeHttpsUrl } from "./sensitive-data.js";
+import { ragProvenanceSchema } from "./rag-provenance.js";
 
 export const RAG_EMBEDDING_DIMENSIONS = 1_536;
 export const RAG_SOURCE_EXCERPT_MAX_LENGTH = 320;
@@ -21,8 +22,13 @@ export const ragSourceSchema = z
     url: z.string().url().refine((value) => normalizeSafeHttpsUrl(value) !== undefined).optional(),
     similarity: z.number().finite().min(0).max(1),
     excerpt: z.string().trim().min(1).max(RAG_SOURCE_EXCERPT_MAX_LENGTH),
+    provenance: ragProvenanceSchema.optional(),
   })
-  .strict();
+  .strict().superRefine((source, context) => {
+    if (source.provenance?.origin === "official_documentation" && (!source.provenance.publisher || !source.url)) {
+      context.addIssue({ code: "custom", message: "Official provenance requires publisher and HTTPS URL" });
+    }
+  });
 
 export const ragMetadataSchema = z
   .object({
