@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   buildReportExportModel,
+  containsSensitiveReportText,
   createReportFilename,
   downloadReportPdf,
   renderReportPdf,
@@ -15,6 +16,7 @@ import {
   validateReportExportModel,
   type ReportExportSource,
 } from "./report-pdf";
+import { isRagProvenance, describeRagProvenance } from "./rag-provenance";
 
 const logo = new Uint8Array(readFileSync(resolve(process.cwd(), "src/assets/autodiag-ia-logo.png")));
 
@@ -113,6 +115,30 @@ function createSource(status: "not_provided" | "no_clear_match" | "matches_found
 function pdfText(bytes: Uint8Array) {
   return new TextDecoder("latin1").decode(bytes);
 }
+
+describe("procedencia y límites del PDF", () => {
+  const provenance: unknown = JSON.parse(readFileSync(resolve(process.cwd(), "../../fixtures/rag-provenance.synthetic.json"), "utf8"));
+  it("conserva el contrato compartido y renderiza límites sin convertir publicación en compatibilidad", () => {
+    if (!isRagProvenance(provenance, (text) => containsSensitiveReportText(text, "source_text"))) throw new Error("Invalid fixture");
+    const source = createSource();
+    source.rag.sources[0]!.url = "https://example.test/manual";
+    source.rag.sources[0]!.provenance = { ...provenance, limitations: "SYNTHETIC_SCOPE_LIMIT" };
+    const model = buildReportExportModel(source);
+    expect(model.rag.sources[0]!.provenance).toEqual(source.rag.sources[0]!.provenance);
+    expect(pdfText(renderReportPdf(model, new Date(2026, 9, 16), logo))).toContain("SYNTHETIC_SCOPE_LIMIT");
+    expect(describeRagProvenance(provenance)).toContain("mercado del vehículo: desconocido");
+    expect(describeRagProvenance()).toContain("legacy");
+  });
+
+  it.each([
+    { limitations: "x".repeat(501) }, { section: "Contacto 55551234" }, { vehicleMarket: "Inventado" },
+    { extra: true }, { applicability: "compatible" }, { year: 2025.5 },
+  ])("rechaza metadata malformada o contaminada en la frontera PDF: %o", (override) => {
+    const source = createSource();
+    Object.assign(source.rag.sources[0]!, { url: "https://example.test/manual", provenance: { ...(provenance as object), ...override } });
+    expect(() => buildReportExportModel(source)).toThrow(ReportPdfValidationError);
+  });
+});
 
 describe("recurso gráfico oficial", () => {
   it("conserva el PNG horizontal de alta resolución, transparencia y solo bloques necesarios", () => {

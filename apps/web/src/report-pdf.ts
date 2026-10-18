@@ -1,4 +1,5 @@
 import { jsPDF } from "jspdf";
+import { describeRagProvenance, isRagProvenance, type RagProvenance } from "./rag-provenance";
 
 export type ReportPriority = "critical" | "high" | "medium" | "low";
 export type ReportConfidence = "high" | "medium" | "low";
@@ -69,6 +70,7 @@ export interface ReportExportSource {
       url?: string;
       similarity: number;
       excerpt: string;
+      provenance?: RagProvenance;
     }>;
   };
   submittedObservations: string;
@@ -135,6 +137,7 @@ export interface ReportExportModel {
       url: string | null;
       similarity: number;
       excerpt: string;
+      provenance?: RagProvenance;
     }>;
   };
 }
@@ -424,7 +427,11 @@ export function validateReportExportModel(model: ReportExportModel): void {
     throw new ReportPdfValidationError();
   }
   model.rag.sources.forEach((source) => {
-    assertOnlyKeys(source, ["id", "title", "label", "url", "similarity", "excerpt"]);
+    assertOnlyKeys(source, ["id", "title", "label", "url", "similarity", "excerpt", ...("provenance" in source ? ["provenance"] : [])]);
+    if (source.provenance !== undefined && (!isRagProvenance(source.provenance, (text) => containsSensitiveReportText(text, "source_text"))
+      || (source.provenance.origin === "official_documentation" && (!source.provenance.publisher || !source.url)))) {
+      throw new ReportPdfValidationError();
+    }
     let validUrl = source.url === null;
     if (typeof source.url === "string") {
       try {
@@ -536,6 +543,7 @@ export function buildReportExportModel(source: ReportExportSource): ReportExport
         url: ragSource.url ?? null,
         similarity: ragSource.similarity,
         excerpt: ragSource.excerpt,
+        ...(ragSource.provenance === undefined ? {} : { provenance: { ...ragSource.provenance } }),
       })),
     },
   };
@@ -816,6 +824,7 @@ export function renderReportPdf(model: ReportExportModel, generatedAt: Date, log
         bold: true,
       });
       paragraph(source.label, { fontSize: 8.5 });
+      paragraph(describeRagProvenance(source.provenance), { fontSize: 8.5 });
       paragraph(source.excerpt, { fontSize: 8.5 });
       if (source.url !== null) paragraph(source.url, { color: COLORS.gray, fontSize: 8 });
     }

@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "quality_results_v1",
+  "runs": [
+    {
+      "id": "exploratory-mazda3-2019-run-a",
+      "caseId": "exploratory-mazda3-2019",
+      "origin": "recorded",
+      "versions": {
+        "parser": null,
+        "corpus": null,
+        "prompt": null,
+        "outputSchema": null,
+        "analysisModel": null,
+        "embeddingModel": null,
+        "reasoningEffort": null,
+        "ragEnabled": null,
+        "matchCount": null,
+        "matchThreshold": null,
+        "contextCharacters": null,
+        "attemptTimeoutMs": null,
+        "totalTimeoutMs": null
+      },
+      "responseOrigin": "unknown",
+      "responseOriginEvidence": null,
+      "httpStatus": 200,
+      "errorCode": null,
+      "durationMs": 16570,
+      "extraction": null,
+      "analysisAvailable": null,
+      "analysisInputDtcs": null,
+      "retrievedSources": null,
+      "ragStatus": null,
+      "human": null
+    }
+  ]
+}

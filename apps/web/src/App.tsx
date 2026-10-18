@@ -1,5 +1,6 @@
 import { type ChangeEvent, type DragEvent, type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import autodiagLogoUrl from "./assets/autodiag-ia-logo.png";
+import { describeRagProvenance, isRagProvenance } from "./rag-provenance";
 import {
   API_UNAVAILABLE_MESSAGE,
   ApiRequestError,
@@ -108,6 +109,7 @@ interface RagSource {
   url?: string;
   similarity: number;
   excerpt: string;
+  provenance?: import("./rag-provenance").RagProvenance;
 }
 
 interface RagMetadata {
@@ -364,7 +366,9 @@ function hasOnlyKeys(value: object, allowed: readonly string[]) {
 function isRagSource(value: unknown): value is RagSource {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<RagSource>;
-  if (!hasOnlyKeys(candidate, ["id", "title", "label", "url", "similarity", "excerpt"])) return false;
+  if (!hasOnlyKeys(candidate, ["id", "title", "label", "url", "similarity", "excerpt", "provenance"])) return false;
+  if (candidate.provenance !== undefined && (!isRagProvenance(candidate.provenance, (text) => containsSensitiveReportText(text, "source_text"))
+    || (candidate.provenance.origin === "official_documentation" && (!candidate.provenance.publisher || !candidate.url)))) return false;
   const validUrl = candidate.url === undefined || (
     typeof candidate.url === "string" && isSafeRagSourceUrl(candidate.url)
   );
@@ -890,6 +894,7 @@ function RagEvidence({ rag }: { rag: RagMetadata }) {
                   <span>Similitud {(source.similarity * 100).toFixed(0)}%</span>
                 </div>
                 <p className="rag-source-label">{source.label}</p>
+                <p>{describeRagProvenance(source.provenance)}</p>
                 <p>{source.excerpt}</p>
                 {source.url && <a href={source.url} target="_blank" rel="noreferrer">Consultar fuente HTTPS</a>}
               </li>
@@ -1125,6 +1130,7 @@ function createReportExportSource(
         ...(source.url === undefined ? {} : { url: source.url }),
         similarity: source.similarity,
         excerpt: source.excerpt,
+        ...(source.provenance === undefined ? {} : { provenance: { ...source.provenance } }),
       })),
     },
     submittedObservations,
@@ -1834,6 +1840,7 @@ function ReportWorkspace({
             ...(source.url === undefined ? {} : { url: source.url }),
             similarity: source.similarity,
             excerpt: source.excerpt,
+            ...(source.provenance === undefined ? {} : { provenance: { ...source.provenance } }),
           })),
         },
         submittedObservations,

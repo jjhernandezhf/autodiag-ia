@@ -149,9 +149,13 @@ describe("recuperación pgvector", () => {
     );
     const result = await service.retrieve(input);
     expect(result.metadata.status).toBe("used");
-    expect(result.metadata.sources.map((source) => source.title)).toEqual(["Fuente principal", "Fuente secundaria"]);
+    // The immutable scope header consumes budget too; a source is never shown without it.
+    expect(result.metadata.sources.map((source) => source.title)).toEqual(["Fuente principal"]);
     expect(result.metadata.sources[0]?.url).toBe("https://example.test/fuente");
-    expect(result.metadata.sources[1]).not.toHaveProperty("url");
+    const roomy = await new RagRetrievalService({ createEmbeddings: async () => [vector] },
+      { matchKnowledge: async () => rows }, { ...config, maxContextCharacters: 2000 }).retrieve(input);
+    expect(roomy.metadata.sources.map((source) => source.title)).toEqual(["Fuente principal", "Fuente secundaria"]);
+    expect(roomy.metadata.sources[1]).not.toHaveProperty("url");
     const knowledgeContext = formatRagEvidence(result.evidence);
     expect(knowledgeContext).toBeDefined();
     expect(knowledgeContext!.length).toBeLessThanOrEqual(config.maxContextCharacters);
@@ -206,8 +210,10 @@ describe("recuperación pgvector", () => {
     );
     const result = await service.retrieve(input);
     const knowledgeContext = formatRagEvidence(result.evidence);
-    expect(knowledgeContext).toBeDefined();
-    expect(knowledgeContext!.length).toBeLessThanOrEqual(config.maxContextCharacters);
+    // Long title + label + mandatory scope cannot fit 500: drop, never remove scope.
+    expect(knowledgeContext).toBeUndefined();
+    expect(result.metadata.status).toBe("no_matches");
+    expect(result.metadata.sources).toEqual([]);
     expect(result.metadata.sources).toHaveLength(result.evidence.length);
   });
 

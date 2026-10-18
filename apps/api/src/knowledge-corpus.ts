@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { containsSensitiveValue, normalizeSafeHttpsUrl } from "./sensitive-data.js";
+import { parseStoredProvenance } from "./rag-provenance.js";
 
 export const DEMO_SOURCE_LABEL = "AutoDiag IA — Corpus demostrativo interno";
 export const KNOWLEDGE_CORPUS_VERSION = "demonstration_corpus_v1";
@@ -154,6 +155,7 @@ export function validateKnowledgeCorpus(value: unknown): KnowledgeChunk[] {
   const chunks = z.array(knowledgeChunkSchema).min(12).max(20).parse(value);
   const identities = chunks.map((chunk) => `${chunk.sourceId}:${chunk.chunkIndex}`);
   if (new Set(identities).size !== identities.length) throw new Error("El corpus contiene chunks duplicados.");
+  for (const chunk of chunks) parseStoredProvenance(chunk.metadata, chunk.sourceUrl);
   if (chunks.some((chunk) => containsSensitiveValue({
     sourceId: chunk.sourceId,
     title: chunk.title,

@@ -171,6 +171,8 @@ Los mensajes no incluyen texto del reporte, VIN, datos del cliente, rutas locale
 
 ## Orientación diagnóstica con OpenAI
 
+La [base de evaluación de calidad (FASE 3.7A)](docs/evaluacion-calidad/README.md) separa extracción, recuperación RAG, análisis y fiabilidad/latencia. Incluye un evaluador desconectado de resultados previamente obtenidos y casos sintéticos para probarlo; sus pruebas no demuestran precisión diagnóstica. Etiquetas o mediciones ausentes se informan como no evaluables, sin umbrales de aceptación inventados.
+
 La evaluación exploratoria de las FASES 3.5A y 3.5B queda cerrada: se mantiene el modelo anterior para el uso actual y se pospone `gpt-6.1-sol`, según el comportamiento manual reportado por el usuario. Los tiempos, su procedencia y limitaciones están documentados en [Evaluación controlada del modelo](docs/evaluacion-gpt-6-1-sol.md#cierre-de-las-fases-35a-y-35b). Las repeticiones rápidas son consistentes con reutilización, no con velocidad de generación; las pocas muestras no demuestran superioridad general.
 
 La selección operativa de `OPENAI_MODEL` pertenece al `.env` privado del backend, no a un cambio de valor predeterminado en el código. Este cierre no lee ni modifica ese archivo ni realiza llamadas reales.
@@ -431,6 +433,8 @@ Esta fase no aplica la migración ni ejecuta una ingesta real. Antes de activarl
 El script valida el corpus con Zod y calcula dos SHA-256: `content_hash` identifica el contenido y `record_hash` cubre canónicamente todos los campos persistidos, con metadata ordenada de forma estable. La comparación de `record_hash` hace el upsert idempotente por `(source_id, chunk_index)` y vuelve a generar el embedding cuando cambia cualquier campo real. Su salida contiene solo cantidades de leídos, válidos, insertados, actualizados y omitidos; no imprime claves ni contenido completo.
 
 El corpus contiene 16 chunks originales y se identifica honestamente como **AutoDiag IA — Corpus demostrativo interno**. Sirve para demostrar recuperación semántica sobre prácticas generales de diagnóstico; no representa ni sustituye manuales de Autel, Mazda, SAE u otros fabricantes.
+
+La [procedencia y aplicabilidad de fuentes RAG](docs/rag-provenance.md) se conserva en el contexto, fuentes públicas, historial y PDF mediante metadata opcional acotada. Una fuente incompatible se excluye; una de aplicabilidad desconocida no autoriza procedimientos específicos. Los registros legacy mantienen su atribución original, sin promoverse a oficiales. Los [tres candidatos TPMS](docs/conocimiento-candidato/README.md) siguen fuera del corpus activo y bloqueados para ingestión mientras su revisión esté pendiente. Las nuevas reglas se identifican como `analysis_pipeline_v2_rag_provenance` en la huella de análisis, sin cambiar `demonstration_corpus_v1`.
 
 Estados devueltos:
 

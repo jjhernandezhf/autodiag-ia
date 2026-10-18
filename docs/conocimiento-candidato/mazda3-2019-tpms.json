@@ -1,0 +1,68 @@
+{
+  "schemaVersion": "knowledge_candidates_v1",
+  "candidateSetVersion": "mazda3_2019_usa_tpms_candidates_v1",
+  "status": "candidate_not_ingested",
+  "ingestibleCorpusVersionAtPreparation": "demonstration_corpus_v1",
+  "chunks": [
+    {
+      "sourceId": "mazda-usa-mazda3-2019-tpms",
+      "chunkIndex": 0,
+      "title": "TPMS Mazda3 2019 USA: funcionamiento y límites",
+      "sourceLabel": "AutoDiag IA — resumen propio basado en documentación oficial Mazda USA; aplicabilidad pendiente",
+      "sourceUrl": "https://www.mazdausa.com/static/manuals/2019/mazda3/contents/05120200.html",
+      "content": "Alcance: manual Mazda USA, Mazda3 2019; mercado y equipamiento del caso sin confirmar. Resumen propio: sensores en las ruedas transmiten presión por radio. El TPMS no sustituye inspecciones y no detecta inmediatamente una pérdida rápida.",
+      "metadata": {
+        "publisher": "Mazda USA",
+        "documentTitle": "2019 Mazda3 Owner's Manual",
+        "section": "Tire Pressure Monitoring System (TPMS)",
+        "sourceModel": "Mazda3", "sourceModelYear": 2019, "publicationMarket": "USA",
+        "originalLanguage": "en", "summaryLanguage": "es", "consultedOn": "2026-10-16",
+        "derivation": "paraphrase_not_manufacturer_literal",
+        "reviewStatus": "pending_technical_review",
+        "applicabilityStatus": "case_market_and_equipment_unverified",
+        "scope": "Documentación de propietario Mazda USA del modelo/año indicado, no manual de reparación.",
+        "limitations": "No confirma aplicabilidad al vehículo, causas ni significados de DTC; no generalizar a otros mercados o modelos."
+      }
+    },
+    {
+      "sourceId": "mazda-usa-mazda3-2019-tpms",
+      "chunkIndex": 1,
+      "title": "TPMS Mazda3 2019 USA: presión y funcionamiento anómalo",
+      "sourceLabel": "AutoDiag IA — resumen propio basado en documentación oficial Mazda USA; aplicabilidad pendiente",
+      "sourceUrl": "https://www.mazdausa.com/static/manuals/2019/mazda3/contents/05120200.html",
+      "content": "Alcance: manual Mazda USA, Mazda3 2019; aplicabilidad al caso pendiente. Resumen propio: una luz encendida puede indicar baja presión; un parpadeo inicial de aproximadamente un minuto seguido de luz fija señala funcionamiento anómalo. El sistema podría dejar de advertir baja presión.",
+      "metadata": {
+        "publisher": "Mazda USA",
+        "documentTitle": "2019 Mazda3 Owner's Manual",
+        "section": "Tire Pressure Monitoring System (TPMS): caution; If there is a problem; When a tire pressure decreases",
+        "sourceModel": "Mazda3", "sourceModelYear": 2019, "publicationMarket": "USA",
+        "originalLanguage": "en", "summaryLanguage": "es", "consultedOn": "2026-10-16",
+        "derivation": "paraphrase_not_manufacturer_literal",
+        "reviewStatus": "pending_technical_review",
+        "applicabilityStatus": "case_market_and_equipment_unverified",
+        "scope": "Documentación de propietario Mazda USA del modelo/año indicado, no manual de reparación.",
+        "limitations": "La secuencia temporal importa: una luz fija aislada no descarta un parpadeo previo. No identifica una causa ni interpreta DTC."
+      }
+    },
+    {
+      "sourceId": "mazda-usa-mazda3-2019-tpms",
+      "chunkIndex": 2,
+      "title": "TPMS Mazda3 2019 USA: sensores e identificación",
+      "sourceLabel": "AutoDiag IA — resumen propio basado en documentación oficial Mazda USA; aplicabilidad pendiente",
+      "sourceUrl": "https://www.mazdausa.com/static/manuals/2019/mazda3/contents/05120200.html",
+      "content": "Alcance: manual Mazda USA, Mazda3 2019; equipamiento del caso sin confirmar. Resumen propio: cada sensor posee un identificador que debe registrarse en el sistema. El manual contempla el registro al cambiar ruedas o instalar sensores nuevos. No aporta aquí interpretación de DTC.",
+      "metadata": {
+        "publisher": "Mazda USA",
+        "documentTitle": "2019 Mazda3 Owner's Manual",
+        "section": "Tires and Wheels: When changing tires and wheels; When replacing tires and wheels",
+        "sourceModel": "Mazda3", "sourceModelYear": 2019, "publicationMarket": "USA",
+        "originalLanguage": "en", "summaryLanguage": "es", "consultedOn": "2026-10-16",
+        "derivation": "paraphrase_not_manufacturer_literal",
+        "reviewStatus": "pending_technical_review",
+        "applicabilityStatus": "case_market_and_equipment_unverified",
+        "scope": "Documentación de propietario Mazda USA del modelo/año indicado, no manual de reparación.",
+        "limitations": "No prescribe reparación, recambio, frecuencia, compatibilidad de piezas ni procedimiento para este vehículo. Verificar documentación aplicable antes de intervenir."
+      }
+    }
+  ]
+}

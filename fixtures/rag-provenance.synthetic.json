@@ -1,0 +1,15 @@
+{
+  "version": "rag_provenance_v1",
+  "origin": "official_documentation",
+  "publisher": "Editor ficticio para pruebas",
+  "documentType": "owner_manual",
+  "section": "Sección sintética",
+  "make": null,
+  "model": null,
+  "year": null,
+  "publicationMarket": "Mercado de publicación ficticio",
+  "vehicleMarket": null,
+  "applicability": "unknown",
+  "limitations": "Fixture, no evidencia técnica real. Equipamiento y mercado del vehículo sin comprobar.",
+  "derivation": "summary"
+}

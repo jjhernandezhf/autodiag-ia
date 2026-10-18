@@ -1256,12 +1256,15 @@ describe("evidencia RAG visible y segura", () => {
   };
 
   it("renderiza fuentes y las elimina al seleccionar otro reporte", async () => {
+    const provenance = JSON.parse(readFileSync(resolve(process.cwd(), "../../fixtures/rag-provenance.synthetic.json"), "utf8"));
+    const scopedRag = { ...usedRag, sources: [{ ...usedRag.sources[0]!, provenance }] };
+    downloadReportPdfMock.mockResolvedValue("informe_sintetico.pdf");
     const first = createPdf("primero.pdf");
     const second = createPdf("segundo.pdf");
     const fetchMock = vi
       .fn<typeof fetch>()
       .mockResolvedValueOnce(readyAnalysisUpload(first))
-      .mockResolvedValueOnce(successfulAnalysis(undefined, usedRag));
+      .mockResolvedValueOnce(successfulAnalysis(undefined, scopedRag));
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
     const { container } = await renderAuthenticatedApp();
@@ -1273,6 +1276,11 @@ describe("evidencia RAG visible y segura", () => {
 
     expect(await screen.findByRole("heading", { name: "Evidencia recuperada por RAG" })).toBeTruthy();
     expect(screen.getByText("1 fuente")).toBeTruthy();
+    expect(screen.getByText(/mercado del vehículo: desconocido/u)).toBeTruthy();
+    expect(screen.getByText(/Equipamiento y mercado del vehículo sin comprobar/u)).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Descargar informe PDF" }));
+    expect(downloadReportPdfMock.mock.calls[0]?.[0].rag.sources[0]?.provenance).toEqual(provenance);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(screen.getByText(/Comprobación de alimentación y tierra/u)).toBeTruthy();
     expect(screen.getByRole("link", { name: "Consultar fuente HTTPS" }).getAttribute("href"))
       .toBe("https://example.test/conocimiento");
@@ -1380,12 +1388,17 @@ describe("historial seguro de diagnósticos", () => {
     ]);
   });
 
-  it("lista, abre y exporta un diagnóstico histórico sin repetir análisis ni solicitudes", async () => {
+  it.each([false, true])("lista, abre y exporta historial sin solicitudes nuevas (procedencia: %s)", async (scoped) => {
+    const provenance = JSON.parse(readFileSync(resolve(process.cwd(), "../../fixtures/rag-provenance.synthetic.json"), "utf8"));
     const authenticatedFetch = vi.fn<BrowserAuthenticationService["authenticatedFetch"]>(async (input, init) => {
       const url = String(input);
       expect(init?.method).toBeUndefined();
       if (url === "/api/history?limit=20") return historyListResponse();
-      if (url === `/api/history/${HISTORY_ID}`) return historyDetailResponse();
+      if (url === `/api/history/${HISTORY_ID}`) {
+        const detail = await historyDetailResponse().json();
+        if (scoped) detail.history.snapshot.rag.sources[0].provenance = provenance;
+        return createJsonResponse(true, detail);
+      }
       throw new Error(`Solicitud inesperada: ${url}`);
     });
     downloadReportPdfMock.mockResolvedValue("AutoDiagIA_Informe_historico.pdf");
@@ -1413,6 +1426,7 @@ describe("historial seguro de diagnósticos", () => {
     ]);
     expect(authenticatedFetch.mock.calls.some(([url]) => String(url).includes("/api/reports/analyze"))).toBe(false);
     const exported = downloadReportPdfMock.mock.calls[0]?.[0];
+    expect(exported?.rag.sources[0]?.provenance).toEqual(scoped ? provenance : undefined);
     expect(exported?.vehicle.odometer).toEqual({ value: 45678, unit: "km" });
     expect(JSON.stringify(exported)).not.toMatch(/vin|reportReference|analysisModel|embeddingModel/iu);
   });
