@@ -168,7 +168,6 @@ function responseIsAvailable(response: Response) {
 export function createApp(options: AppOptions) {
   const maxFileSizeBytes = options.maxFileSizeBytes ?? DEFAULT_MAX_FILE_SIZE_BYTES;
   const pdfExtractionLimits = resolvePdfExtractionLimits(options.pdfExtractionLimits);
-  const pageExtractor = options.extractPdfPages ?? ((buffer: Buffer) => extractPdfPages(buffer, pdfExtractionLimits));
   const openAiApiKey = options.openAiApiKey?.trim();
   const openAiModel = options.openAiModel?.trim();
   const openAiReasoningEffort = resolveOpenAiReasoningEffort(openAiModel, options.openAiReasoningEffort);
@@ -306,7 +305,19 @@ export function createApp(options: AppOptions) {
       return;
     }
 
-    const extraction = await extractAutelReport(file.buffer, options.vinHmacSecret, pageExtractor);
+    const extractionAbort = new AbortController();
+    const cancelExtraction = () => { if (!response.writableEnded) extractionAbort.abort(); };
+    request.once("aborted", cancelExtraction);
+    response.once("close", cancelExtraction);
+    let extraction;
+    try {
+      const pageExtractor = options.extractPdfPages ?? ((buffer: Buffer) => extractPdfPages(buffer, pdfExtractionLimits,
+        { signal: extractionAbort.signal, maxFileSizeBytes }));
+      extraction = await extractAutelReport(file.buffer, options.vinHmacSecret, pageExtractor);
+    } finally {
+      request.removeListener("aborted", cancelExtraction);
+      response.removeListener("close", cancelExtraction);
+    }
     const analysisPreparation = prepareAiAnalysis(extraction);
 
     response.status(201).json({

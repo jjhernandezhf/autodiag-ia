@@ -1,6 +1,8 @@
 # AutoDiag IA
 
-AutoDiag IA recibe reportes Autel PDF, valida el archivo y extrae información estructurada del vehículo, sistemas escaneados y códigos DTC sin almacenamiento permanente.
+AutoDiag IA recibe reportes Autel PDF, valida el archivo y extrae información estructurada del vehículo, sistemas escaneados y códigos DTC. El PDF y texto bruto son temporales; el historial configurado conserva únicamente snapshots estructurados y sanitizados.
+
+La [guía de entrega y operación](docs/entrega.md) reúne arranque compilado, topología frontend/API, guía de usuario, demostración, migraciones y evidencia con sus límites.
 
 ## Aplicaciones
 
@@ -11,6 +13,7 @@ AutoDiag IA recibe reportes Autel PDF, valida el archivo y extrae información e
 
 - Node.js `^20.19.0 || >=22.12.0`.
 - npm 10 o superior.
+- Entorno comprobado para la entrega: Node **24.16.0**, npm **11.13.0**. El rango declarado no demuestra compatibilidad probada en todas esas versiones; véase [la limitación preexistente de Node 20](docs/seguridad-dependencias-3.6a.md).
 - Reportes Autel con texto digital. Los PDFs compuestos únicamente por imágenes no son compatibles porque esta iteración no usa OCR.
 
 ## Configuración segura
@@ -35,7 +38,7 @@ Guarda el valor generado exclusivamente en el `.env` local. Las variables numér
 ## Instalación y desarrollo
 
 ```bash
-npm install
+npm ci --no-fund
 npm run dev
 ```
 
@@ -48,7 +51,7 @@ npm run dev --workspace @autodiag/api
 npm run dev --workspace @autodiag/web
 ```
 
-La sesión autenticada se restaura dentro de la pestaña, pero los PDF, extracciones, observaciones, análisis y archivos generados continúan siendo temporales y se eliminan al abandonar el workspace o recargar la aplicación.
+La sesión autenticada se restaura dentro de la pestaña. El PDF original y el trabajo no guardado son temporales y se limpian al abandonar el workspace o recargar. Cuando el análisis informa `history.status = "saved"`, sus snapshots sanitizados permanecen en el historial del usuario; la recarga no elimina esos registros. La descarga PDF es un archivo local independiente.
 
 ## Carga y extracción
 
@@ -75,7 +78,11 @@ La extracción también aplica estos límites conservadores, configurables media
 | `PDF_EXTRACTION_TIMEOUT_MS` | `15000` | 100 a 120,000 ms |
 | `PDF_EXTRACTION_WORKER_MEMORY_MB` | `192` | 16 a 512 MiB |
 
-El número de páginas se comprueba antes de recorrer el documento. Los elementos y caracteres se contabilizan incrementalmente antes de conservar cada fragmento. PDF.js se ejecuta en un `worker_threads.Worker` con límite de memoria; al vencer el plazo, la API termina el Worker y espera su cierre, por lo que el trabajo subyacente no continúa en segundo plano.
+El número de páginas se comprueba antes de recorrer el documento. Los elementos y caracteres se contabilizan incrementalmente antes de conservar cada fragmento. PDF.js se ejecuta en el hilo principal de un proceso hijo independiente, sin shell, credenciales de proveedores ni flags heredados de la API. Se mantienen como máximo dos procesos de extracción por proceso API, sin cola ni reintentos: la saturación devuelve `PDF_EXTRACTION_LIMIT_EXCEEDED`. Al vencer el plazo o cancelarse la solicitud HTTP, la API termina el hijo y espera su cierre físico antes de liberar capacidad. Un cierre inesperado devuelve `PDF_EXTRACTION_ERROR` sin publicar diagnósticos internos.
+
+`PDF_EXTRACTION_WORKER_MEMORY_MB` conserva su nombre por compatibilidad y configura `--max-old-space-size` de V8 (192 MiB por defecto); el stack se configura en 4096 KiB. El límite anterior del Worker tampoco limitaba toda la memoria nativa. Estos límites no son un techo de RSS ni un sandbox del sistema operativo: PDF.js y sus bibliotecas nativas pueden consumir memoria adicional. Los canales privados validan estrictamente cabecera, tamaño y respuesta, con presupuestos derivados de los límites de extracción. Desarrollo usa el loader tsx explícito y compilación usa el hijo `.mjs`, sin cargar archivos de entorno dentro del extractor.
+
+Un canal IPC dedicado supervisa la vida del padre durante toda la extracción; no transporta PDF ni credenciales. El hijo termina al perderlo y mantiene un watchdog propio con el mismo deadline absoluto, sin ampliar el presupuesto. La API conserva el puesto hasta confirmar salida física, cierre de pipes y desconexión IPC, incluso si Node no emite el evento `close` en una carrera de desconexión. El watchdog del hijo requiere que su event loop pueda ejecutarse; no sustituye supervisión del sistema operativo ante un bloqueo nativo absoluto y muerte simultánea del padre.
 
 El PDF y el texto extraído existen únicamente en memoria durante la solicitud. No se guardan en disco, base de datos ni servicios externos. La carga no usa OCR ni envía el PDF a RAG, n8n o almacenamiento permanente. Supabase Auth se utiliza para autenticar y autorizar la solicitud; no recibe el PDF ni su extracción.
 
@@ -163,7 +170,7 @@ Además de los errores de carga existentes, la extracción puede devolver:
 - `PDF_UNREADABLE` (`422`): PDF dañado o ilegible.
 - `PDF_NO_USABLE_TEXT` (`422`): PDF sin texto digital, incluido un documento basado solo en imágenes.
 - `PDF_EXTRACTION_LIMIT_EXCEEDED` (`422`): el PDF supera un límite seguro de páginas, elementos, caracteres o memoria.
-- `PDF_EXTRACTION_TIMEOUT` (`422`): el Worker de extracción excede el tiempo permitido y se termina.
+- `PDF_EXTRACTION_TIMEOUT` (`422`): el proceso hijo de extracción excede el tiempo permitido y se termina.
 - `AUTEL_FORMAT_NOT_RECOGNIZED` (`422`): estructura Autel no reconocida.
 - `PDF_EXTRACTION_ERROR` (`500`): fallo interno seguro durante la extracción.
 
@@ -270,7 +277,7 @@ La carga del PDF nunca solicita orientación automáticamente. Después de una e
 2. La sección **Orientación asistida por IA** habilita **Analizar DTC con IA**.
 3. El técnico puede escribir observaciones opcionales; el campo se bloquea durante solicitudes activas y se limpia al reemplazar o eliminar el reporte.
 4. Una confirmación enumera exactamente los datos técnicos y, cuando corresponda, las observaciones que se enviarán. También aclara que no se enviarán VIN, PDF, odómetro ni datos del cliente.
-5. Solo **Confirmar y analizar** ejecuta `POST /api/reports/analyze` mediante el proxy de Vite.
+5. Solo **Confirmar y analizar** ejecuta `POST /api/reports/analyze` mediante una ruta del mismo origen: proxy Vite en desarrollo y proxy inverso `/api` en producción.
 6. La orientación se presenta separada de la extracción y siempre muestra que requiere confirmación del técnico.
 7. Si las observaciones cambian después de obtener un resultado, este permanece visible y solo una acción explícita inicia una nueva confirmación y análisis.
 
@@ -329,11 +336,11 @@ Para probar el flujo manualmente, inicia API y frontend, carga un reporte Autel 
 
 ## Historial seguro de diagnósticos (FASE 3.4A)
 
-La migración pendiente `20260821000100_create_diagnostic_history.sql` define un registro inmutable por diagnóstico. La migración adicional `20261013000100_add_diagnostic_analysis_fingerprints.sql` agrega huellas privadas anulables y un índice único parcial por `(user_id, analysis_fingerprint)`; mantiene válidos y sin modificar los registros anteriores. Ninguna de estas migraciones se aplica automáticamente. El historial conserva escalares mínimos para el listado y snapshots JSONB validados de extracción, análisis y evidencia RAG. El backend intenta guardarlo solamente después de un análisis correcto; si Supabase no está configurado, la escritura falla o excede `DIAGNOSTIC_HISTORY_SAVE_TIMEOUT_MS`, la orientación mantiene HTTP 200 y devuelve `history.status = "unavailable"`. El límite predeterminado es 2,000 ms y solo acepta valores entre 100 y 10,000 ms.
+La migración `20260821000100_create_diagnostic_history.sql` define un registro inmutable por diagnóstico. La migración adicional `20261013000100_add_diagnostic_analysis_fingerprints.sql` agrega huellas privadas anulables y un índice único parcial por `(user_id, analysis_fingerprint)`; mantiene válidos y sin modificar los registros anteriores. `20261016000100_correct_diagnostic_history_uniqueness.sql` permite variantes fingerprinted del mismo upload y conserva la unicidad legacy. Ninguna migración se aplica automáticamente. El historial conserva escalares mínimos para el listado y snapshots JSONB validados de extracción, análisis y evidencia RAG. El backend intenta guardarlo solamente después de un análisis correcto; si Supabase no está configurado, la escritura falla o excede `DIAGNOSTIC_HISTORY_SAVE_TIMEOUT_MS`, la orientación mantiene HTTP 200 y devuelve `history.status = "unavailable"`. El límite predeterminado es 2,000 ms y solo acepta valores entre 100 y 10,000 ms.
 
 El historial almacena marca, modelo, año, odómetro opcional, códigos DTC, observaciones sanitizadas, modelos utilizados y el VIN exclusivamente como HMAC existente y, cuando está disponible, sus últimos cuatro caracteres. No almacena el PDF, nombre o ruta del archivo, texto bruto, VIN completo, embeddings, respuestas sin validar, datos del usuario, credenciales ni tokens. El snapshot público conserva únicamente el VIN enmascarado y nunca expone su seudónimo HMAC.
 
-`public.diagnostic_history` tiene RLS habilitado y forzado. `authenticated` puede leer únicamente sus propias filas y no puede escribirlas; `anon` no tiene privilegios; `service_role` dispone solo de lectura e inserción. Además de RLS, todas las consultas administrativas del backend filtran explícitamente por el UUID obtenido de la sesión autenticada. La migración continúa sin aplicarse: antes de activarla debe reconciliarse el historial remoto de migraciones aplicado manualmente.
+`public.diagnostic_history` tiene RLS habilitado y forzado. `authenticated` puede leer únicamente sus propias filas y no puede escribirlas; `anon` no tiene privilegios; `service_role` dispone solo de lectura e inserción. Además de RLS, todas las consultas administrativas del backend filtran explícitamente por el UUID obtenido de la sesión autenticada. El usuario confirmó funcionamiento manual del historial; este cierre no consulta el estado remoto. Antes de automatizar futuras migraciones debe reconciliarse el historial aplicado manualmente, sin reaplicar SQL por asumir que sigue pendiente.
 
 Endpoints protegidos:
 
@@ -381,7 +388,7 @@ La clave `SUPABASE_SECRET_KEY` permanece exclusivamente en el servidor y nunca d
 
 La migración local `20260917000100_create_profiles.sql` define `profiles.id -> auth.users.id`, username normalizado y `is_active`. No crea usuarios automáticamente. Fue aplicada y verificada manualmente; antes de automatizar migraciones futuras se deberá reconciliar ese estado remoto con el historial local para evitar una aplicación duplicada. Las pruebas usan únicamente clientes simulados: no realizan conexiones reales a Supabase ni llamadas reales a OpenAI.
 
-La activación real del proyecto, aprovisionamiento administrativo de usuarios y comprobación de RLS quedan para la siguiente fase. Google OAuth, recuperación/restablecimiento de contraseña y Auth Hooks continúan pendientes.
+El usuario confirmó Supabase Auth, registro público deshabilitado y ensayo manual del recorrido completo. Esto no sustituye una verificación administrativa independiente de políticas, usuarios y migraciones en el entorno de entrega. Google OAuth, recuperación/restablecimiento de contraseña y Auth Hooks están fuera del alcance actual.
 
 ## RAG demostrativo con pgvector (RAG-MVP-1)
 
@@ -408,11 +415,11 @@ Variables backend nuevas:
 
 Los valores vacíos de `.env.example` se interpretan como ausentes y reciben esos valores predeterminados. Las claves reales permanecen únicamente en `.env`, que no debe versionarse.
 
-### Migración e ingesta pendientes
+### Procedimiento administrativo de migración e ingesta
 
 La migración `supabase/migrations/20260922000100_create_rag_knowledge.sql` instala `vector` en `extensions` o relocaliza allí una instalación existente antes de crear objetos dependientes. Si faltan permisos para relocalizarla, aborta con una acción administrativa explícita. Después crea `public.knowledge_chunks` con `extensions.vector(1536)`, RLS y permisos exclusivos de `service_role`, y define el RPC `public.match_knowledge_chunks` como `security invoker` con `search_path` vacío. El MVP usa búsqueda exacta porque el corpus es pequeño; HNSW o IVFFlat quedan para una fase posterior de escalamiento.
 
-Esta fase no aplica la migración ni ejecuta una ingesta real. Antes de activarla:
+Este cierre no aplica migraciones ni ejecuta ingesta real. El procedimiento siguiente es para un entorno nuevo, tras comprobar qué está ya aplicado; no debe repetirse automáticamente en el entorno existente:
 
 1. Reconciliar el historial remoto de migraciones, incluida la migración `profiles` aplicada manualmente.
 2. Revisar y aplicar la nueva migración mediante el procedimiento administrativo aprobado.
@@ -448,7 +455,7 @@ Para rollback operativo, establecer `RAG_ENABLED=false` y reiniciar la API; el a
 
 Guion breve de demostración: iniciar sesión, cargar un PDF Autel compatible, revisar la extracción, confirmar manualmente el análisis y comprobar la sección **Evidencia recuperada por RAG**. Descargar el PDF y verificar **Fuentes de conocimiento recuperadas**. Repetir con `RAG_ENABLED=false` para demostrar el fallback sin fuentes.
 
-El PDF original y el texto bruto continúan siendo temporales en memoria. Cuando la migración pendiente se aplique y el backend administrativo esté configurado, solo los snapshots estructurados y sanitizados del historial se conservarán; RAG no almacena el PDF ni embeddings asociados al diagnóstico.
+El PDF original y el texto bruto continúan siendo temporales en memoria. Con historial configurado, solo los snapshots estructurados y sanitizados se conservan; RAG no almacena el PDF ni embeddings asociados al diagnóstico.
 
 ## Verificación
 
