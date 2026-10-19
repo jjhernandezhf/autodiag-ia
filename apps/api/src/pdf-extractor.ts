@@ -28,6 +28,20 @@ export interface PdfExtractorRuntime {
 export const MAX_PDF_EXTRACTION_PROCESSES = 2;
 let activeProcesses = 0;
 const children = new Set<ChildProcessWithoutNullStreams>();
+let stopping = false;
+const shutdownWaiters = new Set<() => void>();
+// Resolve only after extraction finalizers have observed physical termination.
+export function stopPdfExtraction(): Promise<void> {
+  stopping = true;
+  for (const child of children) {
+    try { child.kill("SIGKILL"); } catch {
+      // A failed launch can race shutdown (EINVAL); existing error/close listeners
+      // still own finalization. Never claim capacity is free just because kill failed.
+    }
+  }
+  if (activeProcesses === 0) return Promise.resolve();
+  return new Promise((resolve) => shutdownWaiters.add(resolve));
+}
 // Synchronous exit hook; abrupt death is also observed through the IPC channel.
 process.once("exit", () => { for (const child of children) child.kill("SIGKILL"); });
 
@@ -47,7 +61,7 @@ export async function extractPdfPages(buffer: Buffer, inputLimits: Partial<PdfEx
   const limits = resolvePdfExtractionLimits(inputLimits);
   if (runtime.signal?.aborted) throw new PdfExtractionError("PDF_EXTRACTION_ERROR");
   const inputCap = Math.min(runtime.maxFileSizeBytes ?? MAX_PDF_INPUT_BYTES, MAX_PDF_INPUT_BYTES);
-  if (!buffer.length || buffer.length > inputCap || activeProcesses >= MAX_PDF_EXTRACTION_PROCESSES) {
+  if (stopping || !buffer.length || buffer.length > inputCap || activeProcesses >= MAX_PDF_EXTRACTION_PROCESSES) {
     throw new PdfExtractionError("PDF_EXTRACTION_LIMIT_EXCEEDED");
   }
   activeProcesses++;
@@ -134,5 +148,11 @@ export async function extractPdfPages(buffer: Buffer, inputLimits: Partial<PdfEx
       child.stdin.write(JSON.stringify({ size: buffer.length, deadlineAtMs, limits }) + "\n");
       child.stdin.end(buffer);
     });
-  } finally { activeProcesses--; }
+  } finally {
+    activeProcesses--;
+    if (stopping && activeProcesses === 0) {
+      for (const resolve of shutdownWaiters) resolve();
+      shutdownWaiters.clear();
+    }
+  }
 }

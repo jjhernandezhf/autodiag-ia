@@ -4,6 +4,7 @@ import { Buffer } from "node:buffer";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { createServer } from "node:net";
+import { tmpdir } from "node:os";
 import process from "node:process";
 import { test } from "node:test";
 import { clearTimeout, setTimeout } from "node:timers";
@@ -86,12 +87,12 @@ test("actual compiled entry starts with synthetic environment and closes its own
   await once(reservation, "listening");
   const port = reservation.address().port;
   await new Promise((resolve, reject) => reservation.close((error) => error ? reject(error) : resolve()));
-  const env = { VIN_HMAC_SECRET: secret, PORT: String(port) };
+  const env = { VIN_HMAC_SECRET: secret, PORT: String(port), NODE_ENV: "production" };
   for (const key of ["SystemRoot", "WINDIR", "TEMP", "TMP"]) {
     if (process.env[key] !== undefined) env[key] = process.env[key];
   }
   const child = spawn(process.execPath, [fileURLToPath(new URL("../dist/index.js", import.meta.url))],
-    { env, shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    { env, cwd: tmpdir(), shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
   const closed = once(child, "close");
   const watchdog = setTimeout(() => child.kill("SIGKILL"), 15000);
   child.stderr.resume();
@@ -105,6 +106,23 @@ test("actual compiled entry starts with synthetic environment and closes its own
     const response = await globalThis.fetch(`http://127.0.0.1:${port}/api/health`);
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), { status: "ok" });
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    const origin = `http://127.0.0.1:${port}`;
+    const home = await globalThis.fetch(origin);
+    assert.equal(home.status, 200);
+    const html = await home.text();
+    assert.match(html, /<html/u);
+    const assets = [...html.matchAll(/(?:src|href)="(\/assets\/[^"?#]+)/gu)].map(match => match[1]);
+    assert.ok(assets.length >= 2);
+    for (const asset of assets) assert.equal((await globalThis.fetch(origin + asset)).status, 200);
+    // Node fetch adds Sec-Fetch-Mode: cors; use an actual navigation-shaped request.
+    assert.equal((await request(origin).get("/history").set("Accept", "text/html").set("Sec-Fetch-Mode", "navigate")).status, 200);
+    for (const path of ["/api/missing", "/assets/missing.js", "/.env", "/apps/api/src/index.ts", "/node_modules"]) {
+      const missing = await globalThis.fetch(origin + path, { headers: { Accept: "text/html" } });
+      assert.equal(missing.status, 404);
+      assert.match(missing.headers.get("content-type"), /application\/json/u);
+    }
+    assert.equal((await globalThis.fetch(origin + "/api/history")).status, 401);
     const login = await globalThis.fetch(`http://127.0.0.1:${port}/api/auth/login`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ nombre_usuario: "synthetic.user", password: "synthetic-password" }),
@@ -121,4 +139,46 @@ test("actual compiled entry starts with synthetic environment and closes its own
   }
   assert.notEqual(child.pid, undefined);
   assert.notEqual(child.exitCode === null && child.signalCode === null, true);
+});
+
+test("compiled shutdown signal waits for a real extractor process before exiting", { timeout: 20000 }, async () => {
+  // Emit SIGTERM inside the owned process: Windows kill() would bypass JS signal handlers.
+  const source = `
+    import { spawn } from 'node:child_process';
+    import { extractPdfPages } from ${JSON.stringify(new URL("../dist/pdf-extractor.js", import.meta.url).href)};
+    await import(${JSON.stringify(new URL("../dist/index.js", import.meta.url).href)});
+    const extraction = extractPdfPages(Buffer.from('%PDF-synthetic'), {}, { processFactory(exe, args, options) {
+      const child = spawn(exe, [...args.slice(0, 2), '--input-type=module', '-e',
+        "process.on('disconnect', () => process.exit(1)); process.stdin.resume(); setInterval(() => {}, 1000);"],
+        { ...options, stdio: ['pipe','pipe','pipe','ipc'] });
+      child.once('spawn', () => process.emit('SIGTERM'));
+      return child;
+    }});
+    extraction.catch(error => { if (error.code === 'PDF_EXTRACTION_ERROR') console.log('extractor-closed'); });
+  `;
+  const reservation = createServer();
+  reservation.listen(0, "127.0.0.1");
+  await once(reservation, "listening");
+  const port = reservation.address().port;
+  await new Promise((resolve, reject) => reservation.close(error => error ? reject(error) : resolve()));
+  const env = { VIN_HMAC_SECRET: secret, PORT: String(port), NODE_ENV: "production" };
+  for (const key of ["SystemRoot", "WINDIR", "TEMP", "TMP"]) {
+    if (process.env[key] !== undefined) env[key] = process.env[key];
+  }
+  const child = spawn(process.execPath, ["--input-type=module", "-e", source], {
+    env, cwd: tmpdir(), shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"],
+  });
+  const closed = once(child, "close");
+  const watchdog = setTimeout(() => child.kill("SIGKILL"), 15000);
+  let output = "";
+  child.stdout.on("data", chunk => { output += chunk.toString(); });
+  child.stderr.resume();
+  try {
+    const [code, signal] = await closed;
+    assert.equal(code, 0);
+    assert.equal(signal, null);
+    assert.match(output, /extractor-closed/u);
+  } finally {
+    try { child.kill(); await closed; } finally { clearTimeout(watchdog); }
+  }
 });

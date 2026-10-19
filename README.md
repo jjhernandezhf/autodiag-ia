@@ -4,6 +4,8 @@ AutoDiag IA recibe reportes Autel PDF, valida el archivo y extrae información e
 
 La [guía de entrega y operación](docs/entrega.md) reúne arranque compilado, topología frontend/API, guía de usuario, demostración, migraciones y evidencia con sus límites.
 
+Producción preparada: **un único Render Web Service Node** sirve API y React compilado bajo el mismo origen. Desde la raíz: build `npm ci --include=dev --no-fund && npm run build`, arranque `npm start`, `NODE_ENV=production`, health `/api/health`. Node fijado en `.node-version`. Los [campos y variables de Render](docs/entrega.md#render-un-único-web-service-sin-nginx-ni-vite-en-producción) requieren configuración privada y verificación real en Linux; no se ha desplegado desde esta preparación. Desarrollo continúa con Vite mediante `npm run dev`.
+
 ## Aplicaciones
 
 - `apps/web`: interfaz accesible con React, TypeScript y Vite.
