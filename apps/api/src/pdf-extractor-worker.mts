@@ -1,5 +1,3 @@
-import { isMainThread, parentPort, workerData } from "node:worker_threads";
-
 import type { PdfExtractionLimits } from "./config.js";
 import type { ExtractedPdfPage, ExtractedTextFragment, ExtractedTextLine } from "./report-types.js";
 
@@ -60,21 +58,6 @@ interface PdfLoadingTask {
 }
 
 export type PdfDocumentLoader = (data: Uint8Array) => PdfLoadingTask;
-
-interface WorkerInput {
-  buffer: ArrayBuffer;
-  limits: PdfExtractionLimits;
-}
-
-interface WorkerSuccess {
-  ok: true;
-  pages: ExtractedPdfPage[];
-}
-
-interface WorkerFailure {
-  ok: false;
-  code: PdfWorkerErrorCode;
-}
 
 function isPdfTextItem(value: unknown): value is PdfTextItemSource {
   if (!value || typeof value !== "object") return false;
@@ -230,24 +213,4 @@ export async function extractPdfDocument(
     await releaseResource(documentToRelease ? () => documentToRelease.destroy() : undefined);
     await releaseResource(taskToRelease ? () => taskToRelease.destroy() : undefined);
   }
-}
-
-if (!isMainThread) {
-  const port = parentPort;
-  const input = workerData as WorkerInput;
-
-  void (async () => {
-    let response: WorkerSuccess | WorkerFailure;
-    try {
-      const pages = await extractPdfDocument(new Uint8Array(input.buffer), input.limits);
-      response = { ok: true, pages };
-    } catch (error) {
-      response = {
-        ok: false,
-        code: error instanceof PdfWorkerError ? error.code : "PDF_EXTRACTION_ERROR",
-      };
-    }
-    port?.postMessage(response);
-    port?.close();
-  })();
 }

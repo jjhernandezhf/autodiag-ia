@@ -1,10 +1,11 @@
 import { PDFDocument, StandardFonts, type PDFPage, type PDFFont } from "pdf-lib";
+import { spawn } from "node:child_process";
 import request from "supertest";
 import { describe, expect, it, vi } from "vitest";
 
 import { createApp, type AppOptions } from "./app.js";
 import type { AuthenticationService } from "./auth-service.js";
-import { PdfExtractionError } from "./pdf-extractor.js";
+import { extractPdfPages, PdfExtractionError } from "./pdf-extractor.js";
 
 const TEST_SECRET = "endpoint-integration-secret-at-least-32-bytes";
 const SYNTHETIC_VIN = "1ABCD23EFGH456789";
@@ -70,6 +71,24 @@ function appWithRealExtractor() {
 }
 
 describe("integración de extracción PDF", () => {
+  it("contiene la terminación sintética de un hijo y mantiene health y la siguiente carga", async () => {
+    let calls = 0;
+    const app = createTestApp({ vinHmacSecret: TEST_SECRET, extractPdfPages: (buffer) => {
+      calls++;
+      return extractPdfPages(buffer, {}, calls === 1 ? { processFactory: (exe, args, options) =>
+        spawn(exe, [...args.slice(0, 2), "--input-type=module", "-e", "process.stdin.resume(); process.exit(23);"], options) } : {});
+    } });
+    const pdf = await buildAutelPdf();
+    const failed = await postUpload(app).attach("report", pdf, { filename: "synthetic.pdf", contentType: "application/pdf" });
+    expect(failed.status).toBe(500);
+    expect(failed.body).toEqual({ error: { code: "PDF_EXTRACTION_ERROR", message: "No fue posible extraer el contenido del PDF." } });
+    expect((await request(app).get("/api/health")).body).toEqual({ status: "ok" });
+    const next = await postUpload(app).attach("report", pdf, { filename: "synthetic.pdf", contentType: "application/pdf" });
+    expect(next.status).toBe(201);
+    expect(next.body.extraction.status).toBe("completed");
+    expect(calls).toBe(2); // One process per extraction, never an automatic retry.
+  });
+
   it("extrae un reporte Autel sintético sin exponer el VIN completo", async () => {
     const pdf = await buildAutelPdf();
     const response = await postUpload(appWithRealExtractor())

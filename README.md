@@ -75,7 +75,11 @@ La extracción también aplica estos límites conservadores, configurables media
 | `PDF_EXTRACTION_TIMEOUT_MS` | `15000` | 100 a 120,000 ms |
 | `PDF_EXTRACTION_WORKER_MEMORY_MB` | `192` | 16 a 512 MiB |
 
-El número de páginas se comprueba antes de recorrer el documento. Los elementos y caracteres se contabilizan incrementalmente antes de conservar cada fragmento. PDF.js se ejecuta en un `worker_threads.Worker` con límite de memoria; al vencer el plazo, la API termina el Worker y espera su cierre, por lo que el trabajo subyacente no continúa en segundo plano.
+El número de páginas se comprueba antes de recorrer el documento. Los elementos y caracteres se contabilizan incrementalmente antes de conservar cada fragmento. PDF.js se ejecuta en el hilo principal de un proceso hijo independiente, sin shell, credenciales de proveedores ni flags heredados de la API. Se mantienen como máximo dos procesos de extracción por proceso API, sin cola ni reintentos: la saturación devuelve `PDF_EXTRACTION_LIMIT_EXCEEDED`. Al vencer el plazo o cancelarse la solicitud HTTP, la API termina el hijo y espera su cierre físico antes de liberar capacidad. Un cierre inesperado devuelve `PDF_EXTRACTION_ERROR` sin publicar diagnósticos internos.
+
+`PDF_EXTRACTION_WORKER_MEMORY_MB` conserva su nombre por compatibilidad y configura `--max-old-space-size` de V8 (192 MiB por defecto); el stack se configura en 4096 KiB. El límite anterior del Worker tampoco limitaba toda la memoria nativa. Estos límites no son un techo de RSS ni un sandbox del sistema operativo: PDF.js y sus bibliotecas nativas pueden consumir memoria adicional. Los canales privados validan estrictamente cabecera, tamaño y respuesta, con presupuestos derivados de los límites de extracción. Desarrollo usa el loader tsx explícito y compilación usa el hijo `.mjs`, sin cargar archivos de entorno dentro del extractor.
+
+Un canal IPC dedicado supervisa la vida del padre durante toda la extracción; no transporta PDF ni credenciales. El hijo termina al perderlo y mantiene un watchdog propio con el mismo deadline absoluto, sin ampliar el presupuesto. La API conserva el puesto hasta confirmar salida física, cierre de pipes y desconexión IPC, incluso si Node no emite el evento `close` en una carrera de desconexión. El watchdog del hijo requiere que su event loop pueda ejecutarse; no sustituye supervisión del sistema operativo ante un bloqueo nativo absoluto y muerte simultánea del padre.
 
 El PDF y el texto extraído existen únicamente en memoria durante la solicitud. No se guardan en disco, base de datos ni servicios externos. La carga no usa OCR ni envía el PDF a RAG, n8n o almacenamiento permanente. Supabase Auth se utiliza para autenticar y autorizar la solicitud; no recibe el PDF ni su extracción.
 
@@ -163,7 +167,7 @@ Además de los errores de carga existentes, la extracción puede devolver:
 - `PDF_UNREADABLE` (`422`): PDF dañado o ilegible.
 - `PDF_NO_USABLE_TEXT` (`422`): PDF sin texto digital, incluido un documento basado solo en imágenes.
 - `PDF_EXTRACTION_LIMIT_EXCEEDED` (`422`): el PDF supera un límite seguro de páginas, elementos, caracteres o memoria.
-- `PDF_EXTRACTION_TIMEOUT` (`422`): el Worker de extracción excede el tiempo permitido y se termina.
+- `PDF_EXTRACTION_TIMEOUT` (`422`): el proceso hijo de extracción excede el tiempo permitido y se termina.
 - `AUTEL_FORMAT_NOT_RECOGNIZED` (`422`): estructura Autel no reconocida.
 - `PDF_EXTRACTION_ERROR` (`500`): fallo interno seguro durante la extracción.
 
