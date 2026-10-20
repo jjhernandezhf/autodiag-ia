@@ -1,6 +1,41 @@
 # Entrega operativa — 21 de octubre de 2026
 
-Preparación local; no implica despliegue realizado ni calidad diagnóstica medida. Base PDF preservada: `8b486ca205cf34d3c074d27257910bf915a2fbe2`. La preparación Render no cambia modelos, prompts, huellas, corpus, permisos ni presupuestos de solicitudes. Añade servicio del build web y cierre operativo del proceso.
+Guía operativa para la entrega. URL comunicada por el usuario: **https://autodiag-ia.onrender.com/**. El usuario reportó funcionamiento del flujo en Render; esta actualización documental no visitó el servicio ni reprodujo esas comprobaciones. Funcionamiento observado no equivale a calidad diagnóstica medida ni a una validación integral de seguridad de producción.
+
+Base PDF preservada: `8b486ca205cf34d3c074d27257910bf915a2fbe2`. La preparación Render y la corrección de referencias internas están integradas en `main`, base de este cierre documental: `61ab3ea16fc6e69a4ca511734fb17f31c5eee4e0`. No se ha comprobado aquí el SHA desplegado ni la configuración privada del servicio. Las secciones de pruebas locales posteriores conservan su fecha y alcance históricos; no son nuevas pruebas remotas.
+
+## Arquitectura actual y evidencia reportada
+
+React compilado y la API Express se sirven juntos desde un único Render Web Service, bajo el mismo origen HTTPS; el navegador utiliza rutas relativas `/api`. Express valida el PDF y ejecuta su extracción en procesos hijos supervisados. Supabase proporciona Auth e historial estructurado por usuario; la integración RAG usa pgvector cuando está habilitada y configurada. OpenAI proporciona el análisis estructurado y, cuando corresponde, embeddings para recuperación. El PDF descargable se genera localmente desde los datos disponibles, sin repetir el análisis. No se inspeccionó la configuración remota para inferir modelos o estado efectivo de RAG.
+
+**Alcance de esta entrega: demostración con una cuenta autorizada, no apertura multiusuario general.** Esto no desactiva autenticación, RLS ni aislamiento por identidad. La API protege upload, análisis e historial; las consultas de historial filtran por el UUID autenticado y las migraciones versionadas mantienen RLS. Las pruebas con mocks no certifican el estado real de las políticas remotas. El pendiente de proxies sigue abierto incluso con una sola cuenta: otros intentos fallidos podrían compartir cupo si llegan por el mismo proxy.
+
+### Versiones comprobables y trazabilidad
+
+| Elemento | Valor comprobable localmente | Límite |
+| --- | --- | --- |
+| Código base | `61ab3ea16fc6e69a4ca511734fb17f31c5eee4e0`, merge Render/referencias en `main` | Este cierre solo cambia documentación en `docs/final-delivery`; no acredita el SHA servido por Render |
+| Paquetes de la aplicación | `0.1.0` en raíz y ambos workspaces | No identifica por sí solo un despliegue; conservar también el SHA |
+| Prompt de análisis | `diagnostic_prompt_v2_reference_ids` | Incluido en fingerprint; no atribuirlo retrospectivamente a capturas sin versión |
+| Pipeline / huella | `analysis_pipeline_v2_rag_provenance`; `analysis_v1`, `pdf_v1` | Modelo, esfuerzo explícito, inputs y configuración RAG participan en identidad; no borrar historial para cambiar de versión |
+| Esquema público / historial | `diagnostic_output_schema_v1`; historial `1` | Las referencias internas se restituyen al contrato público antes de guardar/exportar |
+| Corpus activo en el repositorio | **16 fragmentos**, `demonstration_corpus_v1` | No se comprobó el contenido remoto de pgvector; los tres candidatos TPMS no están activados |
+| Modelo de análisis | Selección privada mediante `OPENAI_MODEL`, sin modelo predeterminado en el servidor | Nombre efectivo **no verificado aquí**. El usuario comunicó conservar el anterior; no se infiere leyendo ejemplos o tiempos. Un detalle histórico validado incluye `analysisModel` para esa ejecución, no para todas |
+| Esfuerzo / embeddings | Esfuerzo opcional; omitido conserva comportamiento previo. Default de embeddings en código: `text-embedding-3-small` | No se verificó configuración efectiva remota; no cambiarla para la entrega |
+| Entorno local de este cierre | Node **24.16.0**, npm **11.13.0** | No certifica la versión del proceso remoto |
+
+El operador puede anotar únicamente SHA, modelo declarado para la demostración y versiones técnicas, sin compartir claves o archivos de entorno. Si no se capturaron, conservarlos como desconocidos. No se exige cambiar modelo ni regenerar un diagnóstico para completar este registro.
+
+### Pruebas manuales comunicadas por el usuario
+
+| Caso/recorrido | Resultado reportado | Alcance de la evidencia |
+| --- | --- | --- |
+| BMW, ejecución inicial | HTTP 200 en **24,81 s** | Una medición manual; sin captura independiente de inputs, versiones, tokens o `reused` en este registro |
+| BMW, repetición | **287 ms** | Compatible con reutilización del diagnóstico; no demuestra generación del modelo en ese tiempo. No se aportó aquí un HTTP separado para esta repetición |
+| Toyota | HTTP 200 en **33,22 s** | Una medición manual, no percentil ni compromiso de latencia |
+| Historial y exportación PDF | Funcionando según el usuario | Recorrido manual reportado; no acredita por sí solo todas las políticas RLS, variantes de documentos o navegadores |
+
+Estos datos no fueron reproducidos por el agente. No se reconstruyen inputs ni se inventan modelo efectivo, versiones desplegadas, consumo, calidad de causas o revisión profesional. Confirmar `reused` para separar generación nueva de recuperación; las repeticiones rápidas no se incluyen como latencia de generación. La muestra es exploratoria y pequeña: no demuestra precisión, superioridad general ni ausencia de fallos. Véanse el [evaluador y sus límites](evaluacion-calidad/README.md) y el [baseline Mazda exploratorio](evaluacion-calidad/exploratorio-mazda3-2019.md), que permanece intacto.
 
 ## Instalación y configuración
 
@@ -43,13 +78,15 @@ Decisión autorizada: React compilado y Express bajo el mismo origen en un **Ren
 
 En producción Express resuelve `apps/web/dist` desde la ubicación de su módulo, no desde cwd. Falla al arrancar si falta index. Solo expone index y assets de extensiones autorizadas dentro del build (verificación de realpath); no sirve sourcemaps, dotfiles, fuentes, dependencias o directorios del repositorio. Fallback React solo para GET/HEAD de rutas sin extensión que aceptan HTML y representan navegación, nunca `/api`, assets ausentes u otros métodos. Los 404 desconocidos de API son JSON. Las respuestas llevan `Cache-Control: no-store`, incluidos errores y datos privados; no activar edge caching de `/api`. Se conserva Vite en desarrollo. No publicar la raíz del repo como carpeta estática.
 
-#### Campos exactos del formulario (todavía no aplicado)
+#### Campos de referencia del servicio existente
+
+Receta de configuración conservada para revisión por el operador; no crear otro servicio. La existencia y funcionamiento del destino fueron reportados por el usuario, pero los campos reales del Dashboard no se inspeccionaron en este cierre.
 
 | Campo Render | Valor |
 | --- | --- |
 | Tipo | Web Service |
 | Repository | `https://github.com/jjhernandezhf/autodiag-ia` |
-| Branch | `feat/render-single-service` para evaluación, **solo después de publicación autorizada**; cambiar a `main` tras aprobación y merge |
+| Branch | `main` tras el merge aprobado; confirmar privadamente la rama y el SHA efectivos en el servicio existente |
 | Root Directory | Vacío (raíz del monorepo; no `apps/api`) |
 | Runtime / Language | Node, runtime nativo, sin Docker |
 | Node | `.node-version`: `24.16.0`; quitar un `NODE_VERSION` remoto contradictorio o fijarlo al mismo valor |
@@ -61,7 +98,7 @@ En producción Express resuelve `apps/web/dist` desde la ubicación de su módul
 | Auto-Deploy | Desactivado inicialmente; despliegue manual autorizado después de revisar variables y commit |
 | Plan / Region | Decisión del operador según memoria medida y proximidad al Supabase existente; no contratado aquí |
 
-`--include=dev` es necesario para TypeScript/Vite aunque `NODE_ENV=production`. No se actualiza ni regenera lockfile; `npm ci` instala desde él. No copiar node_modules de Windows a Linux. Se comprobaron nombres de imports con TypeScript `forceConsistentCasingInFileNames` y nombres reales; la instalación/compilación nativa en Linux sigue pendiente. Node se fija a la versión local comprobada, sin afirmar validación de otras versiones.
+`--include=dev` es necesario para TypeScript/Vite aunque `NODE_ENV=production`. No se actualiza ni regenera lockfile; `npm ci` instala desde él. No copiar node_modules de Windows a Linux. Se comprobaron nombres de imports con TypeScript `forceConsistentCasingInFileNames` y nombres reales. El flujo reportado en Render aporta evidencia operativa del destino, no una auditoría independiente de su instalación nativa, recursos o versión exacta de Node. Node se fija a la versión local comprobada, sin afirmar validación de otras versiones.
 
 #### Variables en Environment del servicio
 
@@ -97,9 +134,11 @@ La política opt-in acepta como máximo 32 IP exactas IPv4/IPv6, con longitud to
 
 Express recibe la lista explícita y recorre X-Forwarded-For desde el peer hacia atrás hasta el primer cliente no confiable; nunca se toma arbitrariamente la primera IP. Solo para login desde un peer declarado confiable, se exige una cadena de IP válida y acotada (hasta 32 entradas y 2048 caracteres). Cadena ausente, vacía, malformada o sin cliente no confiable devuelve `AUTH_REQUEST_INVALID` 400, antes del limitador/servicio Auth y sin imprimir la cadena. Las formas equivalentes de IP se normalizan sin cambiar el orden. El limitador conserva su clave y validaciones predeterminadas, agrupación IPv6 /56, ventana de 15 minutos y diez fallos; los logins exitosos no consumen el cupo. No se analiza `Forwarded` como identidad alternativa.
 
-**No hay ninguna IP ni topología Render habilitada por defecto.** La documentación pública consultada no acredita para este servicio una lista estable de peers de entrada ni su política completa de cabeceras. No confundir IP dedicadas/de salida (egress) con proxies de entrada al proceso. La preparación resuelve el mecanismo configurable; el despliegue público multiusuario sigue bloqueado hasta obtener y validar esa información. Un mock con loopback es solo un transporte de prueba y no justifica configurarlo en Render.
+**No hay ninguna IP ni topología Render habilitada por defecto.** La documentación pública consultada no acredita para este servicio una lista estable de peers de entrada ni su política completa de cabeceras. No confundir IP dedicadas/de salida (egress) con proxies de entrada al proceso. El servicio ya tiene una URL comunicada, pero su aislamiento de cupos por cliente detrás del proxy **no está validado**; no se aprueba su uso público multiusuario como seguro por el mero hecho de funcionar. Sin confianza configurada, varios clientes pueden compartir el cupo del proxy. Un mock con loopback es solo un transporte de prueba y no justifica configurarlo en Render.
 
-Antes del primer despliegue utilizable:
+El diagnóstico de proxies se pospone para la entrega. Los siete archivos de la sonda permanecen sin publicar en `fix/render-login-rate-limit`, fuera de este worktree y de esta entrega. Su **P2 de registro literal del peer, que puede ser un cliente directo, sigue abierto**; no activar ni incorporar esa sonda. Posponerla no resuelve el aislamiento del limitador. Mantener diez fallos por quince minutos y no habilitar confianza supuesta, suprimir validaciones ni provocar bloqueos durante la demostración.
+
+Procedimiento pendiente para habilitar y validar aislamiento multiusuario, no para ejecutar durante la entrega:
 
 1. Obtener de Render la identificación autorizada de los proxies de entrada, su estabilidad/rotación, todos los caminos hasta el servicio y cómo añaden o sobrescriben X-Forwarded-For. Comprobar que no se puede alcanzar la API por una ruta que eluda esos proxies. No deducir una allowlist a partir de una única IP observada. Si solo se documentan redes dinámicas o no se pueden acreditar IP exactas estables, **no habilitar confianza supuesta**: esta política estrecha aún no basta para ese destino y deberá revisarse con evidencia antes de abrir login multiusuario.
 2. Configurar privadamente `TRUSTED_PROXY_IPS` con las IP exactas confirmadas, nunca IP de clientes finales ni de salida. Revisar equivalencia IPv4/mapped IPv4/IPv6 y reinicios/caminos alternativos. Conservar `NODE_ENV=production`; no activar autorregistro.
@@ -113,13 +152,13 @@ Fundamento: [Express detrás de proxies](https://expressjs.com/en/guide/behind-p
 
 #### Comprobación y reversión del despliegue (operador)
 
-1. Tras publicación y autorización independientes, crear el servicio con estos campos y confirmar Node/commit/build. No agregar base de datos, migraciones ni ingesta.
+1. En el servicio existente, confirmar privadamente Node/commit/build y configuración esperada. Cualquier nuevo despliegue o cambio operativo requiere autorización independiente. No agregar base de datos, migraciones ni ingesta.
 2. Abrir URL HTTPS, `/api/health`, recargar una navegación, comprobar carga de JS/CSS/logo y 404 JSON en `/api/inexistente`; comprobar que `.env`, fuentes y assets ausentes no devuelven HTML. Sin tokens, `/api/history` debe devolver 401 y no datos cacheables.
-3. Con configuración privada y autorización de consumo, probar login, extracción Autel, confirmación manual, análisis nuevo frente a reutilizado, fuentes, guardado/lectura por usuario y PDF. Esto sí puede consumir proveedores: **no ejecutado en esta preparación**. No activar candidatos TPMS.
+3. El usuario reportó login/flujo de análisis, historial y PDF funcionando. Para ampliar o repetir esa comprobación, usar configuración privada y autorización de consumo, distinguir análisis nuevo de reutilizado y revisar fuentes/guardado por usuario. **No se ejecutó en esta actualización documental**. No activar candidatos TPMS.
 4. Medir memoria/latencia/cold start, dos cargas simultáneas y recuperación tras reinicio; revisar errores nativos y que no sobrevivan extractores. Health verde solo demuestra HTTP, no integración ni calidad.
 5. Si falla, detener pruebas y auto-deploys. Si existe un despliegue anterior **compatible con servicio único**, usar Rollback del Dashboard o redeploy de su commit registrado y verificar variables/health/flujo. Si es el primer despliegue, no hay rollback Render probado: suspender el servicio y conservar la versión local estable. Volver a un commit anterior al servicio estático no conserva la web pública. El rollback de código no revierte variables, migraciones ni datos; no borrar historial, rotar secretos o reaplicar SQL para revertir.
 
-Fuentes oficiales consultadas: [Web Services y puerto](https://render.com/docs/web-services), [versión de Node](https://render.com/docs/node-version), [raíz monorepo](https://render.com/docs/monorepo-support), [health](https://render.com/docs/health-checks), [deploy y graceful shutdown](https://render.com/docs/deploys). No se accedió a cuenta Render ni se creó servicio.
+Fuentes oficiales consultadas durante la preparación anterior: [Web Services y puerto](https://render.com/docs/web-services), [versión de Node](https://render.com/docs/node-version), [raíz monorepo](https://render.com/docs/monorepo-support), [health](https://render.com/docs/health-checks), [deploy y graceful shutdown](https://render.com/docs/deploys). No se accedió a cuenta Render, se creó servicio ni se consultaron fuentes externas durante esta actualización documental.
 
 Health operativo: `GET /api/health` devuelve únicamente `{"status":"ok"}`. No demuestra conexión a proveedores ni disponibilidad de generación. La configuración HMAC inválida impide arrancar; Auth ausente devuelve error público seguro y no habilita endpoints privados. No sustituir estas validaciones con valores de ejemplo en producción.
 
@@ -166,7 +205,7 @@ La configuración existente `envDir: false` en modo test evita archivos dotenv. 
 
 Una comprobación auxiliar inicial de assets falló por escape de comillas del comando Node en PowerShell; se corrigió la comprobación usando PowerShell y pasó. No fue fallo del artefacto. No hubo aserciones fallidas ni pérdida de worker en la suite de este cierre. El proceso API temporal creado por el script se cerró y esperó explícitamente; no se iniciaron servicios de desarrollo. No se hicieron instalaciones, auditorías repetidas, llamadas a proveedores ni conexiones remotas. La suite completa no incluye el script Node: sus 4 casos se informan separadamente, no dentro de los 906.
 
-### Preparación del servicio único Render: evidencia posterior
+### Preparación del servicio único Render: evidencia local histórica
 
 - Rama de trabajo `feat/render-single-service`, base `cfdd2627a17a9faeee4c0e5782af71df9f2bbf98`. Aislamiento PDF anterior conservado, sin actualizar dependencias ni lockfile.
 - Rutas estáticas, navegación, archivos privados, autenticación y shutdown: focalizadas **19/19**. Primer comando pasó también el filtro `src` del script npm y ejecutó una API completa **719/719**, más amplia de lo previsto; luego se usó `npm exec --workspace @autodiag/api -- vitest run src/production-web.test.ts src/pdf-shutdown.test.ts src/runtime-workflow.test.ts` para seleccionar exactamente los tres archivos.
@@ -180,19 +219,30 @@ Corrección posterior P2 de proxy: las 924 pruebas y compilado 5/5 anteriores no
 
 ## Guía de usuario y demostración de cinco minutos
 
-1. **0:00–0:40**: iniciar sesión privada; no hay autorregistro. Explicar que la orientación necesita confirmación profesional.
-2. **0:40–1:40**: seleccionar/arrastrar un PDF Autel autorizado con texto digital. Revisar vehículo, conteos, estados y advertencias; un reporte parcial puede bloquear análisis. No utilizar datos personales en una demostración compartida.
-3. **1:40–2:50**: añadir observaciones técnicas sin datos personales y revisar la confirmación. Solo la acción explícita solicita análisis. Reservar margen para generación; no presentar la espera como latencia garantizada.
-4. **2:50–3:40**: mostrar resumen, hallazgos, comprobaciones, prioridad, confianza y advertencias. Una coincidencia RAG no confirma la causa. Explicar procedencia y aplicabilidad desconocida; el corpus activo es demostrativo, 16 fragmentos `demonstration_corpus_v1`, no documentación oficial validada. TPMS sigue separado y sin activar.
-5. **3:40–4:30**: comprobar `history.status`; abrir historial propio y regenerar PDF desde snapshot. Abrir/exportar no repite modelo ni RAG. El PDF descargado se consulta sin conexión, no es el original Autel.
-6. **4:30–5:00**: repetir idéntica entrada para explicar reutilización cuando corresponda (`reused`), no vender milisegundos de recuperación como velocidad de generación. Cerrar sesión y comprobar desaparición del workspace.
+Abrir https://autodiag-ia.onrender.com/ y preparar antes **una sola cuenta autorizada**, un PDF autorizado y anonimizado y un resultado guardado de respaldo. No proyectar credenciales, tokens, VIN ni datos personales. El siguiente guion es un plan de demostración; no certifica que se haya ensayado íntegramente en cinco minutos.
+
+1. **0:00–0:40 — Login:** iniciar sesión privada con esa cuenta, sin autorregistro. Explicar que la orientación necesita confirmación profesional.
+2. **0:40–1:40 — Carga y revisión:** seleccionar/arrastrar el PDF con texto digital, enviar y revisar vehículo, módulos, conteos, DTC, estados y advertencias. Añadir observaciones técnicas opcionales sin datos personales. Un reporte parcial o incompatible puede bloquear análisis: no eludirlo.
+3. **1:40–3:00 — Confirmación y análisis:** solicitar y confirmar manualmente. Mostrar resumen, hallazgos, comprobaciones, prioridad, confianza y advertencias. Reservar margen de espera, sin prometer latencia. Revisar fuentes y su estado RAG: si no hay evidencia o RAG no está activo/disponible, explicarlo en vez de inventar fuentes. Similitud no confirma una causa; la procedencia conserva limitaciones. El corpus activo en código es demostrativo, no documentación oficial validada; TPMS sigue sin activar.
+4. **3:00–4:20 — Historial y PDF:** comprobar guardado (`history.status` cuando esté capturado), abrir el historial propio y descargar el PDF desde snapshot. Abrir/exportar no repite modelo ni RAG. Consultar el archivo descargado sin conexión; no es el PDF original Autel. Si aparece unavailable, no afirmar que se guardó.
+5. **4:20–5:00 — Reutilización y logout:** explicar `reused` cuando se haya capturado y la diferencia entre generación y recuperación; una repetición idéntica solo si tiempo/consumo están autorizados. No vender milisegundos de recuperación como generación. Cerrar sesión y comprobar desaparición del workspace, reporte, análisis, fuentes e historial visible.
 
 Preparar caso autorizado y resultado guardado como respaldo; no fingir que una captura es ejecución nueva. No reproducir un fallo deliberado con datos reales en una exposición sin consentimiento.
+
+### Lista breve antes de presentar
+
+- Operador: confirmar URL, SHA desplegado y configuración esperada sin publicar secretos; verificar que autorregistro siga deshabilitado y no haya cambios de modelo/corpus para la exposición.
+- Con autorización, comprobar HTTPS, carga de assets, login y sesión; health solo confirma respuesta de la API. Usar una sesión previamente comprobada, no agotar el cupo de login ni hacer pruebas de spoofing en la demo.
+- Preparar PDF digital compatible y observaciones técnicas saneadas; comprobar conteos/módulos y advertencias antes de confirmar. Reservar tiempo para generación, sin prometer 24–33 segundos en cualquier ejecución.
+- Comprobar guardado real frente a `history.status = unavailable`, apertura del historial propio y lectura del PDF descargado; tener respaldo claramente identificado como previo.
+- Tener un mensaje de limitaciones: orientación para revisión competente, no reparación confirmada; corpus demostrativo de 16 fragmentos, TPMS sin activar y aislamiento del limitador pendiente.
 
 ## Recuperación operativa
 
 - **API apagada/red**: no cerrar sesión por este solo hecho. Usar Comprobar conexión y Reintentar explícitamente cuando vuelva. Si no vuelve, comprobar proceso/logs saneados y gateway; health no certifica proveedores.
 - **Timeout de análisis**: conservar extracción y revisar el error; reintento manual de la misma entrada puede recuperar/esperar la operación existente. No enviar múltiples análisis concurrentes ni cambiar observaciones accidentalmente. No cambiar modelo/timeouts durante la demo para esconder el fallo.
+- **502 `OPENAI_RESPONSE_INVALID`**: la interfaz muestra una orientación que no pudo validarse, no pérdida de conexión. Conservar sesión, archivo y observaciones; no aceptar un resultado inválido como completo. No hay reintento automático ni guardado de esa respuesta. Si corresponde, reintentar explícitamente una vez o usar el respaldo identificándolo como previo; registrar solo código/estado/tiempo, nunca contenido interno del proveedor.
+- **429 de login**: detener intentos y esperar la ventana de quince minutos. El aislamiento detrás del proxy sigue pendiente y el bloqueo podría afectar a otros clientes; no evadirlo con cabeceras, desactivar el límite o reiniciar para ocultarlo. Si impide continuar, usar material de respaldo sin simular login o generación en vivo.
 - **Carga fallida**: revisar PDF digital, tamaño, formato y mensaje controlado. Volver a seleccionar/cargar explícitamente; no hay retry automático de extracción. Saturación: esperar a que cierre otra extracción.
 - **Historial unavailable**: el análisis puede seguir siendo válido con HTTP 200, pero no se confirmó guardado. Descargar localmente si procede; no anunciar persistencia exitosa.
 - **Fallo temporal de Auth**: esperar/reintentar sin mostrar datos del workspace anterior durante validación neutral. Un 401 definitivo o logout sí requiere nueva sesión; un 403 no es logout automático.
@@ -246,7 +296,7 @@ La existencia de políticas no prueba su eficacia: comprobar con dos usuarios au
 | Análisis/confirmación/idempotencia | Implementado; contratos simulados y ensayo usuario | No se ha medido precisión diagnóstica |
 | RAG/procedencia | Implementado; transporte validado mediante mocks | Relevancia real, revisión técnica y TPMS pendientes; no activar candidatos |
 | Historial/PDF | Implementado; aislamiento probado localmente y ensayo usuario | Reconciliación administrativa y prueba del destino |
-| Arranque compilado | API, web y extractor juntos comprobados localmente sin dotenv real | Deploy Render/Linux, HTTPS, memoria, IP/rate-limit y prueba de navegador en destino |
+| Arranque compilado y destino | API, web y extractor juntos comprobados localmente; URL Render y flujo manual reportados por usuario | Confirmar SHA/configuración del destino; memoria, señales, recuperación operativa y aislamiento IP/rate-limit no verificados integralmente |
 | Evaluación | Formato/evaluador offline y baseline Mazda exploratorio | Casos autorizados, etiquetas técnicas, reserva ciega y criterios de aceptación |
 | n8n/Power BI/aprendizaje supervisado | No implementados; no se encontró compromiso de entrega en documentación versionada | Confirmar rúbrica externa si los exige; no marcarlos completos |
 
@@ -254,6 +304,27 @@ La búsqueda documental solo demuestra lo que contiene el repositorio: no sustit
 
 ## Pendientes por prioridad
 
-1. Revisar y autorizar publicación de la preparación Render; definir plan/región según memoria y acceso, no crear servicios automáticamente.
-2. Operador: configurar privadamente el servicio único, revisar seguridad sin reaplicar SQL y ejecutar smoke en Linux/Render con datos y consumo autorizados.
-3. Ensayar la demostración con respaldo y límites de evidencia; contrastar rúbrica externa y completar evaluación técnica pendiente.
+1. **Para la entrega:** confirmar con el operador SHA/configuración del servicio existente, acceso autorizado, privacidad del material y respaldo; ensayar el guion sin alterar producción. Contrastar la rúbrica académica externa y sus entregables: no se encontró compromiso versionado que haga obligatorios n8n, Power BI o aprendizaje supervisado, pero el repositorio no sustituye esa rúbrica.
+2. **Pendientes operativos no resueltos:** aislamiento del limitador detrás del proxy y P2 de la sonda pospuestos, verificación de aislamiento remoto entre usuarios, memoria y recuperación en Linux/Render, reconciliación del historial de migraciones antes de automatizar cambios. Un flujo exitoso no cierra estos puntos ni autoriza reaplicar SQL. La entrega demostrativa no equivale a habilitación segura para uso multiusuario general.
+3. **Evaluación y ampliaciones posteriores:** casos autorizados independientes, input realmente capturado y saneado, etiquetas/revisión técnica competente, reserva ciega y criterios de aceptación. La relevancia RAG y calidad diagnóstica siguen sin medición rigurosa. Los tres candidatos TPMS permanecen separados: la aceptación experimental ya registrada no es revisión profesional, licencia ni compatibilidad; faltan admisión/revisiones e ingestión autorizada. n8n, Power BI y entrenamiento supervisado no están implementados ni se incorporan a esta entrega.
+
+Este cierre solo modifica la guía existente y no traslada la sonda ni cambia código, configuración, dependencias declaradas o lockfile. El worktree no tenía instalación: se ejecutó `npm ci --no-fund --no-audit` con Node 24.16.0/npm 11.13.0, instalando 408 paquetes desde el lockfile sin actualizaciones; se observó el aviso de deprecación de `whatwg-encoding@3.1.1`, no un fallo de instalación. Las comprobaciones locales posteriores se registran por separado; no acceden a proveedores, despliegan ni aplican migraciones y no constituyen una nueva validación funcional del destino.
+
+### Cierre local de la versión entregable (una cuenta)
+
+Se contrastó el recorrido login → carga Autel → extracción → revisión DTC → observaciones opcionales → confirmación/análisis → fuentes RAG → historial → PDF → logout con `App.tsx`, cliente API, rutas autenticadas, repositorio de historial, RAG, generador PDF y arranque compilado. No se identificó un bloqueante nuevo reproducible que requiera cambiar el código para ese guion. Se conservaron autenticación, RLS versionado, filtros por usuario, contratos, modelos/configuración y exclusión de candidatos. Un estado RAG sin fuentes sigue siendo un resultado explícito, no evidencia inventada; su disponibilidad real queda para el ensayo autorizado.
+
+| Verificación ejecutada sobre esta base, una pasada | Resultado |
+| --- | --- |
+| API: `auth-integration`, `analysis-references`, `analysis-idempotency-integration`, `rag-analysis-integration`, `diagnostic-history-integration`, `production-web` | **100/100**, seis archivos; Vitest con rutas explícitas, no suite completa |
+| Web: `App.test.tsx`, `App.auth.test.tsx`, `api-client.test.ts`, `report-pdf.test.ts` | **153/153**, cuatro archivos; mocks y generación PDF local, no proveedor real |
+| `npm run lint` | Aprobado en ambos workspaces |
+| `npm run build --workspace @autodiag/api` | Aprobado, artefactos del extractor incluidos |
+| `npm run build --workspace @autodiag/web -- --mode test` | Aprobado sin dotenv real; advertencia conocida del bundle mayor de 500 kB. Artefacto de prueba, no bundle configurado para publicar |
+| `node --test apps/api/scripts/verify-compiled.test.mjs` | **5/5**: extracción sintética compilada, contención, HTTP protegido, mismo origen y shutdown; procesos propios cerrados y esperados |
+
+No hubo fallos de instalación, aserciones fallidas o pérdida de worker en esta pasada; no se repitieron controles aprobados. La evidencia global previa **975/975** corresponde a la corrección de referencias, con código productivo idéntico al de esta rama; no se presenta como una suite global ejecutada en este cierre. Los resultados de 100, 153 y 5 son verificaciones de alcance distinto, no una nueva cifra de suite global ni una medición de precisión diagnóstica. Las incidencias de la sonda pertenecen a la otra rama y no se trasladan a esta entrega.
+
+**Resta el ensayo de cinco pasos descrito arriba**, con una sola cuenta y material autorizado. Anotar SHA desplegado, estado de guardado/RAG, origen nuevo/reutilizado cuando se capture y resultado del PDF/logout; registrar campos desconocidos sin reconstruirlos. Ante fallo, aplicar Recuperación operativa. Una reversión de producción la realiza únicamente el operador: elegir en Render un despliegue conocido compatible con servicio único, conservar configuración privada e historial y comprobar health/login/flujo tras revertir. No ejecutar SQL, rotar HMAC, cambiar modelos o borrar datos como mecanismo de rollback. Si no existe una versión anterior compatible, detener la demostración en vivo y usar el respaldo explícitamente identificado.
+
+No se acredita seguridad multiusuario, comportamiento bajo carga ni calidad diagnóstica por completar un ensayo monousuario. El aislamiento de cupos detrás del proxy y el P2 de la sonda permanecen pendientes; tampoco se da por satisfecha una rúbrica académica externa no disponible. No hay autorización de commit, publicación o despliegue en este cierre local.
