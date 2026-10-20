@@ -3,6 +3,7 @@ import { resolveOpenAiReasoningEffort, type AnalysisReasoningEffort } from "./an
 import express, { type NextFunction, type Request, type Response } from "express";
 import { rateLimit } from "express-rate-limit";
 import multer from "multer";
+import { HistoryAnalyticsError, type HistoryAnalyticsService } from "./history-analytics.js";
 
 import {
   AiAnalysisError,
@@ -69,6 +70,10 @@ const PDF_SIGNATURE = Buffer.from("%PDF-");
 const ANALYSIS_JSON_LIMIT_BYTES = 256 * 1024;
 
 type ErrorCode =
+  | "ANALYTICS_REQUEST_INVALID"
+  | "ANALYTICS_INVALID"
+  | "ANALYTICS_LIMIT"
+  | "ANALYTICS_UNAVAILABLE"
   | "FILE_REQUIRED"
   | "FILE_TOO_LARGE"
   | "INVALID_FILE_FORMAT"
@@ -124,6 +129,7 @@ interface AnalysisResponsePayload {
 }
 
 export interface AppOptions {
+  historyAnalyticsService?: HistoryAnalyticsService;
   trustedProxyIps?: string[];
   maxFileSizeBytes?: number;
   pdfExtractionLimits?: Partial<PdfExtractionLimits>;
@@ -506,6 +512,25 @@ export function createApp(options: AppOptions) {
     response.json(result);
   });
 
+  app.get("/api/history/export", requireAuthentication, async (request, response) => {
+    if (Object.keys(request.query).length || request.body !== undefined) {
+      sendError(response, 400, "ANALYTICS_REQUEST_INVALID", "La exportación no acepta parámetros de usuario o selección.");
+      return;
+    }
+    if (!options.historyAnalyticsService) {
+      sendError(response, 503, "ANALYTICS_UNAVAILABLE", "La exportación no está disponible temporalmente.");
+      return;
+    }
+    const controller = new AbortController();
+    if (!responseIsAvailable(response)) return;
+    const cancel = () => { if (!response.writableEnded) controller.abort(); };
+    response.once("close", cancel);
+    try {
+      const result = await options.historyAnalyticsService.export(request.usuario!.id, controller.signal);
+      if (responseIsAvailable(response)) response.json(result);
+    } finally { response.removeListener("close", cancel); }
+  });
+
   app.get("/api/history/:id", requireAuthentication, async (request, response) => {
     if (!options.historyService || !request.usuario) {
       sendError(response, 503, "HISTORY_UNAVAILABLE", "El historial no está disponible temporalmente.");
@@ -526,6 +551,14 @@ export function createApp(options: AppOptions) {
 
     if (error instanceof AuthenticationError) {
       sendError(response, error.status, error.code, error.message);
+      return;
+    }
+
+    if (error instanceof HistoryAnalyticsError) {
+      const limit = error.code === "ANALYTICS_LIMIT";
+      sendError(response, limit ? 422 : error.code === "ANALYTICS_INVALID" ? 502 : 503, error.code,
+        limit ? "La exportación supera los límites disponibles o hay otra exportación en curso. No se generaron archivos parciales."
+          : "No fue posible exportar el historial completo. No se generaron archivos parciales.");
       return;
     }
 

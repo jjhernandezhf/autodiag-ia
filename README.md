@@ -1,5 +1,9 @@
 # AutoDiag IA
 
+### Analítica local para Power BI (preparación)
+
+El historial autenticado permite preparar dos CSV relacionados y minimizados desde la vista **Historial**. Se cuentan análisis guardados y DTC registrados, no vehículos únicos, reparaciones ni precisión diagnóstica. La [guía de Power BI](docs/power-bi.md) explica campos, límites, importación, relaciones y medidas; el tablero y la comprobación con datos reales siguen pendientes. No se conecta Desktop con credenciales privilegiadas. Esta preparación no sustituye ni cierra mejoras pendientes del RAG.
+
 AutoDiag IA recibe reportes Autel PDF, valida el archivo y extrae información estructurada del vehículo, sistemas escaneados y códigos DTC. El PDF y texto bruto son temporales; el historial configurado conserva únicamente snapshots estructurados y sanitizados.
 
 La [guía de entrega y operación](docs/entrega.md) reúne arranque compilado, topología frontend/API, guía de usuario, demostración, migraciones y evidencia con sus límites.

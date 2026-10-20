@@ -4,11 +4,13 @@ import { createConfiguredDiagnosticHistoryService } from "./diagnostic-history-r
 import { createConfiguredRagService } from "./rag-runtime.js";
 import { serveCompiledWeb } from "./production-web.js";
 import { stopPdfExtraction } from "./pdf-extractor.js";
+import { createConfiguredHistoryAnalyticsService } from "./history-analytics.js";
 
 const env = loadEnv();
 const ragService = createConfiguredRagService(env);
 const historyService = createConfiguredDiagnosticHistoryService();
 const app = createApp({
+  historyAnalyticsService: createConfiguredHistoryAnalyticsService(),
   trustedProxyIps: env.TRUSTED_PROXY_IPS,
   maxFileSizeBytes: env.REPORT_MAX_SIZE_BYTES,
   pdfExtractionLimits: {
