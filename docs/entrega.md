@@ -1,6 +1,6 @@
 # Entrega operativa — 21 de octubre de 2026
 
-Estado preparado localmente el 19 de octubre. No implica despliegue realizado ni calidad diagnóstica medida. Base PDF preservada: `8b486ca205cf34d3c074d27257910bf915a2fbe2`. Este cierre no cambia modelos, prompts, huellas, corpus, permisos ni timeouts.
+Preparación local; no implica despliegue realizado ni calidad diagnóstica medida. Base PDF preservada: `8b486ca205cf34d3c074d27257910bf915a2fbe2`. La preparación Render no cambia modelos, prompts, huellas, corpus, permisos ni presupuestos de solicitudes. Añade servicio del build web y cierre operativo del proceso.
 
 ## Instalación y configuración
 
@@ -30,40 +30,96 @@ Desarrollo: API `http://localhost:3000`, web `http://localhost:5173`; `npm run d
 
 ```sh
 npm run build
-npm run start --workspace @autodiag/api
+npm start
 ```
 
-`start` ejecuta `node dist/index.js` desde el workspace API, no carga dotenv automáticamente. En hosting se inyecta la configuración en el entorno del proceso. Alternativa local explícita, desde la raíz y solo por el operador: `node --env-file=.env apps/api/dist/index.js`. No incorporar este flag al extractor. El build web normal carga las variables públicas locales: debe hacerlo el operador con configuración autorizada del destino. Cambiar las variables públicas requiere reconstruir la web.
+El nuevo `start` raíz ejecuta `node apps/api/dist/index.js`; el comando individual `npm run start --workspace @autodiag/api` sigue disponible. Ninguno carga dotenv automáticamente. **Configurar `NODE_ENV=production`** para servir también la web; en desarrollo se conserva Vite y el arranque API no necesita build web. En hosting se inyecta la configuración en el entorno del proceso. Alternativa local explícita, desde la raíz y solo por el operador con `NODE_ENV=production`: `node --env-file=.env apps/api/dist/index.js`. No incorporar este flag al extractor. El build web normal carga las variables públicas locales: debe hacerlo el operador con configuración autorizada del destino. Cambiar las variables públicas requiere reconstruir la web.
 
 Artefactos: conservar **todo** `apps/api/dist`, incluidos `pdf-extractor-child.mjs`, `pdf-extractor-worker.mjs` y `pdf-process-protocol.js`, y las dependencias de producción instaladas desde el lockfile; no basta copiar `index.js`. El hijo compilado no requiere tsx. Conservar `apps/web/dist` completo (HTML y assets con hash/logo). No publicar la raíz del repositorio, sourcemaps API, `.env` ni `node_modules` como archivos estáticos. El proceso API necesita poder lanzar Node hijo, IPC y permisos mínimos de ejecución; PDF.js tiene módulos nativos y debe instalarse en el sistema/arquitectura de destino, no copiar node_modules entre sistemas.
 
-### Comunicación y topologías compatibles
+### Render: un único Web Service, sin Nginx ni Vite en producción
 
-Las solicitudes del navegador son relativas a `/api`. **No hay URL API configurable en la web actual**: el despliegue compatible debe presentar web y API bajo un mismo origen público. No depende del proxy Vite en producción y no requiere CORS abierto. Dos alternativas sin elegir proveedor:
+Decisión autorizada: React compilado y Express bajo el mismo origen en un **Render Web Service Node**. Supabase y OpenAI existentes no cambian. Las solicitudes relativas `/api` ya apuntan a este mismo servicio; no hay `VITE_API_URL`, CORS abierto ni segunda aplicación web que configurar. Render termina HTTPS y reenvía al puerto HTTP de Express. La API escucha explícitamente en `0.0.0.0` y usa `PORT` validado entre 1 y 65535.
 
-1. Servidor estático y API en una máquina/contenedor compuesto, detrás de proxy inverso HTTPS.
-2. Hosting estático y API en servicios separados, con gateway/rewrites que publique `/api/*` bajo el mismo origen del frontend. No redirigir el navegador al origen interno.
+En producción Express resuelve `apps/web/dist` desde la ubicación de su módulo, no desde cwd. Falla al arrancar si falta index. Solo expone index y assets de extensiones autorizadas dentro del build (verificación de realpath); no sirve sourcemaps, dotfiles, fuentes, dependencias o directorios del repositorio. Fallback React solo para GET/HEAD de rutas sin extensión que aceptan HTML y representan navegación, nunca `/api`, assets ausentes u otros métodos. Los 404 desconocidos de API son JSON. Las respuestas llevan `Cache-Control: no-store`, incluidos errores y datos privados; no activar edge caching de `/api`. Se conserva Vite en desarrollo. No publicar la raíz del repo como carpeta estática.
 
-Ejemplo de reglas Nginx para el operador (no aplicado; rutas y TLS por definir):
+#### Campos exactos del formulario (todavía no aplicado)
 
-```nginx
-# Dentro del server HTTPS del dominio elegido:
-root /srv/autodiag/web;
-client_max_body_size 11m;
-location /api/ {
-    proxy_pass http://127.0.0.1:3000;
-    proxy_read_timeout 90s;
-    proxy_send_timeout 90s;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    access_log off;
-}
-location / { try_files $uri $uri/ /index.html; }
-```
+| Campo Render | Valor |
+| --- | --- |
+| Tipo | Web Service |
+| Repository | `https://github.com/jjhernandezhf/autodiag-ia` |
+| Branch | `feat/render-single-service` para evaluación, **solo después de publicación autorizada**; cambiar a `main` tras aprobación y merge |
+| Root Directory | Vacío (raíz del monorepo; no `apps/api`) |
+| Runtime / Language | Node, runtime nativo, sin Docker |
+| Node | `.node-version`: `24.16.0`; quitar un `NODE_VERSION` remoto contradictorio o fijarlo al mismo valor |
+| Build Command | `npm ci --include=dev --no-fund && npm run build` |
+| Start Command | `npm start` |
+| Health Check Path | `/api/health` |
+| Pre-Deploy Command | Vacío; ninguna migración ni ingesta automática |
+| Instances | 1, sin autoscaling inicial |
+| Auto-Deploy | Desactivado inicialmente; despliegue manual autorizado después de revisar variables y commit |
+| Plan / Region | Decisión del operador según memoria medida y proximidad al Supabase existente; no contratado aquí |
 
-`proxy_pass` sin sufijo URI conserva `/api`. Los 90s corresponden al presupuesto API máximo de 80s, sin cambiarlo. El límite de proxy 11 MiB admite multipart con un PDF default de 10 MiB; si se cambia el límite API, ajustar el del proxy y comprobar sus errores (un rechazo del proxy puede no devolver JSON API). No cachear `/api`, tokens ni respuestas autenticadas. Evitar logs de bodies, credenciales, Authorization y parámetros privados. Mantener la API interna no expuesta directamente; verificar IP del limitador de login y política de proxy confiable antes de un despliegue multiusuario: la API no configura `trust proxy` y no se debe habilitar confianza indiscriminada. El rate limiter/idempotencia/cupos son por proceso, no distribuidos. Verificar timeouts del gateway/hosting y soporte de procesos hijos; una plataforma estática/serverless restringida no equivale a un host Node compatible.
+`--include=dev` es necesario para TypeScript/Vite aunque `NODE_ENV=production`. No se actualiza ni regenera lockfile; `npm ci` instala desde él. No copiar node_modules de Windows a Linux. Se comprobaron nombres de imports con TypeScript `forceConsistentCasingInFileNames` y nombres reales; la instalación/compilación nativa en Linux sigue pendiente. Node se fija a la versión local comprobada, sin afirmar validación de otras versiones.
 
-Publicar web y API en orígenes distintos sin gateway **no está preparado**: requeriría una decisión posterior de URL y CORS con allowlist, no `*`. No se selecciona hosting, dominio ni certificado en este cierre. `vite preview` no es servidor de producción. La web se sirve en la raíz `/`; un subpath requiere configuración y verificación adicional de assets.
+#### Variables en Environment del servicio
+
+Introducir sus valores privadamente en Render Dashboard > servicio > Environment; nunca en Git, logs, capturas ni este documento. No subir `.env` o `.env.local`. Render pone a disposición variables del servicio durante build y runtime: no confundir acceso del proceso de build con exposición al navegador.
+
+| Variables | Uso / configuración |
+| --- | --- |
+| `NODE_ENV` | `production`, imprescindible para servir el build web |
+| `PORT` | Usar el proporcionado por Render (habitualmente 10000); no fijarlo a 5173 |
+| `TRUSTED_PROXY_IPS` | Lista CSV opcional de hasta 32 IP **exactas** de proxies de entrada verificados; vacío conserva confianza deshabilitada. No usar direcciones de salida, alias, CIDR ni cantidad de saltos |
+| `VIN_HMAC_SECRET` | Secreto backend obligatorio; conservar el existente, no regenerarlo durante despliegue |
+| `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SECRET_KEY` | Backend del proyecto existente; el contrato actual exige claves publishable/secret con formato moderno, no sustituir por un JWT `service_role` legacy |
+| `OPENAI_API_KEY`, `OPENAI_MODEL` | Backend; conservar modelo y cuenta ya operativos sin inferir sus valores privados |
+| `OPENAI_REASONING_EFFORT` | Opcional; preservar selección existente, vacío conserva comportamiento anterior |
+| `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY` | Públicas, usadas en build; deben apuntar al mismo proyecto de Auth que el backend |
+| Variables RAG y límites de `.env.example` | Replicar configuración operativa existente; vacíos opcionales conservan defaults. No activar/desactivar RAG ni cambiar modelos, umbrales o presupuestos por este despliegue |
+
+Nunca introducir `VITE_OPENAI_API_KEY`, `VITE_SUPABASE_SECRET_KEY`, secretos HMAC ni credenciales con ningún prefijo `VITE_`. El navegador solo lee las dos variables públicas indicadas; una configuración pública faltante produce una pantalla segura de configuración, no acceso al workspace. El backend sin configuración de Auth devuelve error público seguro. Health no detecta estos errores funcionales.
+
+#### Memoria, coordinación y cierre
+
+La API comparte la memoria del servicio con hasta **dos extractores Node hijos**. Cada hijo usa old-space V8 de 192 MiB y stack 4096 KiB por defecto; esos números no incluyen todo el heap, código, buffers, IPC, PDF.js ni memoria nativa. Dos old-spaces suman 384 MiB, **no** una estimación de RSS ni un tamaño recomendado de plan. No asegurar que el plan mínimo alcanza: medir picos de API + hijos, carga simultánea, límite de archivo, páginas y documentos autorizados en Linux. No hay disco persistente para PDFs.
+
+Al recibir SIGTERM/SIGINT se deja de aceptar conexiones, se bloquean nuevas extracciones y se terminan los hijos; el cierre espera su terminación física antes de salir normalmente. Conexiones restantes se cierran al completar esa limpieza. Hay una salida de emergencia a 25s (no es un cambio al timeout de análisis/PDF); Render documenta SIGKILL a los 30s por defecto. Un despliegue puede interrumpir solicitudes activas: no prometer que un análisis iniciado finalice durante el apagado. Mantener la supervisión IPC/deadline del hijo y las limitaciones nativas documentadas.
+
+Idempotencia de transporte, rate limit, tokens temporales de upload y dos cupos viven en memoria de una API. Historial por usuario/fingerprint permanece en Supabase. Reinicios pierden coordinación en vuelo; una sola instancia configurada no elimina el solapamiento temporal entre instancia antigua y nueva durante un deploy. Evitar despliegues durante análisis y no garantizar deduplicación física entre procesos/replicas. Escalar exige coordinación compartida, no está implementado.
+
+#### Proxies confiables y activación pendiente en Render
+
+`TRUSTED_PROXY_IPS` ausente, vacío o solo espacios mantiene `trust proxy = false`: Express usa el peer directo e ignora las IP reenviadas para identificar al cliente. Una cabecera falsificada desde un peer no confiable no cambia su cupo. Se conservan los diagnósticos de express-rate-limit; si alguien envía X-Forwarded-For con confianza deshabilitada, puede aparecer `ERR_ERL_UNEXPECTED_X_FORWARDED_FOR`. No se suprime esa validación ni se interpreta el aviso como habilitación de confianza.
+
+La política opt-in acepta como máximo 32 IP exactas IPv4/IPv6, con longitud total de CSV de hasta 2048 caracteres. No admite `true`, números de saltos, nombres como `loopback`/`uniquelocal`, dominios, CIDR, puertos o zonas IPv6. Estos límites son de validación/recursos, **no una afirmación sobre cuántos proxies tiene Render**. La configuración inválida impide arrancar con un error de configuración sin reflejar el valor rechazado. Las IP equivalentes se normalizan, incluidas IPv4 mapeadas en IPv6.
+
+Express recibe la lista explícita y recorre X-Forwarded-For desde el peer hacia atrás hasta el primer cliente no confiable; nunca se toma arbitrariamente la primera IP. Solo para login desde un peer declarado confiable, se exige una cadena de IP válida y acotada (hasta 32 entradas y 2048 caracteres). Cadena ausente, vacía, malformada o sin cliente no confiable devuelve `AUTH_REQUEST_INVALID` 400, antes del limitador/servicio Auth y sin imprimir la cadena. Las formas equivalentes de IP se normalizan sin cambiar el orden. El limitador conserva su clave y validaciones predeterminadas, agrupación IPv6 /56, ventana de 15 minutos y diez fallos; los logins exitosos no consumen el cupo. No se analiza `Forwarded` como identidad alternativa.
+
+**No hay ninguna IP ni topología Render habilitada por defecto.** La documentación pública consultada no acredita para este servicio una lista estable de peers de entrada ni su política completa de cabeceras. No confundir IP dedicadas/de salida (egress) con proxies de entrada al proceso. La preparación resuelve el mecanismo configurable; el despliegue público multiusuario sigue bloqueado hasta obtener y validar esa información. Un mock con loopback es solo un transporte de prueba y no justifica configurarlo en Render.
+
+Antes del primer despliegue utilizable:
+
+1. Obtener de Render la identificación autorizada de los proxies de entrada, su estabilidad/rotación, todos los caminos hasta el servicio y cómo añaden o sobrescriben X-Forwarded-For. Comprobar que no se puede alcanzar la API por una ruta que eluda esos proxies. No deducir una allowlist a partir de una única IP observada. Si solo se documentan redes dinámicas o no se pueden acreditar IP exactas estables, **no habilitar confianza supuesta**: esta política estrecha aún no basta para ese destino y deberá revisarse con evidencia antes de abrir login multiusuario.
+2. Configurar privadamente `TRUSTED_PROXY_IPS` con las IP exactas confirmadas, nunca IP de clientes finales ni de salida. Revisar equivalencia IPv4/mapped IPv4/IPv6 y reinicios/caminos alternativos. Conservar `NODE_ENV=production`; no activar autorregistro.
+3. En una ventana de prueba sin usuarios activos y desde dos redes externas distintas A/B, enviar a `/api/auth/login` únicamente usuario inexistente y contraseña sintética. Diez fallos de A deben devolver 401; el siguiente de A, 429; una solicitud de B debe seguir devolviendo 401, no 429. Registrar solo etiquetas A/B, conteos, códigos y headers RateLimit, nunca IP reales, credenciales, tokens o cabeceras completas.
+4. Desde A ya limitado, repetir añadiendo IP falsas en X-Forwarded-For (direcciones de documentación, no identidades de terceros): debe seguir 429. Probar IPv4/IPv6 si ambas rutas existen. La rotación de sufijos dentro del mismo /56 IPv6 no debe permitir evadir el límite. Una respuesta 400 por cadena o un diagnóstico del limitador requiere revisar la topología; no desactivar validaciones para conseguir 401.
+5. Usar las respuestas de los endpoints existentes; **no añadir un endpoint permanente de depuración ni logs de req.ip/cabeceras**. Solicitar al proveedor evidencia del peer/cadena por su canal administrativo autorizado si falta. Esperar la ventana de 15 minutos y confirmar recuperación; no reiniciar solo para ocultar la agregación. No se ejecutaron estas comprobaciones remotas aquí.
+
+Para revertir la opción, vaciar `TRUSTED_PROXY_IPS` y reiniciar restaura el modo directo; detrás de un proxy esto puede volver a agrupar clientes y **no es una solución para producción multiusuario**. Revisar logs del proveedor sin publicar tokens/Authorization. La exposición pública requiere validar HTTPS, permisos, registro público deshabilitado y acceso con dos usuarios autorizados.
+
+Fundamento: [Express detrás de proxies](https://expressjs.com/en/guide/behind-proxies/), [errores y validaciones del limitador](https://express-rate-limit.mintlify.app/reference/error-codes), [guía de proxies del mantenedor](https://express-rate-limit.mintlify.app/guides/troubleshooting-proxy-issues). No se cambian auth, permisos ni límites para resolver la configuración.
+
+#### Comprobación y reversión del despliegue (operador)
+
+1. Tras publicación y autorización independientes, crear el servicio con estos campos y confirmar Node/commit/build. No agregar base de datos, migraciones ni ingesta.
+2. Abrir URL HTTPS, `/api/health`, recargar una navegación, comprobar carga de JS/CSS/logo y 404 JSON en `/api/inexistente`; comprobar que `.env`, fuentes y assets ausentes no devuelven HTML. Sin tokens, `/api/history` debe devolver 401 y no datos cacheables.
+3. Con configuración privada y autorización de consumo, probar login, extracción Autel, confirmación manual, análisis nuevo frente a reutilizado, fuentes, guardado/lectura por usuario y PDF. Esto sí puede consumir proveedores: **no ejecutado en esta preparación**. No activar candidatos TPMS.
+4. Medir memoria/latencia/cold start, dos cargas simultáneas y recuperación tras reinicio; revisar errores nativos y que no sobrevivan extractores. Health verde solo demuestra HTTP, no integración ni calidad.
+5. Si falla, detener pruebas y auto-deploys. Si existe un despliegue anterior **compatible con servicio único**, usar Rollback del Dashboard o redeploy de su commit registrado y verificar variables/health/flujo. Si es el primer despliegue, no hay rollback Render probado: suspender el servicio y conservar la versión local estable. Volver a un commit anterior al servicio estático no conserva la web pública. El rollback de código no revierte variables, migraciones ni datos; no borrar historial, rotar secretos o reaplicar SQL para revertir.
+
+Fuentes oficiales consultadas: [Web Services y puerto](https://render.com/docs/web-services), [versión de Node](https://render.com/docs/node-version), [raíz monorepo](https://render.com/docs/monorepo-support), [health](https://render.com/docs/health-checks), [deploy y graceful shutdown](https://render.com/docs/deploys). No se accedió a cuenta Render ni se creó servicio.
 
 Health operativo: `GET /api/health` devuelve únicamente `{"status":"ok"}`. No demuestra conexión a proveedores ni disponibilidad de generación. La configuración HMAC inválida impide arrancar; Auth ausente devuelve error público seguro y no habilita endpoints privados. No sustituir estas validaciones con valores de ejemplo en producción.
 
@@ -71,12 +127,13 @@ Health operativo: `GET /api/health` devuelve únicamente `{"status":"ok"}`. No d
 
 ```sh
 npm run build --workspace @autodiag/api
+npm run build --workspace @autodiag/web -- --mode test
 node --test apps/api/scripts/verify-compiled.test.mjs
 npm test
 npm run lint
 ```
 
-El script compilado usa PDFs sintéticos, autenticación simulada y un proceso API con entorno explícito sin credenciales. Comprueba cuatro escenarios: contención de exit 23 y siguiente Autel correcto; PDF vacío/dañado; protección HTTP/historial no configurado; arranque de `dist/index.js`, health y fallo Auth seguro. Cierra su propio proceso. No usa `.env`, servidores de desarrollo ni proveedores. Requiere dependencias de desarrollo para PDF-lib/supertest; no se ejecuta en el host reducido de producción.
+El script compilado usa PDFs sintéticos, autenticación simulada y procesos con entorno explícito sin credenciales. Comprueba contención de exit 23 y siguiente Autel correcto; PDF vacío/dañado; protección HTTP/historial no configurado; arranque productivo desde cwd temporal, web/assets/navegación y API bajo un origen; cierre con extractor real activo. Cierra sus propios procesos. La prueba de shutdown emite SIGTERM dentro del proceso porque `kill` en Windows no ejecuta el handler JS; no demuestra recepción de señales del sistema en Linux. No usa `.env`, servidores de desarrollo ni proveedores. Requiere dependencias de desarrollo para PDF-lib/supertest; no se ejecuta en el host reducido de producción. Construir ambos workspaces antes de ejecutar el script.
 
 Para comprobar el build web **sin leer archivos de entorno reales**, desde la raíz:
 
@@ -108,6 +165,18 @@ La configuración existente `envDir: false` en modo test evita archivos dotenv. 
 | Diff y archivos nuevos | Diff-check y whitespace aprobados; escaneo razonable sin candidatos sensibles; entornos ignorados/no rastreados, manifiestos/lockfile intactos |
 
 Una comprobación auxiliar inicial de assets falló por escape de comillas del comando Node en PowerShell; se corrigió la comprobación usando PowerShell y pasó. No fue fallo del artefacto. No hubo aserciones fallidas ni pérdida de worker en la suite de este cierre. El proceso API temporal creado por el script se cerró y esperó explícitamente; no se iniciaron servicios de desarrollo. No se hicieron instalaciones, auditorías repetidas, llamadas a proveedores ni conexiones remotas. La suite completa no incluye el script Node: sus 4 casos se informan separadamente, no dentro de los 906.
+
+### Preparación del servicio único Render: evidencia posterior
+
+- Rama de trabajo `feat/render-single-service`, base `cfdd2627a17a9faeee4c0e5782af71df9f2bbf98`. Aislamiento PDF anterior conservado, sin actualizar dependencias ni lockfile.
+- Rutas estáticas, navegación, archivos privados, autenticación y shutdown: focalizadas **19/19**. Primer comando pasó también el filtro `src` del script npm y ejecutó una API completa **719/719**, más amplia de lo previsto; luego se usó `npm exec --workspace @autodiag/api -- vitest run src/production-web.test.ts src/pdf-shutdown.test.ts src/runtime-workflow.test.ts` para seleccionar exactamente los tres archivos.
+- Comprobación compilada: primer intento **4/5**, por una solicitud `fetch` de Node que añadía `Sec-Fetch-Mode: cors`, no una navegación. El servidor rechazó correctamente el fallback HTML. Corregida la forma de esa solicitud en el test, **5/5**; no se relajó el control productivo. Incluye arranque desde directorio temporal, assets reales, mismo origen y extracción compilada, más handler de SIGTERM con extractor real activo. Procesos propios cerrados/observados, sin servicios externos.
+- Lint inicial: una infracción `no-unexpected-multiline` en el formato de `it.each` del test nuevo. Corregida sin cambiar reglas; lint final aprobado.
+- Una suite global final sobre el código productivo terminado: API **719/719**, frontend **205/205**, total **924/924**. Sin pérdida de worker en esa ejecución, no una garantía de estabilidad permanente.
+- Build API y web (`--mode test`, sin dotenv real) aprobados; advertencia conocida del bundle mayor de 500 kB. No se ejecutó el build normal con variables privadas del operador. Artefacto de validación sin credenciales públicas no apto todavía para login real/publicación.
+- La instalación Linux con `npm ci`, memoria del host Render, señales POSIX reales, TLS/proxy, configuración privada y recorrido con proveedores **siguen pendientes**. No se crearon servicios, se aplicaron migraciones ni se midió calidad diagnóstica. La evidencia anterior de 906/906 pertenece al cierre local previo, no debe sustituir ni confundirse con esta preparación.
+
+Corrección posterior P2 de proxy: las 924 pruebas y compilado 5/5 anteriores no se presentan como repetidas después de este ajuste. Primeras focalizadas: 14 fallos (12 por campo omitido requerido en Zod, uno por una aserción de saneamiento que confundía la coma de JSON con el input rechazado, otro por representación hexadecimal de IPv4 mapeada con cupo distinto). Se corrigió el default del esquema, se afirmó el issue genérico exacto sin el input y se normalizaron las formas equivalentes de IP antes de la resolución de Express, manteniendo la clave y validaciones de la biblioteca. Focalizadas finales de proxies, configuración y autenticación: **101/101**. Lint API, build API y diff-check aprobados. Arranque compilado de mismo origen, sin la nueva variable y con entorno sintético: **1/1** (`node --test --test-name-pattern="actual compiled entry" apps/api/scripts/verify-compiled.test.mjs`), proceso temporal cerrado. Las pruebas simulan una topología controlada; no acreditan los proxies reales de Render.
 
 ## Guía de usuario y demostración de cinco minutos
 
@@ -177,7 +246,7 @@ La existencia de políticas no prueba su eficacia: comprobar con dos usuarios au
 | Análisis/confirmación/idempotencia | Implementado; contratos simulados y ensayo usuario | No se ha medido precisión diagnóstica |
 | RAG/procedencia | Implementado; transporte validado mediante mocks | Relevancia real, revisión técnica y TPMS pendientes; no activar candidatos |
 | Historial/PDF | Implementado; aislamiento probado localmente y ensayo usuario | Reconciliación administrativa y prueba del destino |
-| Arranque compilado | API y extractor comprobados; web empaquetada sin dotenv real | Dominio, HTTPS, gateway, IP/rate-limit y prueba de navegador en destino |
+| Arranque compilado | API, web y extractor juntos comprobados localmente sin dotenv real | Deploy Render/Linux, HTTPS, memoria, IP/rate-limit y prueba de navegador en destino |
 | Evaluación | Formato/evaluador offline y baseline Mazda exploratorio | Casos autorizados, etiquetas técnicas, reserva ciega y criterios de aceptación |
 | n8n/Power BI/aprendizaje supervisado | No implementados; no se encontró compromiso de entrega en documentación versionada | Confirmar rúbrica externa si los exige; no marcarlos completos |
 
@@ -185,6 +254,6 @@ La búsqueda documental solo demuestra lo que contiene el repositorio: no sustit
 
 ## Pendientes por prioridad
 
-1. Confirmar si la entrega es local o exige URL; fijar sistema de destino y contrastar rúbrica (especialmente integraciones externas).
-2. Operador: revisar migraciones/seguridad sin reaplicar SQL y ejecutar smoke de navegador sobre artefacto de entrega, con datos autorizados.
-3. Revisar este diff y preparar la demostración con respaldo y límites de evidencia; publicación solo con autorización posterior.
+1. Revisar y autorizar publicación de la preparación Render; definir plan/región según memoria y acceso, no crear servicios automáticamente.
+2. Operador: configurar privadamente el servicio único, revisar seguridad sin reaplicar SQL y ejecutar smoke en Linux/Render con datos y consumo autorizados.
+3. Ensayar la demostración con respaldo y límites de evidencia; contrastar rúbrica externa y completar evaluación técnica pendiente.

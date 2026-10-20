@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { optionalReasoningEffortSchema, resolveOpenAiReasoningEffort } from "./analysis-generation.js";
+import { resolveTrustedProxyIps } from "./trusted-proxies.js";
 
 export const DEFAULT_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
 export const DEFAULT_OPENAI_TIMEOUT_MS = 60_000;
@@ -78,6 +79,12 @@ const optionalBooleanFromEnvironment = z.preprocess(
 );
 
 const envSchema = z.object({
+  TRUSTED_PROXY_IPS: z.string().default("").transform((value, context) => {
+    try { return resolveTrustedProxyIps(value); } catch {
+      context.addIssue({ code: "custom", message: "TRUSTED_PROXY_IPS requiere hasta 32 IP exactas IPv4/IPv6; no admite CIDR, nombres o saltos." });
+      return z.NEVER;
+    }
+  }),
   PORT: optionalIntegerFromEnvironment(1, 65_535, 3_000),
   REPORT_MAX_SIZE_BYTES: optionalIntegerFromEnvironment(1, 100 * 1024 * 1024, DEFAULT_MAX_FILE_SIZE_BYTES),
   PDF_EXTRACTION_MAX_PAGES: optionalIntegerFromEnvironment(1, 1_000, DEFAULT_PDF_EXTRACTION_LIMITS.maxPages),

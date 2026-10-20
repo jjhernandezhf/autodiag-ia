@@ -61,6 +61,8 @@ import {
 } from "./rag-service.js";
 import type { RagMetadata } from "./rag-types.js";
 import { KNOWLEDGE_CORPUS_VERSION } from "./knowledge-corpus.js";
+import { preventPrivateCaching } from "./production-web.js";
+import { resolveTrustedProxyIps, validateLoginProxyChain } from "./trusted-proxies.js";
 
 const PDF_MIME_TYPE = "application/pdf";
 const PDF_SIGNATURE = Buffer.from("%PDF-");
@@ -122,6 +124,7 @@ interface AnalysisResponsePayload {
 }
 
 export interface AppOptions {
+  trustedProxyIps?: string[];
   maxFileSizeBytes?: number;
   pdfExtractionLimits?: Partial<PdfExtractionLimits>;
   vinHmacSecret: string;
@@ -185,6 +188,8 @@ export function createApp(options: AppOptions) {
     throw new Error("VIN_HMAC_SECRET debe contener al menos 32 bytes.");
   }
   const app = express();
+  const trustedProxyIps = resolveTrustedProxyIps(options.trustedProxyIps);
+  app.set("trust proxy", trustedProxyIps.length ? trustedProxyIps : false);
 
   // Multer 2.4 supports fieldArrayIndexLimit at runtime, while the current
   // @types/multer declaration has not added it yet. This upload accepts no
@@ -229,6 +234,7 @@ export function createApp(options: AppOptions) {
   };
 
   app.disable("x-powered-by");
+  app.use(preventPrivateCaching);
   // The largest contract-valid analysis DTO (40 modules, 100 DTC and all text
   // fields at their maxima) stays below 256 KiB; the bounded margin rejects
   // unrelated oversized JSON without changing Multer's multipart file limit.
@@ -278,6 +284,7 @@ export function createApp(options: AppOptions) {
       response.set("Pragma", "no-cache");
       next();
     },
+    validateLoginProxyChain,
     loginRateLimiter,
     jsonParser,
     async (request, response) => {

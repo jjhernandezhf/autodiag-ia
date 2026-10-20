@@ -1088,6 +1088,31 @@ describe("orientación asistida por IA", () => {
     expect(await screen.findByText("Requiere confirmación del técnico")).toBeTruthy();
   });
 
+  it("502 de validación conserva sesión, reporte y observaciones sin mostrar mensaje remoto", async () => {
+    const file = createPdf("validacion-sintetica.pdf");
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(readyAnalysisUpload(file))
+      .mockResolvedValueOnce(createJsonResponse(false, { error: { code: "OPENAI_RESPONSE_INVALID", message: "REMOTE_PRIVATE_MESSAGE" } }, 502));
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    const auth = createTestAuthService({ signOutLocal: vi.fn(async () => undefined) });
+    const { container } = await renderAuthenticatedApp(auth);
+    const { input } = getUploadElements(container);
+    await user.upload(input, file);
+    await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+    const observations = await screen.findByRole("textbox", { name: "Observaciones del vehículo (opcional)" });
+    await user.type(observations, "Vibración al acelerar.");
+    await user.click(await screen.findByRole("button", { name: "Analizar DTC con IA" }));
+    await user.click(screen.getByRole("button", { name: "Confirmar y analizar" }));
+    expect(await screen.findByText("El servicio devolvió una orientación que no pudo validarse.")).toBeTruthy();
+    expect((observations as HTMLTextAreaElement).value).toBe("Vibración al acelerar.");
+    expect(screen.getByRole("heading", { name: "Datos del reporte" })).toBeTruthy();
+    expect(screen.queryByText("REMOTE_PRIVATE_MESSAGE")).toBeNull();
+    expect(screen.queryByText(/Tu sesión continúa activa. Puedes reintentar/u)).toBeNull();
+    expect(auth.signOutLocal).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/reports/analyze")).toHaveLength(1);
+  });
+
   it("presenta la orientación separada con prioridades, causas, comprobaciones, advertencias y confianza", async () => {
     const file = createPdf("resultado-ia.pdf");
     const fetchMock = vi
