@@ -1,5 +1,6 @@
 import { type ChangeEvent, type DragEvent, type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import autodiagLogoUrl from "./assets/autodiag-ia-logo.png";
+import { HistoryAnalyticsExport } from "./HistoryAnalyticsExport";
 import { describeRagProvenance, isRagProvenance } from "./rag-provenance";
 import {
   API_UNAVAILABLE_MESSAGE,
@@ -2228,6 +2229,8 @@ function ReportWorkspace({
             <h1 id="history-title">Diagnósticos anteriores</h1>
             <p>Consulta únicamente los diagnósticos asociados a tu sesión.</p>
           </div>
+
+          <HistoryAnalyticsExport apiClient={apiClient} onFailure={handleApiFailure} />
 
           {historyDetailStatus === "loading" && (
             <div className="history-state" role="status"><span className="analysis-spinner" aria-hidden="true" /> Cargando diagnóstico…</div>
