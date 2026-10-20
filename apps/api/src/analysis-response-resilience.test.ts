@@ -24,7 +24,8 @@ const output = {
   requiresTechnicianConfirmation: true,
 };
 
-function responseBody(status = "completed", text = JSON.stringify(output)) {
+const wireOutput = { ...output, findings: output.findings.map(finding => ({ ...finding, relatedDtc: "D001" })) };
+function responseBody(status = "completed", text = JSON.stringify(wireOutput)) {
   return {
     object: "response", status,
     incomplete_details: status === "incomplete" ? { reason: "max_output_tokens" } : null,
@@ -536,8 +537,8 @@ describe("Responses SDK: finalización, cuerpo y exclusión física", () => {
 
   it.each(["UNKNOWN_REFERENCE", "DUPLICATE_REFERENCE", "OBSERVATION_STATUS_MISMATCH"] as const)(
     "registra únicamente el motivo semántico %s y métricas seguras", async (reason) => {
-      const value = structuredClone(output);
-      if (reason === "UNKNOWN_REFERENCE") value.findings[0]!.relatedDtc.code = "P9999";
+      const value = structuredClone(wireOutput);
+      if (reason === "UNKNOWN_REFERENCE") value.findings[0]!.relatedDtc = "D999";
       if (reason === "DUPLICATE_REFERENCE") value.findings.push(structuredClone(value.findings[0]!));
       if (reason === "OBSERVATION_STATUS_MISMATCH") value.observationCorrelation.status = "no_clear_match";
       const fetch = vi.fn<typeof globalThis.fetch>(async () => jsonResponse(responseBody("completed", JSON.stringify(value))));

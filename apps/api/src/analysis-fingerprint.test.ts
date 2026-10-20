@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { describe, expect, it } from "vitest";
+import { DIAGNOSTIC_PROMPT_VERSION } from "./ai-analysis-service.js";
 
 import {
   canonicalSerialize,
@@ -37,6 +38,13 @@ function fingerprintInput(overrides: Record<string, unknown> = {}) {
 }
 
 describe("huella privada del PDF", () => {
+  it("separa referencias opacas de generaciones anteriores sin cambiar el historial público", () => {
+    expect(DIAGNOSTIC_PROMPT_VERSION).toBe("diagnostic_prompt_v2_reference_ids");
+    const current = createAnalysisFingerprint(fingerprintInput({ promptVersion: DIAGNOSTIC_PROMPT_VERSION }), SECRET);
+    const previous = createAnalysisFingerprint(fingerprintInput({ promptVersion: "diagnostic_prompt_v1" }), SECRET);
+    expect(current).not.toBe(previous);
+    expect(createAnalysisFingerprint(fingerprintInput({ promptVersion: DIAGNOSTIC_PROMPT_VERSION }), SECRET)).toBe(current);
+  });
   it("produce el mismo token para los mismos bytes y otro para contenido diferente", () => {
     const first = createPdfContentToken(Buffer.from("%PDF-synthetic-a"), SECRET, USER_A);
     const repeated = createPdfContentToken(Buffer.from("%PDF-synthetic-a"), SECRET, USER_A);

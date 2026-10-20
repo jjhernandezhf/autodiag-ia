@@ -50,6 +50,16 @@ afterEach(() => {
 });
 
 describe("cliente API tipado", () => {
+  it("502 OPENAI_RESPONSE_INVALID es validación local, sin retry, logout ni mensaje remoto", async () => {
+    const fetch = vi.fn(async () => response(502, { error: { code: "OPENAI_RESPONSE_INVALID", message: "REMOTE_PRIVATE_MESSAGE" } }));
+    const service = authenticationService(fetch);
+    const client = createBrowserApiClient(service);
+    await expect(client.requestJson("/api/reports/analyze", { parse: parseOk, retry: "once" }))
+      .rejects.toMatchObject({ type: "validation", retryable: false, status: 502,
+        message: "El servicio devolvió una orientación que no pudo validarse." });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(service.signOutLocal).not.toHaveBeenCalled();
+  });
   it("clasifica un fallo de transporte sin cerrar la sesión", async () => {
     const service = authenticationService(vi.fn(async () => { throw new TypeError("Failed to fetch"); }));
     const client = createBrowserApiClient(service);

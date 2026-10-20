@@ -104,6 +104,32 @@ function testApp(overrides: Parameters<typeof createApp>[0] = { vinHmacSecret: "
 
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
+it.each(["UNKNOWN_REFERENCE", "DUPLICATE_REFERENCE"])("referencias internas %s: 502, sin retry/guardado; reintento manual válido sí guarda", async (reason) => {
+  const wire = { ...output, findings: [{ ...output.findings[0]!, relatedDtc: "D001" }] };
+  const invalid = reason === "UNKNOWN_REFERENCE" ? { ...wire, findings: [{ ...wire.findings[0]!, relatedDtc: "D999" }] }
+    : { ...wire, findings: [wire.findings[0], wire.findings[0]] };
+  const fetch = vi.fn<typeof globalThis.fetch>().mockImplementationOnce(async () => respond(invalid))
+    .mockImplementationOnce(async () => respond(wire));
+  function respond(value: unknown) {
+    return new Response(JSON.stringify({ status: "completed", object: "response", output: [{ type: "message", status: "completed", role: "assistant",
+      content: [{ type: "output_text", text: JSON.stringify(value), annotations: [] }] }] }), { headers: { "content-type": "application/json" } });
+  }
+  const save = vi.fn(async () => ({ id: "44444444-4444-4444-8444-444444444444" }));
+  const app = testApp({ vinHmacSecret: SECRET, openAiModel: "synthetic-model", analysisService: new DiagnosticAnalysisService(
+    new OpenAiResponsesClient("synthetic-key", new OpenAI({ apiKey: "synthetic-key", maxRetries: 0, fetch })), "synthetic-model", 1000),
+    historyService: { save, findByAnalysisFingerprint: vi.fn(async () => null) } as never });
+  const failed = await send(app, KEY, { input, historyContext });
+  expect(failed.status).toBe(502);
+  expect(failed.body.error.code).toBe("OPENAI_RESPONSE_INVALID");
+  expect(fetch).toHaveBeenCalledOnce();
+  expect(save).not.toHaveBeenCalled();
+  const success = await send(app, KEY, { input, historyContext });
+  expect(success.status).toBe(200);
+  expect(success.body.analysis.findings[0].relatedDtc).toEqual(output.findings[0]!.relatedDtc);
+  expect(fetch).toHaveBeenCalledTimes(2);
+  expect(save).toHaveBeenCalledOnce();
+});
+
 async function flushUntil(predicate: () => boolean) {
   for (let turn = 0; turn < 1_000 && !predicate(); turn += 1) {
     await new Promise<void>((resolve) => setImmediate(resolve));
@@ -238,7 +264,7 @@ describe("idempotencia HTTP del análisis", () => {
       .mockResolvedValueOnce(new Response(JSON.stringify({
         object: "response", status: "completed",
         output: [{ type: "message", status: "completed", role: "assistant",
-          content: [{ type: "output_text", text: JSON.stringify(output), annotations: [] }] }],
+          content: [{ type: "output_text", text: JSON.stringify({ ...output, findings: output.findings.map(finding => ({ ...finding, relatedDtc: "D001" })) }), annotations: [] }] }],
       }), { headers: { "content-type": "application/json" } }));
     const sdk = new OpenAI({ apiKey: "synthetic-test-key", maxRetries: 0, fetch });
     const createEmbeddings = vi.fn(async () => [Array<number>(1_536).fill(0.01)]);

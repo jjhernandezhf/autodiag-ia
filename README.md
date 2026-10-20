@@ -271,6 +271,14 @@ Los errores seguros incluyen:
 
 Ninguno expone la clave, el prompt interno, trazas o mensajes internos del proveedor.
 
+### Identidad de referencias en la generación
+
+El transporte interno hacia Responses asigna referencias opacas `D001`, `D002`, etc. a los DTC del DTO validado, en su orden original. El JSON Schema del modelo restringe `relatedDtc` a esas referencias y el servidor restituye código, código de módulo y nombre originales antes de aplicar Zod y las comprobaciones semánticas. Los IDs no son identificadores de usuario, archivo o historial. La API pública, snapshots históricos y PDF conservan el contrato anterior de `relatedDtc`; no se traducen nombres ni se eliminan sufijos para hacer coincidir una respuesta.
+
+La versión efectiva es `diagnostic_prompt_v2_reference_ids`, incluida en la huella: una generación anterior no se reutiliza como si empleara este protocolo. Los inputs ambiguos con identidad completa duplicada se rechazan antes del proveedor. Referencias desconocidas o duplicadas en la salida siguen produciendo `OPENAI_RESPONSE_INVALID`, sin reintento automático ni guardado; las respuestas incomplete/refusal continúan rechazadas. El frontend trata ese 502 controlado como validación fallida, no como pérdida de conexión, sin mostrar texto arbitrario del proveedor ni limpiar sesión, reporte u observaciones.
+
+El usuario reportó en Render un 502 con `UNKNOWN_REFERENCE`. El log solo acredita que alguna referencia no coincidió con la identidad aceptada; no revela cuál ni permite demostrar su causa exacta. Las reproducciones con nombres alterados, hexadecimales y sufijos son sintéticas, no una reproducción del incidente. Esta preparación no hace llamadas reales ni demuestra todavía su resultado en Render. Los enums y salida estricta se apoyan en la [documentación oficial de Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs); la validación del servidor se mantiene incluso con ese esquema.
+
 ### Flujo manual en la interfaz
 
 La carga del PDF nunca solicita orientación automáticamente. Después de una extracción completa y coherente con DTC válidos:

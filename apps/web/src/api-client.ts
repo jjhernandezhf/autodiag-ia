@@ -155,6 +155,13 @@ export function createBrowserApiClient(
           throw new ApiRequestError("invalid_response", INVALID_RESPONSE_MESSAGE, true, response.status);
         }
         if (!response.ok) {
+          if (response.status === 502 && body !== null && typeof body === "object" &&
+            "error" in body && body.error !== null && typeof body.error === "object" &&
+            "code" in body.error && body.error.code === "OPENAI_RESPONSE_INVALID") {
+            // A controlled model-validation failure proves the API responded; it
+            // is not a connectivity failure or an automatic-retry opportunity.
+            throw new ApiRequestError("validation", "El servicio devolvió una orientación que no pudo validarse.", false, 502);
+          }
           throw classifyStatus(response.status, options.errorMessage?.(body, response.status));
         }
         const parsed = options.parse(body);

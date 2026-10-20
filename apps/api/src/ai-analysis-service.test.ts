@@ -64,6 +64,8 @@ const validOutput = {
   requiresTechnicianConfirmation: true as const,
 };
 
+const wireOutput = { ...validOutput, findings: validOutput.findings.map(finding => ({ ...finding, relatedDtc: "D001" })) };
+
 describe("DiagnosticAnalysisService", () => {
   it("envía solamente el DTO validado y devuelve una respuesta estructurada", async () => {
     const generate = vi.fn(async () => JSON.stringify(validOutput));
@@ -240,7 +242,7 @@ describe("DiagnosticAnalysisService", () => {
   it("reintenta un error de red tipado y luego completa", async () => {
     const create = vi.fn()
       .mockRejectedValueOnce(new OpenAI.APIConnectionError({ message: "detalle sintético" }))
-      .mockResolvedValueOnce({ status: "completed", output: [], output_text: JSON.stringify(validOutput) });
+      .mockResolvedValueOnce({ status: "completed", output: [], output_text: JSON.stringify(wireOutput) });
     const client = new OpenAiResponsesClient("synthetic-key", { responses: { create } } as never);
     const service = new DiagnosticAnalysisService(client, "modelo-sintetico", 60_000, {
       wait: async () => undefined,
@@ -261,7 +263,7 @@ describe("DiagnosticAnalysisService", () => {
         "detalle sintético",
         new Headers({ "retry-after": "2" }),
       ))
-      .mockResolvedValueOnce({ status: "completed", output: [], output_text: JSON.stringify(validOutput) });
+      .mockResolvedValueOnce({ status: "completed", output: [], output_text: JSON.stringify(wireOutput) });
     const client = new OpenAiResponsesClient(
       "synthetic-key",
       { responses: { create } } as never,
@@ -586,7 +588,7 @@ describe("contrato de relatedDtc", () => {
 
 describe("OpenAiResponsesClient", () => {
   it("usa Responses API con salida JSON estricta, sin almacenamiento, timeout y AbortSignal", async () => {
-    const create = vi.fn(async () => ({ status: "completed", output: [], output_text: JSON.stringify(validOutput) }));
+    const create = vi.fn(async () => ({ status: "completed", output: [], output_text: JSON.stringify(wireOutput) }));
     const client = new OpenAiResponsesClient("synthetic-key", { responses: { create } } as never);
     const controller = new AbortController();
 
@@ -615,7 +617,7 @@ describe("OpenAiResponsesClient", () => {
   });
 
   it("omite por completo el mensaje de observaciones cuando no existen", async () => {
-    const create = vi.fn(async () => ({ status: "completed", output: [], output_text: JSON.stringify(validOutput) }));
+    const create = vi.fn(async () => ({ status: "completed", output: [], output_text: JSON.stringify(wireOutput) }));
     const client = new OpenAiResponsesClient("synthetic-key", { responses: { create } } as never);
 
     await client.generate({
