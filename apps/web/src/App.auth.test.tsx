@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import type { BrowserApiClient } from "./api-client";
+import { ApiRequestError } from "./api-client";
 import {
   BrowserAuthenticationError,
   type AuthIdentity,
@@ -66,6 +67,52 @@ afterEach(() => {
 });
 
 describe("sesión de la aplicación", () => {
+  it("Reintentar global consulta Toyota después de fallar Mazda y cambiar filtros", async () => {
+    const auth = createService();
+    const empty = { schemaVersion: 1, cutoff: "2026-01-02T00:00:00Z", timeZone: "America/Guatemala",
+      totalAnalyses: 0, dtcRecords: 0, distinctCodes: 0, dates: [], vehicles: [], codes: [], modules: [], analyses: [] };
+    const apiClient = { requestJson: vi.fn().mockRejectedValueOnce(new ApiRequestError("network", "synthetic", true))
+      .mockResolvedValueOnce(empty), checkHealth: vi.fn() } as unknown as BrowserApiClient;
+    render(<App authService={auth.service} apiClient={apiClient} />);
+    await screen.findByText(FIRST_USER.username);
+    fireEvent.click(screen.getByRole("button", { name: "Estadísticas" }));
+    fireEvent.change(screen.getByLabelText("Marca exacta"), { target: { value: "Mazda" } });
+    fireEvent.click(screen.getByRole("button", { name: "Consultar estadísticas" }));
+    await screen.findByRole("button", { name: "Reintentar" });
+    fireEvent.change(screen.getByLabelText("Marca exacta"), { target: { value: "Toyota" } });
+    fireEvent.click(screen.getByRole("button", { name: "Reintentar" }));
+    await screen.findByText("No hay análisis guardados para esta selección.");
+    expect(vi.mocked(apiClient.requestJson).mock.calls.map(call => call[0])).toEqual([
+      "/api/history/statistics?make=Mazda", "/api/history/statistics?make=Toyota",
+    ]);
+    expect(screen.getByLabelText<HTMLInputElement>("Marca exacta").value).toBe("Toyota");
+    expect(auth.service.signOutLocal).not.toHaveBeenCalled();
+  });
+  it.each(["logout", "identity"] as const)("estadísticas pendientes se cancelan y descartan con %s", async mode => {
+    const auth = createService();
+    const pending = deferred<unknown>();
+    const apiClient = { requestJson: vi.fn(async () => pending.promise), checkHealth: vi.fn() } as unknown as BrowserApiClient;
+    render(<App authService={auth.service} apiClient={apiClient} />);
+    await screen.findByRole("heading", { name: "Carga tu reporte Autel" });
+    fireEvent.click(screen.getByRole("button", { name: "Estadísticas" }));
+    fireEvent.click(screen.getByRole("button", { name: "Consultar estadísticas" }));
+    expect(apiClient.requestJson).toHaveBeenCalledOnce();
+    const signal = vi.mocked(apiClient.requestJson).mock.calls[0]![1].init!.signal!;
+    if (mode === "logout") {
+      fireEvent.click(screen.getByRole("button", { name: "Cerrar sesión" }));
+      await screen.findByRole("button", { name: "Iniciar sesión" });
+    } else {
+      vi.mocked(auth.service.validateCurrentSession).mockResolvedValueOnce(SECOND_USER);
+      act(() => auth.emit("SIGNED_IN", SECOND_USER.id));
+      await screen.findByText(SECOND_USER.username);
+    }
+    expect(signal.aborted).toBe(true);
+    await act(async () => pending.resolve({ privateStaleValue: "STALE_STATISTICS" }));
+    expect(screen.queryByRole("heading", { name: "Estadísticas" })).toBeNull();
+    expect(screen.queryByText("STALE_STATISTICS")).toBeNull();
+    expect(apiClient.requestJson).toHaveBeenCalledOnce();
+  });
+
   it("no muestra AutoDiag antes de validar y sin sesión presenta el login", async () => {
     const initialization = deferred<AuthIdentity | null>();
     const auth = createService();
