@@ -27,7 +27,7 @@ Un timeout puede haber ocurrido después del commit: resultado desconocido,
 no fracaso persistido. No hay reintentos automáticos. Cancelar el navegador
 no garantiza cancelar una entrega ya iniciada; repetir conserva la identidad.
 
-## SQL y permisos: preparado, no aplicado
+## SQL y permisos: probado localmente, no aplicado en Supabase
 
 Migración 20261020000100_create_automation_events.sql. SECURITY INVOKER necesita
 SELECT/INSERT/UPDATE del service_role existente y su atributo BYPASSRLS para
@@ -92,3 +92,58 @@ La regresión de body >1 KiB detectó inicialmente HTTP 500; se corrigió a 413 
 ampliar límite. Los duplicados concurrentes se probaron con repositorio simulado:
 NO acreditan el comportamiento transaccional real. SQL y JSON inspeccionados
 localmente, no aplicados ni importados en n8n. La verificación real sigue pendiente.
+
+## Validación PostgreSQL local posterior
+
+Se aplicó exclusivamente la nueva migración en `autodiag_automation_test`, dentro
+del contenedor desechable `autodiag-automation-pg-validation`, imagen oficial
+`postgres:17.6-bookworm`, PostgreSQL 17.6 Debian x86_64.
+Digest: `sha256:f3bd19c606e442c3d7bdfa8002e03fe260a1023351e0ea4598032022b68dd6e3`.
+Red `none`, sin puertos ni bind mounts; 256 MiB/una CPU. Autenticación trust
+exclusivamente en este contenedor aislado sin credenciales reales, accediendo
+por socket mediante docker exec. No usar esta configuración en un servidor
+compartido, con puertos publicados o en producción.
+
+Preparación reproducible, solo bajo autorización de pruebas locales, desde una
+instancia NUEVA (no reutilizar el nombre si ya pertenece a otro contenedor):
+
+```powershell
+docker run --detach --name autodiag-automation-pg-validation --network none --memory 256m --cpus 1 --env POSTGRES_DB=autodiag_automation_test --env POSTGRES_HOST_AUTH_METHOD=trust postgres:17.6-bookworm
+docker exec autodiag-automation-pg-validation pg_isready -U postgres -d autodiag_automation_test
+docker exec autodiag-automation-pg-validation psql -X -U postgres -d autodiag_automation_test -v ON_ERROR_STOP=1 -c "CREATE ROLE anon LOGIN NOSUPERUSER NOBYPASSRLS; CREATE ROLE authenticated LOGIN NOSUPERUSER NOBYPASSRLS; CREATE ROLE service_role LOGIN NOSUPERUSER BYPASSRLS; CREATE ROLE rls_probe LOGIN NOSUPERUSER NOBYPASSRLS;"
+Get-Content -Raw supabase/migrations/20261020000100_create_automation_events.sql | docker exec -i autodiag-automation-pg-validation psql -X -U postgres -d autodiag_automation_test -v ON_ERROR_STOP=1
+node --test apps/api/scripts/verify-automation-postgres.test.mjs
+```
+
+Detenerse si cualquier paso falla. El script exige el nombre y aislamiento
+indicados y usa IDs sintéticos fijos: ejecutar sobre una base recién preparada,
+no sobre datos existentes. No aplica la migración ni crea contenedores por sí solo.
+
+Resultado observado: 11 subpruebas aprobadas; Node informa **12/12** incluyendo
+el grupo principal. Cero fallos, omisiones o cancelaciones. Se comprobaron:
+
+- Llamante service_role no superusuario; atributos RLS/FORCE y SECURITY INVOKER.
+- 12 registros concurrentes del mismo ID: una fila; 12 finalizaciones concurrentes.
+- Estado completed terminal y timestamp invariable en duplicados.
+- received → failed → recuperación explícita → completed; complete no recupera failed.
+- Carrera fail/complete: un estado coherente, sin sobrescribir completed.
+- Rollback de inserción y finalización; entradas inválidas y restricciones de fila.
+- Denegación real a anon/authenticated; DELETE denegado a service_role.
+- Rol sin BYPASSRLS con grants temporales de tabla/RPC: lectura vacía y escritura
+  rechazada por RLS, no solo por ausencia de grants. Grants retirados al terminar.
+- Bloqueo retenido hasta rollback, seguido de registro correcto por el competidor.
+- Terminación de una conexión sintética con transacción abierta: rollback y
+  liberación de bloqueos; una nueva solicitud puede registrar el evento.
+
+Las operaciones funcionales se ejecutaron con conexiones service_role directas;
+postgres se utilizó para setup, introspección, grants de prueba y terminación
+del backend sintético identificado por application_name, nunca de otros procesos.
+El contenedor y su volumen de datos de prueba se retiran al finalizar; la imagen
+puede permanecer en caché. No se modificó código productivo ni migración.
+
+Esta evidencia reemplaza la limitación de SQL meramente estático SOLO para el
+PostgreSQL local probado. No demuestra PostgREST, roles/permisos reales de Supabase,
+n8n Cloud ni el recorrido HTTP real. La pérdida de respuesta tras un commit y los
+fallos de red entre proveedores siguen pendientes de ensayo de integración;
+las pruebas de rollback/terminación no equivalen a ese escenario. Integración
+permanece apagada, sin migraciones remotas ni secretos reales.
