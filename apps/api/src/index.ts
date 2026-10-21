@@ -1,4 +1,6 @@
 import { createApp } from "./app.js";
+import { automationConfig, HistoryAutomation, SupabaseEventRepository } from "./history-automation.js";
+import { getSupabaseAdminClient } from "./supabase-admin-client.js";
 import { loadEnv } from "./config.js";
 import { createConfiguredDiagnosticHistoryService } from "./diagnostic-history-runtime.js";
 import { createConfiguredRagService } from "./rag-runtime.js";
@@ -9,7 +11,10 @@ import { createConfiguredHistoryAnalyticsService } from "./history-analytics.js"
 const env = loadEnv();
 const ragService = createConfiguredRagService(env);
 const historyService = createConfiguredDiagnosticHistoryService();
+let automationSettings;
+try { automationSettings = automationConfig(process.env); } catch { throw new Error("AUTOMATION_CONFIG_INVALID"); }
 const app = createApp({
+  automation: automationSettings ? new HistoryAutomation(automationSettings, new SupabaseEventRepository(getSupabaseAdminClient())) : undefined,
   historyAnalyticsService: createConfiguredHistoryAnalyticsService(),
   trustedProxyIps: env.TRUSTED_PROXY_IPS,
   maxFileSizeBytes: env.REPORT_MAX_SIZE_BYTES,

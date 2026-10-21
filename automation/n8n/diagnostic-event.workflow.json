@@ -1,0 +1,18 @@
+{
+  "name": "AutoDiag minimal receipt - requires private configuration",
+  "active": false,
+  "nodes": [
+    { "id": "webhook", "name": "Webhook", "type": "n8n-nodes-base.webhook", "typeVersion": 2, "position": [0,0], "parameters": { "httpMethod": "POST", "path": "autodiag-event-v1", "authentication": "headerAuth", "responseMode": "responseNode", "options": {} } },
+    { "id": "validate", "name": "Validate", "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [220,0], "parameters": { "jsCode": "const x=$input.first().json; const e=x.body; if(!e || Object.keys(e).sort().join(',')!=='eventId,issuedAt,schemaVersion,type' || e.schemaVersion!==1 || e.type!=='diagnostic.saved.requested' || !/^automation_v1_[0-9a-f]{64}$/.test(e.eventId) || typeof e.issuedAt!=='string' || e.issuedAt.length>40 || !Number.isFinite(Date.parse(e.issuedAt)) || Date.now()-Date.parse(e.issuedAt)>300000 || Date.parse(e.issuedAt)-Date.now()>30000) throw new Error('INVALID_EVENT'); const signature=x.headers['x-autodiag-signature']; if(typeof signature!=='string' || !/^[0-9a-f]{64}$/.test(signature)) throw new Error('INVALID_SIGNATURE'); return [{json:{event:e,signature}}];" } },
+    { "id": "register", "name": "Register", "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "position": [440,0], "parameters": { "method": "POST", "url": "https://backend.invalid/api/internal/automation/register", "authentication": "genericCredentialType", "genericAuthType": "httpHeaderAuth", "sendHeaders": true, "headerParameters": { "parameters": [{"name":"X-Autodiag-Signature","value":"={{ $('Validate').first().json.signature }}"}] }, "sendBody": true, "specifyBody": "json", "jsonBody": "={{ $('Validate').first().json.event }}", "options": { "timeout": 8000, "redirect": {"redirect":{"followRedirects":false}} } } },
+    { "id": "complete", "name": "Complete", "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "position": [660,0], "parameters": { "method": "POST", "url": "https://backend.invalid/api/internal/automation/complete", "authentication": "genericCredentialType", "genericAuthType": "httpHeaderAuth", "sendHeaders": true, "headerParameters": { "parameters": [{"name":"X-Autodiag-Signature","value":"={{ $('Validate').first().json.signature }}"}] }, "sendBody": true, "specifyBody": "json", "jsonBody": "={{ $('Validate').first().json.event }}", "options": { "timeout": 8000, "redirect": {"redirect":{"followRedirects":false}} } } },
+    { "id": "respond", "name": "Respond", "type": "n8n-nodes-base.respondToWebhook", "typeVersion": 1.4, "position": [880,0], "parameters": { "respondWith": "json", "responseBody": "={{ { status: $json.status } }}", "options": {} } }
+  ],
+  "connections": {
+    "Webhook": {"main":[[{"node":"Validate","type":"main","index":0}]]},
+    "Validate": {"main":[[{"node":"Register","type":"main","index":0}]]},
+    "Register": {"main":[[{"node":"Complete","type":"main","index":0}]]},
+    "Complete": {"main":[[{"node":"Respond","type":"main","index":0}]]}
+  },
+  "settings": { "executionOrder": "v1", "saveDataSuccessExecution": "none", "saveDataErrorExecution": "none", "saveManualExecutions": false }
+}

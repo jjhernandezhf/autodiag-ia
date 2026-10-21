@@ -4,6 +4,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { rateLimit } from "express-rate-limit";
 import multer from "multer";
 import { HistoryAnalyticsError, type HistoryAnalyticsService } from "./history-analytics.js";
+import { AutomationBudget, AutomationError, type HistoryAutomation } from "./history-automation.js";
 
 import {
   AiAnalysisError,
@@ -129,6 +130,7 @@ interface AnalysisResponsePayload {
 }
 
 export interface AppOptions {
+  automation?: HistoryAutomation;
   historyAnalyticsService?: HistoryAnalyticsService;
   trustedProxyIps?: string[];
   maxFileSizeBytes?: number;
@@ -299,10 +301,67 @@ export function createApp(options: AppOptions) {
     },
   );
 
+  const automationJson = express.json({ limit: "1kb" });
+  const parseAutomationJson = (request: Request, response: Response, next: NextFunction) => {
+    automationJson(request, response, (error: unknown) => {
+      if (error) {
+        const tooLarge = typeof error === "object" && error !== null && "type" in error && error.type === "entity.too.large";
+        response.status(tooLarge ? 413 : 400).json({ error: { code: "AUTOMATION_INVALID" } });
+      } else next();
+    });
+  };
+  app.use("/api/internal/automation", parseAutomationJson);
+  app.use("/api/history/:id/automation", parseAutomationJson);
   app.use(jsonParser);
 
   app.get("/api/auth/me", requireAuthentication, (request, response) => {
     response.json(request.usuario);
+  });
+
+  const automationBudget = new AutomationBudget();
+  const callbackBudget = new AutomationBudget();
+  const automationLimiter = rateLimit({ windowMs: 15 * 60_000, limit: 10,
+    keyGenerator: (request) => request.usuario!.id, standardHeaders: true, legacyHeaders: false });
+  const callbackLimiter = rateLimit({ windowMs: 60_000, limit: 60, standardHeaders: true, legacyHeaders: false });
+  const automationFailure = (response: Response, error: unknown) => {
+    const safe = error instanceof AutomationError ? error : new AutomationError("AUTOMATION_UNAVAILABLE");
+    response.status(safe.status).json({ error: { code: safe.code, message: "No se pudo confirmar la automatización. El análisis permanece intacto." } });
+  };
+  app.get("/api/automation/capabilities", requireAuthentication, (_request, response) => {
+    response.json({ enabled: Boolean(options.automation && options.historyService) });
+  });
+  app.post("/api/history/:id/automation", requireAuthentication, automationLimiter, async (request, response, next) => {
+    if (!options.automation || !options.historyService) { response.status(503).json({ error: { code: "AUTOMATION_DISABLED" } }); return; }
+    if (Object.keys(request.query).length || (request.body !== undefined &&
+        (request.body === null || typeof request.body !== "object" || Array.isArray(request.body) || Object.keys(request.body).length))) {
+      response.status(400).json({ error: { code: "AUTOMATION_INVALID" } }); return;
+    }
+    try {
+      const result = await automationBudget.run(async signal => {
+        const id = String(request.params.id);
+        await options.historyService!.get(request.usuario!.id, id, signal);
+        if (signal.aborted) throw new AutomationError("AUTOMATION_RESULT_UNKNOWN", 504);
+        return options.automation!.send(options.automation!.event(request.usuario!.id, id), signal);
+      });
+      if (responseIsAvailable(response)) response.json(result);
+    } catch (error) {
+      if (error instanceof DiagnosticHistoryError) { next(error); return; }
+      if (responseIsAvailable(response)) automationFailure(response, error);
+    }
+  });
+  app.post("/api/internal/automation/:operation", callbackLimiter, async (request, response) => {
+    if (!options.automation) { response.status(503).json({ error: { code: "AUTOMATION_DISABLED" } }); return; }
+    const operation = request.params.operation;
+    if (!["register", "complete", "fail"].includes(String(operation)) || Object.keys(request.query).length ||
+        Buffer.byteLength(JSON.stringify(request.body ?? null)) > 1024) {
+      response.status(400).json({ error: { code: "AUTOMATION_INVALID" } }); return;
+    }
+    try {
+      const status = await callbackBudget.run(signal => options.automation!.callback(request.body,
+        request.get("X-Automation-Callback") ?? "", request.get("X-Autodiag-Signature") ?? "",
+        operation as "register" | "complete" | "fail", signal));
+      if (responseIsAvailable(response)) response.json({ status });
+    } catch (error) { if (responseIsAvailable(response)) automationFailure(response, error); }
   });
 
   app.post("/api/reports/upload", requireAuthentication, validateReportUpload, async (request, response) => {

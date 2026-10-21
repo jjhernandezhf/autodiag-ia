@@ -1,6 +1,7 @@
 import { type ChangeEvent, type DragEvent, type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import autodiagLogoUrl from "./assets/autodiag-ia-logo.png";
 import { HistoryAnalyticsExport } from "./HistoryAnalyticsExport";
+import { HistoryAutomation } from "./HistoryAutomation";
 import { describeRagProvenance, isRagProvenance } from "./rag-provenance";
 import {
   API_UNAVAILABLE_MESSAGE,
@@ -2260,6 +2261,7 @@ function ReportWorkspace({
                 </div>
                 <span className={`rag-history-status ${historyDetail.ragStatus}`}>RAG: {historyDetail.ragStatus}</span>
               </div>
+              <HistoryAutomation key={historyDetail.id} historyId={historyDetail.id} apiClient={apiClient} />
               {historyDetail.odometer && <p className="history-odometer">Odómetro: {historyDetail.odometer.value.toLocaleString("es-GT")} {historyDetail.odometer.unit}</p>}
               <ExtractionResults extraction={historyDetail.snapshot.extraction} counts={historyDetail.snapshot.analysis.counts} />
               <section className="analysis-panel completed" aria-labelledby="history-analysis-title">
