@@ -3,8 +3,9 @@ import { resolveOpenAiReasoningEffort, type AnalysisReasoningEffort } from "./an
 import express, { type NextFunction, type Request, type Response } from "express";
 import { rateLimit } from "express-rate-limit";
 import multer from "multer";
-import { HistoryAnalyticsError, type HistoryAnalyticsService } from "./history-analytics.js";
 import { AutomationBudget, AutomationError, type HistoryAutomation } from "./history-automation.js";
+import { ANALYTICS_LIMITS, HistoryAnalyticsError, type HistoryAnalyticsService } from "./history-analytics.js";
+import { aggregateStatistics, statisticsFilters } from "./history-statistics.js";
 
 import {
   AiAnalysisError,
@@ -587,6 +588,27 @@ export function createApp(options: AppOptions) {
     try {
       const result = await options.historyAnalyticsService.export(request.usuario!.id, controller.signal);
       if (responseIsAvailable(response)) response.json(result);
+    } finally { response.removeListener("close", cancel); }
+  });
+
+  app.get("/api/history/statistics", requireAuthentication, async (request, response) => {
+    const filters = statisticsFilters.safeParse(request.query);
+    if (!filters.success || request.body !== undefined) {
+      sendError(response, 400, "ANALYTICS_REQUEST_INVALID", "Filtros de estadísticas inválidos.");
+      return;
+    }
+    if (!options.historyAnalyticsService) {
+      sendError(response, 503, "ANALYTICS_UNAVAILABLE", "Estadísticas no disponibles temporalmente.");
+      return;
+    }
+    const controller = new AbortController();
+    const cancel = () => { if (!response.writableEnded) controller.abort(); };
+    response.once("close", cancel);
+    try {
+      const result = await options.historyAnalyticsService.records(request.usuario!.id, controller.signal);
+      const statistics = aggregateStatistics(result.records, result.cutoff, filters.data);
+      if (Buffer.byteLength(JSON.stringify(statistics)) > ANALYTICS_LIMITS.bytes) throw new HistoryAnalyticsError("ANALYTICS_LIMIT");
+      if (responseIsAvailable(response)) response.json(statistics);
     } finally { response.removeListener("close", cancel); }
   });
 

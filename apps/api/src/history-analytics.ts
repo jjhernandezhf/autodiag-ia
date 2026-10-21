@@ -14,7 +14,13 @@ const metadataSchema = z.object({ id: z.string().uuid(), created_at: z.string().
   dtc_count: z.number().int().min(0).max(100_000),
   rag_status: z.enum(["used", "disabled", "not_configured", "no_matches", "unavailable"]) }).strict();
 const dtcSchema = z.object({ code: text(32), moduleCode: text(32).nullable(), moduleName: text(160) });
+const statisticsDtcSchema = dtcSchema.extend({
+  descriptionOriginal: z.string().trim().max(1_000).refine(value =>
+    [...value].every(c => (c.charCodeAt(0) >= 32 && c.charCodeAt(0) !== 127) || c === "\n" || c === "\r" || c === "\t") &&
+    !containsSensitiveText(value, "free_text")).nullable().optional(),
+});
 type Metadata = z.infer<typeof metadataSchema>;
+export type AnalyticsRecord = Metadata & { dtcs: z.infer<typeof statisticsDtcSchema>[] };
 // PostgreSQL timestamps preserve microseconds; Date.parse alone collapses distinct
 // instants within one millisecond and can incorrectly reject keyset order.
 function timestamp(value: string) {
@@ -73,6 +79,14 @@ export class HistoryAnalyticsService {
   private active = 0;
   constructor(private readonly repository: HistoryAnalyticsRepository) {}
   async export(userId: string, parentSignal?: AbortSignal) {
+    return this.run(userId, parentSignal);
+  }
+  async records(userId: string, parentSignal?: AbortSignal) {
+    const records: AnalyticsRecord[] = [];
+    const result = await this.run(userId, parentSignal, record => records.push(record));
+    return { cutoff: result.cutoff, records };
+  }
+  private async run(userId: string, parentSignal?: AbortSignal, consume?: (record: AnalyticsRecord) => void) {
     z.string().uuid().parse(userId);
     if (parentSignal?.aborted) throw new HistoryAnalyticsError("ANALYTICS_UNAVAILABLE");
     if (this.active >= ANALYTICS_LIMITS.concurrent) throw new HistoryAnalyticsError("ANALYTICS_LIMIT");
@@ -84,7 +98,7 @@ export class HistoryAnalyticsService {
     });
     const timer = setTimeout(stop, ANALYTICS_LIMITS.timeoutMs);
     parentSignal?.addEventListener("abort", stop, { once: true });
-    const job = this.collect(userId, new Date().toISOString(), controller.signal)
+    const job = this.collect(userId, new Date().toISOString(), controller.signal, consume)
       .finally(() => { this.active--; }); // Capacity stays held if a transport ignores abort.
     try { return await Promise.race([job, stopped]); }
     catch (error) {
@@ -95,7 +109,7 @@ export class HistoryAnalyticsService {
       parentSignal?.removeEventListener("abort", stop);
     }
   }
-  private async collect(userId: string, cutoff: string, signal: AbortSignal) {
+  private async collect(userId: string, cutoff: string, signal: AbortSignal, consume?: (record: AnalyticsRecord) => void) {
     let analysesCsv = "\uFEFF" + csvRow(["analysis_reference", "created_at", "make", "model", "year", "dtc_count", "rag_status"]);
     let dtcsCsv = "\uFEFF" + csvRow(["analysis_reference", "dtc_code", "module_code", "module_name"]);
     let bytes = Buffer.byteLength(analysesCsv + dtcsCsv);
@@ -134,16 +148,16 @@ export class HistoryAnalyticsService {
           byId.set(value.id, value.dtcs);
         }
         for (const row of page) {
-          const dtcs = byId.get(row.id)!.map(value => dtcSchema.parse(value));
+          const dtcs = byId.get(row.id)!.map(value => consume ? statisticsDtcSchema.parse(value) : dtcSchema.parse(value));
           if (dtcs.length !== row.dtc_count) throw new HistoryAnalyticsError("ANALYTICS_INVALID");
           if (dtcCount + dtcs.length > ANALYTICS_LIMITS.dtcs) throw new HistoryAnalyticsError("ANALYTICS_LIMIT");
-          const reference = randomUUID(); // Export-scoped surrogate, not a history/user identifier.
-          const analysisLine = this.analysisLine(reference, row);
-          const dtcLines = dtcs.map(dtc => csvRow([reference, dtc.code, dtc.moduleCode, dtc.moduleName])).join("");
-          bytes += Buffer.byteLength(analysisLine + dtcLines);
+          const reference = consume ? "" : randomUUID(); // CSV-scoped surrogate.
+          const analysisLine = consume ? "" : this.analysisLine(reference, row);
+          const dtcLines = consume ? "" : dtcs.map(dtc => csvRow([reference, dtc.code, dtc.moduleCode, dtc.moduleName])).join("");
+          bytes += Buffer.byteLength(consume ? JSON.stringify({ ...row, dtcs }) : analysisLine + dtcLines);
           if (bytes > ANALYTICS_LIMITS.bytes) throw new HistoryAnalyticsError("ANALYTICS_LIMIT");
-          analysesCsv += analysisLine;
-          dtcsCsv += dtcLines;
+          if (consume) consume({ ...row, dtcs });
+          else { analysesCsv += analysisLine; dtcsCsv += dtcLines; }
           analysesCount++;
           dtcCount += dtcs.length;
         }

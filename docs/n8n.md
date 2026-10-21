@@ -1,4 +1,29 @@
-# Automatización mínima — preparación local, no activada
+# Automatización mínima — recepción idempotente y evidencia de producción
+
+## Estado y alcance de la evidencia
+
+Actualización documental del 21 de octubre de 2026. El usuario reportó la
+configuración y prueba manual en producción; no se realizaron conexiones desde
+esta revisión ni se adjuntaron capturas para inspección independiente en este
+cierre. No se conoce aquí el momento exacto del ensayo ni el commit desplegado.
+
+- Migración `20261020000100` aplicada en Supabase; RLS habilitado y forzado.
+- `anon` y `authenticated` sin permisos de tabla ni ejecución RPC;
+  `service_role` con SELECT/INSERT/UPDATE y ejecución RPC, sin DELETE,
+  conservando su BYPASSRLS existente.
+- Workflow publicado en n8n Cloud. AutoDiag mostró: “Recepción del evento
+  confirmada. El diagnóstico no fue modificado”.
+- La consulta administrativa mostró una fila `completed`, `completed_at`
+  informado y `failure_code NULL`. Al repetir el envío del mismo diagnóstico,
+  permaneció una fila con el mismo `event_id`.
+
+Son resultados manuales reportados, no comprobaciones remotas ejecutadas por el
+asistente. Respaldan el recorrido ensayado y su repetición, no una garantía de
+concurrencia real, recuperación ante toda falla o estabilidad permanente. No se
+capturó una medición HTTP completa de latencia; no se atribuye un tiempo ni un
+código HTTP no informado. Las pruebas automatizadas previas se detallan aparte.
+El alcance no incluye notificaciones, entrenamiento ni mejora automática del
+RAG. Guion y recuperación: [guía de entrega](entrega.md).
 
 Efecto único: recepción validada y transición persistente a completed. No envía
 datos clínicos/automotrices, PDF, VIN, usuario o referencia histórica. No modifica
@@ -11,7 +36,7 @@ sentidos son distintas. HTTPS fijo en backend, sin query/fragmento/credenciales
 en URL ni redirects. Payload estricto, firma canónica y vigencia de cinco minutos
 (máximo 30 segundos de adelanto). Reintentar renueva fecha/firma, no eventId.
 
-Configuración futura privada (no habilitada ahora): AUTOMATION_ENABLED=true,
+Configuración privada para habilitación explícita: AUTOMATION_ENABLED=true,
 AUTOMATION_WEBHOOK_URL, AUTOMATION_OUTBOUND_TOKEN, AUTOMATION_CALLBACK_TOKEN,
 AUTOMATION_ID_KEY, AUTOMATION_SIGNING_KEY. Secretos independientes de 32–256
 caracteres alfanuméricos/guion/guion bajo; nunca VIN_HMAC_SECRET. No incluirlos
@@ -27,7 +52,7 @@ Un timeout puede haber ocurrido después del commit: resultado desconocido,
 no fracaso persistido. No hay reintentos automáticos. Cancelar el navegador
 no garantiza cancelar una entrega ya iniciada; repetir conserva la identidad.
 
-## SQL y permisos: probado localmente, no aplicado en Supabase
+## SQL y permisos: prueba local y aplicación remota reportada
 
 Migración 20261020000100_create_automation_events.sql. SECURITY INVOKER necesita
 SELECT/INSERT/UPDATE del service_role existente y su atributo BYPASSRLS para
@@ -47,7 +72,11 @@ No hay purga automática. Rotar ID_KEY cambia identidades: requiere plan previo.
 La tabla registra únicamente un tipo/versionado de evento mediante el prefijo
 automation_v1; validar tipo y schemaVersion en backend antes de llamar RPC.
 
-## n8n Cloud: pasos pendientes
+## n8n Cloud: referencia de configuración para un entorno nuevo
+
+El usuario reportó estos componentes configurados y el workflow publicado en su
+entorno. Los pasos siguientes no ordenan reimportar ni reaplicar la migración en
+ese destino; sirven para una instalación nueva autorizada.
 
 Importar el workflow INACTIVO, revisar compatibilidad de nodos con la versión
 real y fijar URL backend HTTPS en ambos nodos HTTP. Configurar dos credenciales
@@ -64,15 +93,21 @@ detiene el flujo; un recibido incompleto se puede finalizar al reintentar. No
 marcar failed por una desconexión ambigua. El receptor ofrece fail únicamente
 para un fallo explícito y autenticado anterior a completed.
 
-Antes de activar: aplicar migración con autorización separada; probar PostgreSQL
+En un entorno nuevo, antes de activar: aplicar migración con autorización separada; probar PostgreSQL
 real con conexiones concurrentes, rollback, complete/fail/recover, permisos y
 respuesta perdida; probar workflow con eventos sintéticos. Un mock NO demuestra
 atomicidad SQL ni importación/funcionamiento n8n real. No prometer exactamente
 una ejecución del workflow: solo una transición completed. El MVP no incluye
 ningún efecto externo adicional que necesite otra garantía transaccional.
 
-Reversión operativa: deshabilitar AUTOMATION_ENABLED, no borrar eventos ni
-historial. Conservar IDs para deduplicación. No reaplicar migraciones anteriores.
+Reversión operativa: fijar `AUTOMATION_ENABLED=false` en la configuración privada
+de Render y aplicar el cambio mediante despliegue autorizado del servicio.
+Comprobar después que la capacidad esté deshabilitada y que, al volver a abrir
+el detalle, no se ofrezca el botón. No elimina eventos ni historial: conservar
+IDs para deduplicación y las claves existentes. No reaplicar migraciones ni
+rotar ID_KEY. No revierte recepciones completadas ni garantiza detener una
+entrega ya iniciada; no desplegar durante una operación en vuelo. Esta revisión
+no ejecutó la desactivación ni el despliegue.
 
 Recuperación manual futura, solo con autorización administrativa: comprobar el
 event_id exacto y estado failed; invocar automation_event_transition con
@@ -91,7 +126,9 @@ modo test para no cargar entornos reales, con aviso preexistente de bundle >500 
 La regresión de body >1 KiB detectó inicialmente HTTP 500; se corrigió a 413 sin
 ampliar límite. Los duplicados concurrentes se probaron con repositorio simulado:
 NO acreditan el comportamiento transaccional real. SQL y JSON inspeccionados
-localmente, no aplicados ni importados en n8n. La verificación real sigue pendiente.
+localmente, sin aplicación ni importación remota en aquella etapa. La prueba
+PostgreSQL posterior y el reporte manual de producción de arriba son evidencias
+separadas; no convierten estos mocks en pruebas remotas.
 
 ## Validación PostgreSQL local posterior
 
@@ -145,5 +182,31 @@ Esta evidencia reemplaza la limitación de SQL meramente estático SOLO para el
 PostgreSQL local probado. No demuestra PostgREST, roles/permisos reales de Supabase,
 n8n Cloud ni el recorrido HTTP real. La pérdida de respuesta tras un commit y los
 fallos de red entre proveedores siguen pendientes de ensayo de integración;
-las pruebas de rollback/terminación no equivalen a ese escenario. Integración
-permanece apagada, sin migraciones remotas ni secretos reales.
+las pruebas de rollback/terminación no equivalen a ese escenario. Durante esta
+validación local la integración permaneció apagada, sin migraciones remotas ni
+secretos reales. La activación posterior fue reportada por el usuario.
+
+## Comprobación manual breve del evento
+
+Con una cuenta autorizada, abrir un análisis propio guardado y pulsar
+“Registrar evento en n8n”. Esperar la confirmación; no crear otro análisis para
+repetir la prueba. Un operador autorizado puede comprobar privadamente la fila
+del evento de prueba con la consulta siguiente, sustituyendo únicamente el
+marcador por su identificador exacto (no publicar el identificador ni resultados
+de otros eventos):
+
+```sql
+select count(*) as filas,
+       count(*) filter (where status = 'completed'
+                        and completed_at is not null
+                        and failure_code is null) as completadas_validas
+from public.automation_events
+where event_id = '<event_id de la prueba>';
+```
+
+Esperado: `filas = 1` y `completadas_validas = 1` antes y después de repetir la
+acción sobre el mismo diagnóstico, usando el mismo identificador para ambas
+consultas. No borrar filas para preparar la repetición. Esta consulta no se
+ejecutó en el cierre documental. Mantener credenciales y consola administrativa
+fuera de la pantalla compartida. Ante timeout, el resultado puede ser desconocido:
+comprobar el estado antes de cualquier recuperación; no marcar failed por inferencia.

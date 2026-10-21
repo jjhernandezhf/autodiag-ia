@@ -2,6 +2,7 @@ import { type ChangeEvent, type DragEvent, type FormEvent, useCallback, useEffec
 import autodiagLogoUrl from "./assets/autodiag-ia-logo.png";
 import { HistoryAnalyticsExport } from "./HistoryAnalyticsExport";
 import { HistoryAutomation } from "./HistoryAutomation";
+import { HistoryStatistics } from "./HistoryStatistics";
 import { describeRagProvenance, isRagProvenance } from "./rag-provenance";
 import {
   API_UNAVAILABLE_MESSAGE,
@@ -1322,7 +1323,7 @@ function ReportWorkspace({
   const [isDragging, setIsDragging] = useState(false);
   const [pdfStatus, setPdfStatus] = useState<PdfStatus>("idle");
   const [pdfMessage, setPdfMessage] = useState("");
-  const [workspaceView, setWorkspaceView] = useState<"new" | "history">("new");
+  const [workspaceView, setWorkspaceView] = useState<"new" | "history" | "statistics">("new");
   const [historyState, setHistoryState] = useState<HistoryViewState>({ status: "idle", items: [], nextCursor: null });
   const [historyDetail, setHistoryDetail] = useState<HistoryDetail | null>(null);
   const [historyDetailStatus, setHistoryDetailStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
@@ -2067,9 +2068,13 @@ function ReportWorkspace({
         >
           Historial
         </button>
+        <button type="button" className={workspaceView === "statistics" ? "is-active" : ""}
+          aria-current={workspaceView === "statistics" ? "page" : undefined}
+          onClick={() => { showNewDiagnostic(); setWorkspaceView("statistics"); }}>Estadísticas</button>
       </nav>
 
-      {workspaceView === "new" ? (
+      {workspaceView === "statistics" ? <HistoryStatistics apiClient={apiClient} onFailure={handleApiFailure}
+        onOpen={id => { setWorkspaceView("history"); void openHistory(id); }} /> : workspaceView === "new" ? (
       <section className="upload-card" aria-labelledby="upload-title">
         <div className="intro">
           <span className="eyebrow">ANÁLISIS AUTOMOTRIZ</span>
