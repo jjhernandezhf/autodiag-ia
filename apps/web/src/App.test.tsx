@@ -1413,11 +1413,17 @@ describe("historial seguro de diagnósticos", () => {
     ]);
   });
 
-  it.each([false, true])("lista, abre y exporta historial sin solicitudes nuevas (procedencia: %s)", async (scoped) => {
+  it.each([false, true])("integra historial, PDF local y n8n explícito (procedencia: %s)", async (scoped) => {
     const provenance = JSON.parse(readFileSync(resolve(process.cwd(), "../../fixtures/rag-provenance.synthetic.json"), "utf8"));
     const authenticatedFetch = vi.fn<BrowserAuthenticationService["authenticatedFetch"]>(async (input, init) => {
       const url = String(input);
+      if (url === `/api/history/${HISTORY_ID}/automation`) {
+        expect(init?.method).toBe("POST");
+        expect(init?.body).toBeUndefined();
+        return createJsonResponse(true, { status: "completed" });
+      }
       expect(init?.method).toBeUndefined();
+      if (url === "/api/automation/capabilities") return createJsonResponse(true, { enabled: true });
       if (url === "/api/history?limit=20") return historyListResponse();
       if (url === `/api/history/${HISTORY_ID}`) {
         const detail = await historyDetailResponse().json();
@@ -1435,6 +1441,8 @@ describe("historial seguro de diagnósticos", () => {
     await user.click(historyButton);
 
     expect(await screen.findByRole("heading", { name: "Orientación guardada" })).toBeTruthy();
+    const automationButton = await screen.findByRole("button", { name: "Registrar evento en n8n" });
+    expect(screen.getByRole("button", { name: "Estadísticas" })).toBeTruthy();
     expect(screen.getByText("Orientación histórica validada.")).toBeTruthy();
     expect(screen.getByText("Odómetro: 45,678 km")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Evidencia recuperada por RAG" })).toBeTruthy();
@@ -1448,12 +1456,18 @@ describe("historial seguro de diagnósticos", () => {
     expect(authenticatedFetch.mock.calls.map(([url]) => String(url))).toEqual([
       "/api/history?limit=20",
       `/api/history/${HISTORY_ID}`,
+      "/api/automation/capabilities",
     ]);
     expect(authenticatedFetch.mock.calls.some(([url]) => String(url).includes("/api/reports/analyze"))).toBe(false);
     const exported = downloadReportPdfMock.mock.calls[0]?.[0];
     expect(exported?.rag.sources[0]?.provenance).toEqual(scoped ? provenance : undefined);
     expect(exported?.vehicle.odometer).toEqual({ value: 45678, unit: "km" });
     expect(JSON.stringify(exported)).not.toMatch(/vin|reportReference|analysisModel|embeddingModel/iu);
+    await user.click(automationButton);
+    expect(await screen.findByText("Recepción del evento confirmada. El diagnóstico no fue modificado.")).toBeTruthy();
+    expect(authenticatedFetch).toHaveBeenCalledTimes(requestsBeforeDownload + 1);
+    expect(authenticatedFetch.mock.calls.at(-1)?.[0]).toBe(`/api/history/${HISTORY_ID}/automation`);
+    expect(screen.getByText("Orientación histórica validada.")).toBeTruthy();
   });
 
   it("rechaza una instantánea histórica contaminada antes de mostrarla o exportarla", async () => {

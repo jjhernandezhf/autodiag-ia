@@ -1,6 +1,14 @@
 # Entrega operativa — 21 de octubre de 2026
 
-Preparación local; no implica despliegue realizado ni calidad diagnóstica medida. Base PDF preservada: `8b486ca205cf34d3c074d27257910bf915a2fbe2`. La preparación Render no cambia modelos, prompts, huellas, corpus, permisos ni presupuestos de solicitudes. Añade servicio del build web y cierre operativo del proceso.
+URL de entrega: https://autodiag-ia.onrender.com/. Arquitectura: React compilado y Express en un servicio Render, con Supabase, OpenAI y el receptor mínimo n8n. La configuración y prueba n8n en producción fueron reportadas por el usuario; este cierre documental no accedió al destino ni midió calidad diagnóstica. Las secciones de preparación y resultados locales conservan su alcance histórico, no acreditan por sí mismas el despliegue. Base PDF preservada: `8b486ca205cf34d3c074d27257910bf915a2fbe2`.
+
+### Cierre n8n: evidencia manual reportada (registro del 21 de octubre de 2026)
+
+El usuario informó migración `20261020000100` aplicada, RLS habilitado y forzado, `anon`/`authenticated` sin acceso a tabla ni RPC y `service_role` con SELECT/INSERT/UPDATE y ejecución, sin DELETE, conservando BYPASSRLS. Informó workflow publicado, confirmación “Recepción del evento confirmada. El diagnóstico no fue modificado” y una fila `completed`, con `completed_at` y `failure_code NULL`. Repetir el mismo diagnóstico conservó una fila con el mismo `event_id`.
+
+No se revisaron capturas adjuntas en este cierre ni se reprodujo la prueba. No hay medición HTTP completa de latencia. Se distingue de la evidencia automatizada previa: 88/88 API focalizadas, 41/41 frontend y 4/4 posteriores del componente; PostgreSQL local: 11 comprobaciones, 12/12 contando el grupo principal. No se volvieron a ejecutar aquí. Véase [n8n: evidencia, configuración y comprobación](n8n.md).
+
+n8n recibe una acción explícita desde historial y registra/confirma su recepción de forma idempotente. No envía diagnósticos, no modifica historial y no implementa notificaciones, entrenamiento ni mejora automática del RAG. El ensayo reportado no demuestra todas las carreras o fallos de red en producción.
 
 ## Instalación y configuración
 
@@ -43,13 +51,13 @@ Decisión autorizada: React compilado y Express bajo el mismo origen en un **Ren
 
 En producción Express resuelve `apps/web/dist` desde la ubicación de su módulo, no desde cwd. Falla al arrancar si falta index. Solo expone index y assets de extensiones autorizadas dentro del build (verificación de realpath); no sirve sourcemaps, dotfiles, fuentes, dependencias o directorios del repositorio. Fallback React solo para GET/HEAD de rutas sin extensión que aceptan HTML y representan navegación, nunca `/api`, assets ausentes u otros métodos. Los 404 desconocidos de API son JSON. Las respuestas llevan `Cache-Control: no-store`, incluidos errores y datos privados; no activar edge caching de `/api`. Se conserva Vite en desarrollo. No publicar la raíz del repo como carpeta estática.
 
-#### Campos exactos del formulario (todavía no aplicado)
+#### Campos del formulario de referencia (preparación original)
 
 | Campo Render | Valor |
 | --- | --- |
 | Tipo | Web Service |
 | Repository | `https://github.com/jjhernandezhf/autodiag-ia` |
-| Branch | `feat/render-single-service` para evaluación, **solo después de publicación autorizada**; cambiar a `main` tras aprobación y merge |
+| Branch | `main` tras los merges aprobados; verificar el commit realmente desplegado en el panel privado |
 | Root Directory | Vacío (raíz del monorepo; no `apps/api`) |
 | Runtime / Language | Node, runtime nativo, sin Docker |
 | Node | `.node-version`: `24.16.0`; quitar un `NODE_VERSION` remoto contradictorio o fijarlo al mismo valor |
@@ -180,12 +188,13 @@ Corrección posterior P2 de proxy: las 924 pruebas y compilado 5/5 anteriores no
 
 ## Guía de usuario y demostración de cinco minutos
 
-1. **0:00–0:40**: iniciar sesión privada; no hay autorregistro. Explicar que la orientación necesita confirmación profesional.
-2. **0:40–1:40**: seleccionar/arrastrar un PDF Autel autorizado con texto digital. Revisar vehículo, conteos, estados y advertencias; un reporte parcial puede bloquear análisis. No utilizar datos personales en una demostración compartida.
-3. **1:40–2:50**: añadir observaciones técnicas sin datos personales y revisar la confirmación. Solo la acción explícita solicita análisis. Reservar margen para generación; no presentar la espera como latencia garantizada.
-4. **2:50–3:40**: mostrar resumen, hallazgos, comprobaciones, prioridad, confianza y advertencias. Una coincidencia RAG no confirma la causa. Explicar procedencia y aplicabilidad desconocida; el corpus activo es demostrativo, 16 fragmentos `demonstration_corpus_v1`, no documentación oficial validada. TPMS sigue separado y sin activar.
-5. **3:40–4:30**: comprobar `history.status`; abrir historial propio y regenerar PDF desde snapshot. Abrir/exportar no repite modelo ni RAG. El PDF descargado se consulta sin conexión, no es el original Autel.
-6. **4:30–5:00**: repetir idéntica entrada para explicar reutilización cuando corresponda (`reused`), no vender milisegundos de recuperación como velocidad de generación. Cerrar sesión y comprobar desaparición del workspace.
+1. **0:00–0:25**: iniciar sesión con una cuenta autorizada, sin mostrar credenciales. Explicar que la orientación necesita confirmación profesional.
+2. **0:25–1:15**: cargar PDF Autel autorizado; revisar vehículo, DTC, estados y advertencias. No compartir datos personales.
+3. **1:15–2:25**: añadir observaciones opcionales y solicitar análisis explícitamente. Distinguir generación de reutilización (`reused`); no presentar tiempos como garantizados.
+4. **2:25–3:05**: mostrar hallazgos y fuentes. RAG no confirma causas; siguen activos los 16 fragmentos `demonstration_corpus_v1`, con TPMS separado y sin activar.
+5. **3:05–3:40**: abrir el análisis guardado en historial y exportar PDF desde snapshot, sin repetir IA/RAG.
+6. **3:40–4:40**: desde ese detalle pulsar “Registrar evento en n8n”, mostrar la confirmación y repetir la misma acción. Un operador comprueba privadamente el mismo evento: una fila `completed`, `completed_at` informado y `failure_code NULL`, sin duplicados, según la consulta acotada de [n8n](n8n.md). No proyectar credenciales, identificadores correlacionables ni consola completa. Si se usa evidencia anterior por falta de tiempo, identificarla como tal, no como consulta en vivo.
+7. **4:40–5:00**: explicar el alcance de recepción idempotente, sin notificaciones ni entrenamiento; cerrar sesión y comprobar desaparición del workspace.
 
 Preparar caso autorizado y resultado guardado como respaldo; no fingir que una captura es ejecución nueva. No reproducir un fallo deliberado con datos reales en una exposición sin consentimiento.
 
@@ -196,6 +205,7 @@ Preparar caso autorizado y resultado guardado como respaldo; no fingir que una c
 - **Carga fallida**: revisar PDF digital, tamaño, formato y mensaje controlado. Volver a seleccionar/cargar explícitamente; no hay retry automático de extracción. Saturación: esperar a que cierre otra extracción.
 - **Historial unavailable**: el análisis puede seguir siendo válido con HTTP 200, pero no se confirmó guardado. Descargar localmente si procede; no anunciar persistencia exitosa.
 - **Fallo temporal de Auth**: esperar/reintentar sin mostrar datos del workspace anterior durante validación neutral. Un 401 definitivo o logout sí requiere nueva sesión; un 403 no es logout automático.
+- **n8n no confirma/timeout**: no altera el diagnóstico. El resultado puede ser desconocido si la recepción ya se completó; comprobar el estado con un operador autorizado antes de recuperar. No borrar eventos ni cambiar claves para reintentar. Para desactivar, fijar `AUTOMATION_ENABLED=false` privadamente en Render y aplicar la configuración mediante despliegue autorizado; comprobar la ausencia del botón al reabrir el detalle. Conservar datos e identidades. No revierte eventos completados ni garantiza cancelar entregas en vuelo. No se realizó ese despliegue en esta revisión.
 
 ## Migraciones: orden y comprobación administrativa
 
@@ -208,6 +218,7 @@ Orden local:
 3. `20260922000100_create_rag_knowledge.sql`
 4. `20261013000100_add_diagnostic_analysis_fingerprints.sql`
 5. `20261016000100_correct_diagnostic_history_uniqueness.sql`
+6. `20261020000100_create_automation_events.sql` — aplicada en Supabase según reporte del usuario; no volver a aplicarla sin reconciliar el destino.
 
 Consultas de solo lectura para un administrador autorizado, **no ejecutadas aquí** (no extraen filas de clientes ni secretos):
 
@@ -248,12 +259,14 @@ La existencia de políticas no prueba su eficacia: comprobar con dos usuarios au
 | Historial/PDF | Implementado; aislamiento probado localmente y ensayo usuario | Reconciliación administrativa y prueba del destino |
 | Arranque compilado | API, web y extractor juntos comprobados localmente sin dotenv real | Deploy Render/Linux, HTTPS, memoria, IP/rate-limit y prueba de navegador en destino |
 | Evaluación | Formato/evaluador offline y baseline Mazda exploratorio | Casos autorizados, etiquetas técnicas, reserva ciega y criterios de aceptación |
-| n8n/Power BI/aprendizaje supervisado | No implementados; no se encontró compromiso de entrega en documentación versionada | Confirmar rúbrica externa si los exige; no marcarlos completos |
+| n8n | Receptor mínimo implementado; prueba local SQL y recorrido/repetición en producción reportados por usuario | Fallos de red/respuesta perdida y concurrencia remota no ensayados aquí; retención y operación administrativa |
+| Power BI | Exportación CSV documentada en [guía Power BI](power-bi.md); no acredita tablero construido | Importación/tablero y requisitos externos, según evidencia disponible |
+| Aprendizaje supervisado | No acreditado como implementado | Confirmar rúbrica externa; no declararlo cumplido |
 
 La búsqueda documental solo demuestra lo que contiene el repositorio: no sustituye la rúbrica del curso. No hay porcentajes de avance ni precisión acreditados. La herramienta de evaluación y sus fixtures no son una evaluación real del modelo. La orientación generada nunca equivale a diagnóstico confirmado.
 
 ## Pendientes por prioridad
 
-1. Revisar y autorizar publicación de la preparación Render; definir plan/región según memoria y acceso, no crear servicios automáticamente.
-2. Operador: configurar privadamente el servicio único, revisar seguridad sin reaplicar SQL y ejecutar smoke en Linux/Render con datos y consumo autorizados.
-3. Ensayar la demostración con respaldo y límites de evidencia; contrastar rúbrica externa y completar evaluación técnica pendiente.
+1. Ensayar el guion con una cuenta y respaldo autorizado; verificar el commit desplegado y conservar evidencia saneada sin atribuirla a comprobaciones automáticas.
+2. Mantener pendiente el aislamiento del limitador detrás del proxy: no habilitar confianza supuesta ni presentar la demo de un usuario como validación multiusuario. Completar las comprobaciones de destino no cubiertas por el reporte manual, sin reaplicar SQL.
+3. Completar evaluación técnica y rúbrica externa; planificar por separado pruebas adversariales remotas de n8n, recuperación y revisión de retención. No activar candidatos TPMS ni atribuir precisión diagnóstica a la recepción de eventos.

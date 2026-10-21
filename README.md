@@ -1,5 +1,8 @@
 # AutoDiag IA
 
+La sección autenticada **Estadísticas** permite consultar indicadores y gráficas
+del historial sin importar CSV. Véanse las [definiciones y límites](docs/estadisticas.md).
+
 ### Analítica local para Power BI (preparación)
 
 El historial autenticado permite preparar dos CSV relacionados y minimizados desde la vista **Historial**. Se cuentan análisis guardados y DTC registrados, no vehículos únicos, reparaciones ni precisión diagnóstica. La [guía de Power BI](docs/power-bi.md) explica campos, límites, importación, relaciones y medidas; el tablero y la comprobación con datos reales siguen pendientes. No se conecta Desktop con credenciales privilegiadas. Esta preparación no sustituye ni cierra mejoras pendientes del RAG.
