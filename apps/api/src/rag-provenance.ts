@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { containsSensitiveValue, normalizeSafeHttpsUrl } from "./sensitive-data.js";
+import { OWNER_MANUAL_QUOTE, OWNER_QUOTE_STATUS } from "./owner-manual-quote.js";
 
 const bounded = (max: number) => z.string().trim().min(1).max(max);
 export const ragProvenanceSchema = z.object({
@@ -37,9 +38,12 @@ export function parseStoredProvenance(metadata: Record<string, unknown>, url?: s
     }
     return undefined;
   }
-  if (metadata.reviewStatus !== "approved" || typeof metadata.provenance !== "string" || metadata.provenance.length > 2200) {
+  const demoQuote = metadata.reviewStatus === OWNER_QUOTE_STATUS;
+  if ((metadata.reviewStatus !== "approved" && !demoQuote) || typeof metadata.provenance !== "string" || metadata.provenance.length > 2200) {
     throw new Error("RAG_PROVENANCE_INVALID");
   }
+  if (demoQuote && (Object.keys(metadata).length !== 2 || url !== OWNER_MANUAL_QUOTE.sourceUrl ||
+    metadata.provenance !== OWNER_MANUAL_QUOTE.metadata.provenance)) throw new Error("RAG_PROVENANCE_INVALID");
   const parsed = ragProvenanceSchema.parse(JSON.parse(metadata.provenance));
   if (parsed.origin === "official_documentation" && (!parsed.publisher || !url || !normalizeSafeHttpsUrl(url))) {
     throw new Error("RAG_PROVENANCE_INVALID");

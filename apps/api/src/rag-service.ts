@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { validateDemoQuoteContent } from "./owner-manual-quote.js";
 import { z } from "zod";
 
 import type { DiagnosticAnalysisInput } from "./ai-analysis-types.js";
@@ -290,6 +291,8 @@ export class RagRetrievalService {
       let provenance;
       try {
         provenance = parseStoredProvenance(row.metadata, normalizedUrl);
+        validateDemoQuoteContent({ title: row.title, sourceLabel: row.source_label,
+          sourceUrl: normalizedUrl, content: row.content, metadata: row.metadata });
         if (provenance && incompatibleWithVehicle(provenance, input.vehicle)) continue;
       } catch { continue; }
       if (
