@@ -5,6 +5,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { loadEnv } from "./config.js";
 import {
   DEMONSTRATION_KNOWLEDGE_CORPUS,
+  ACTIVE_KNOWLEDGE_CORPUS,
   validateKnowledgeCorpus,
   type KnowledgeChunk,
 } from "./knowledge-corpus.js";
@@ -169,12 +170,13 @@ async function runCli() {
   const dryRun = process.argv.slice(2).includes("--dry-run");
   const env = loadEnv();
   if (dryRun) {
-    console.log(JSON.stringify(await runRagIngestion({ dryRun: true })));
+    console.log(JSON.stringify(await runRagIngestion({ dryRun: true, corpus: ACTIVE_KNOWLEDGE_CORPUS })));
     return;
   }
   if (!env.OPENAI_API_KEY) throw new Error("RAG_CONFIGURATION_MISSING");
   const counts = await runRagIngestion({
     dryRun: false,
+    corpus: ACTIVE_KNOWLEDGE_CORPUS,
     embeddings: new OpenAiEmbeddingClient(env.OPENAI_API_KEY, env.OPENAI_EMBEDDING_MODEL, env.OPENAI_TIMEOUT_MS),
     repository: new SupabaseRagIngestionRepository(getSupabaseAdminClient()),
   });

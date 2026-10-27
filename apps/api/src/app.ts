@@ -63,7 +63,7 @@ import {
   type RagRetrievalService,
 } from "./rag-service.js";
 import type { RagMetadata } from "./rag-types.js";
-import { KNOWLEDGE_CORPUS_VERSION } from "./knowledge-corpus.js";
+import { ACTIVE_KNOWLEDGE_CORPUS_VERSION as KNOWLEDGE_CORPUS_VERSION } from "./knowledge-corpus.js";
 import { preventPrivateCaching } from "./production-web.js";
 import { resolveTrustedProxyIps, validateLoginProxyChain } from "./trusted-proxies.js";
 
