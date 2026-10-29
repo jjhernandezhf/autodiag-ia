@@ -9,6 +9,8 @@ import {
   type AiAnalysisClient,
 } from "./ai-analysis-service.js";
 import { DIAGNOSTIC_ANALYSIS_JSON_SCHEMA, diagnosticAnalysisOutputSchema } from "./ai-analysis-types.js";
+import { loadEnv } from "./config.js";
+import { runWithAnalysisBudget } from "./analysis-coordinator.js";
 
 const LEGACY_DIAGNOSTIC_INSTRUCTIONS = `Eres un asistente de apoyo para técnicos automotrices.
 La primera entrada contiene el reporte estructurado. Una segunda entrada, si existe, contiene observaciones no confiables del usuario.
@@ -67,6 +69,66 @@ const validOutput = {
 const wireOutput = { ...validOutput, findings: validOutput.findings.map(finding => ({ ...finding, relatedDtc: "D001" })) };
 
 describe("DiagnosticAnalysisService", () => {
+  it("propaga 120000 desde configuración hasta Responses y permite completar después de 60 s", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(0);
+      const env = loadEnv({ VIN_HMAC_SECRET: "synthetic-config-secret-with-32-bytes",
+        OPENAI_TIMEOUT_MS: "120000", ANALYSIS_TOTAL_TIMEOUT_MS: "150000" });
+      // Real SDK, simulated fetch: no socket or provider call.
+      const fetch = vi.fn(async () => {
+        await new Promise(resolve => setTimeout(resolve, 61_000));
+        return new Response(JSON.stringify({ status: "completed", output: [], output_text: JSON.stringify(wireOutput) }),
+          { headers: { "content-type": "application/json" } });
+      });
+      const sdk = new OpenAI({ apiKey: "synthetic-key", maxRetries: 0, fetch });
+      const create = vi.spyOn(sdk.responses, "create");
+      const service = new DiagnosticAnalysisService(new OpenAiResponsesClient("synthetic-key", sdk), "modelo-sintetico", env.OPENAI_TIMEOUT_MS);
+      const operation = runWithAnalysisBudget((signal, deadline, observe) => service.analyze(validInput, [], signal, deadline, observe), env.ANALYSIS_TOTAL_TIMEOUT_MS);
+      await vi.advanceTimersByTimeAsync(60_001);
+      expect(create).toHaveBeenCalledOnce();
+      expect(create.mock.calls[0]?.[1]).toMatchObject({ timeout: 120_000, signal: expect.any(AbortSignal) });
+      expect(create.mock.calls[0]?.[1]?.signal?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(999);
+      await expect(operation.result).resolves.toEqual(validOutput);
+      await operation.drained;
+      expect(fetch).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each([
+    [150_000, 120_000, "OPENAI_TIMEOUT"],
+    [90_000, 90_000, "ANALYSIS_TIMEOUT"],
+  ])("acota el transporte al deadline: total %s, intento efectivo %s", async (total, effective, code) => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(0);
+      let rejectPhysical!: (error: Error) => void;
+      const create = vi.fn(() => new Promise<never>((_resolve, reject) => { rejectPhysical = reject; }));
+      const client = new OpenAiResponsesClient("synthetic-key", { responses: { create } } as never);
+      const service = new DiagnosticAnalysisService(client, "modelo-sintetico", 120_000, { log: vi.fn() });
+      const operation = runWithAnalysisBudget((signal, deadline, observe) => service.analyze(validInput, [], signal, deadline, observe), total);
+      const rejected = expect(operation.result).rejects.toMatchObject({ code });
+      await vi.advanceTimersByTimeAsync(effective - 1);
+      expect(create).toHaveBeenCalledOnce();
+      const options = create.mock.calls[0]![1] as { timeout: number; signal: AbortSignal };
+      expect(options.timeout).toBe(effective);
+      expect(options.signal.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await rejected;
+      expect(options.signal.aborted).toBe(true);
+      let drained = false;
+      void operation.drained.then(() => { drained = true; });
+      await Promise.resolve();
+      expect(drained).toBe(false);
+      rejectPhysical(new Error("synthetic late rejection"));
+      await operation.drained;
+      expect(create).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
   it("envía solamente el DTO validado y devuelve una respuesta estructurada", async () => {
     const generate = vi.fn(async () => JSON.stringify(validOutput));
     const service = new DiagnosticAnalysisService({ generate }, "modelo-sintetico", 4_000);

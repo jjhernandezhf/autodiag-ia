@@ -1,17 +1,8 @@
 import { createHmac } from "node:crypto";
 
 import type { DtcClassification, DtcStatus } from "./report-types.js";
-
-export function cleanText(value: string) {
-  return value.replace(/\s+/gu, " ").trim();
-}
-
-export function normalizeForMatch(value: string) {
-  return cleanText(value)
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/gu, "")
-    .toLowerCase();
-}
+import { cleanText, normalizeForMatch } from "../../../shared/technical-text.mjs";
+export { cleanText, normalizeForMatch } from "../../../shared/technical-text.mjs";
 
 export function nullIfMissing(value: string | undefined) {
   if (value === undefined) return null;
@@ -19,16 +10,20 @@ export function nullIfMissing(value: string | undefined) {
   return cleaned === "" || cleaned === "--" ? null : cleaned;
 }
 
-export function normalizeDtcStatus(value: string | null): DtcStatus {
+export function normalizeDtcStatus(value: string | null): Exclude<DtcStatus, "multiple_observed"> {
   if (!value) return "unknown";
   const normalized = normalizeForMatch(value);
+  if (/^oddtcs?$/u.test(normalized)) return "on_demand";
+  if (/^cmdtcs?$/u.test(normalized)) return "continuous_memory";
+  if (normalized === "activo / static") return "current";
+  if (normalized === "dtc provisional") return "provisional";
   if (["corriente", "actual", "current", "presente"].includes(normalized)) return "current";
   if (/^confirmed\s*\/\s*test\s*failed$/u.test(normalized) || /^confirmed\s*\/\s*testfailed$/u.test(normalized)) {
     return "confirmed";
   }
   if (["almacenado", "guardado", "stored"].includes(normalized)) return "stored";
   if (["pendiente", "pending"].includes(normalized)) return "pending";
-  if (["permanente", "permanent"].includes(normalized)) return "permanent";
+  if (["permanente", "permanent", "dtc permanente"].includes(normalized)) return "permanent";
   if (["intermitente", "intermittent"].includes(normalized)) return "intermittent";
   if (["historial", "historico", "history"].includes(normalized)) return "history";
   return "unknown";
@@ -38,6 +33,10 @@ export function classifyDtcStatus(status: DtcStatus): DtcClassification {
   if (status === "history") return "historical";
   if (status === "unknown") return "unknown";
   return "actionable";
+}
+
+export function matchesModuleIdentity(system: { code: string | null; name: string }, dtc: { moduleCode: string | null; moduleName: string }) {
+  return system.code === dtc.moduleCode && system.name === dtc.moduleName;
 }
 
 export function normalizeVin(value: string) {

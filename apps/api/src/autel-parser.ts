@@ -15,6 +15,7 @@ import {
   nullIfMissing,
   parseModuleIdentity,
   protectVin,
+  matchesModuleIdentity,
 } from "./text-normalization.js";
 
 interface LocatedLine extends ExtractedTextLine {
@@ -35,15 +36,20 @@ interface DtcDraft {
   description: string[];
   statusOriginal: string | null;
   anchorIndex: number;
+  anchorY: number;
+  pageNumber: number;
 }
 
 const DTC_CODE_PATTERN = /^[A-Z][A-Z0-9:-]{2,}$/iu;
 const BMW_HEXADECIMAL_DTC_PATTERN = /^[A-F0-9]{6}$/iu;
-const STATUS_PATTERN = /(Confirmed\s*\/\s*Test\s*Failed|Corriente|Actual|Presente|Almacenado|Guardado|Pendiente|Permanente|Intermitente|Historial|Histórico|Current|Stored|Pending|Permanent|Intermittent|History)$/iu;
+const VAG_NUMERIC_DTC_PATTERN = /^\d{5}:\d{3}$/u;
+const NUMERIC_MANUFACTURER_DTC_PATTERN = /^\d{2,5}-\d{1,3}$/u;
+const STATUS_PATTERN = /(Confirmed\s*\/\s*Test\s*Failed|DTC\s+permanente|DTC\s+provisional|ODDTCs?|CMDTCs?|Activo\s*\/\s*static|1\s+vez|Corriente|Actual|Presente|Almacenado|Guardado|Pendiente|Permanente|Intermitente|Historial|Histórico|Current|Stored|Pending|Permanent|Intermittent|History)$/iu;
 
 const WARNING_MESSAGES: Record<string, string> = {
   VEHICLE_SECTION_MISSING: "No se pudo procesar la sección de información del vehículo.",
   VEHICLE_IDENTITY_UNREADABLE: "No se pudo interpretar la identidad principal del vehículo.",
+  VEHICLE_IDENTITY_AMBIGUOUS: "El reporte contiene identidades de vehículo contradictorias; requiere revisión.",
   SYSTEMS_SECTION_MISSING: "No se pudo procesar la sección de sistemas escaneados.",
   DTC_SECTION_MISSING: "No se pudo procesar la sección de DTC.",
   SYSTEM_COUNT_MISMATCH: "La cantidad de sistemas no coincide con el total declarado.",
@@ -56,7 +62,9 @@ const WARNING_MESSAGES: Record<string, string> = {
   VIN_INVALID: "El VIN presente no tiene un formato válido.",
   VIN_NOT_PROVIDED: "El reporte no proporciona un VIN utilizable.",
   ENGINE_NOT_PROVIDED: "El reporte no proporciona información del motor.",
+  YEAR_NOT_PROVIDED: "El reporte no proporciona un año; debe confirmarse antes del análisis.",
   ODOMETER_NOT_PROVIDED: "El reporte no proporciona una lectura de odómetro utilizable.",
+  ODOMETER_UNIT_NOT_PROVIDED: "El reporte imprime odómetro 0 sin unidad; se conserva la lectura sin suponer km o mi.",
 };
 
 function flattenPages(pages: ExtractedPdfPage[]): LocatedLine[] {
@@ -230,11 +238,14 @@ function extractVehicle(lines: LocatedLine[], startIndex: number, endIndex: numb
   let model: string | null = null;
   let engine: string | null = null;
   let odometer: { value: number; unit: "km" | "mi" } | null = null;
+  let odometerRaw: string | undefined;
   const vinCandidates = new Set<string>();
+  const routeIdentities = new Set<string>();
 
   for (const line of lines.slice(startIndex + 1, endIndex)) {
     const odometerCandidate = parseOdometer(line.text);
     if (odometerCandidate) odometer = odometerCandidate;
+    if (/lectura del od[oó]metro\s*:\s*0(?=\s*(?:VIN\s*:|Matr[ií]cula\s*:|$))/iu.test(line.text)) odometerRaw = "0";
 
     const vinMatch = line.text.match(/\bVIN\s*:\s*(--|[A-HJ-NPR-Z0-9]{5,})/iu);
     if (vinMatch?.[1] && vinMatch[1] !== "--") vinCandidates.add(cleanText(vinMatch[1]).toUpperCase());
@@ -243,13 +254,22 @@ function extractVehicle(lines: LocatedLine[], startIndex: number, endIndex: numb
     if (engineMatch?.[1]) engine = nullIfMissing(engineMatch[1]);
 
     const routePortion = line.text.split(/\b(?:Lectura del od[oó]metro|VIN|Matr[ií]cula|Motor|Engine)\s*:/iu)[0] ?? "";
-    if (routePortion.includes("/") && /(?:19|20)\d{2}/u.test(routePortion)) {
+    if (routePortion.includes("/") && /^(?:Other\s*\/|(?:19|20)\d{2}(?=\D|$))/iu.test(routePortion.trim())) {
       const segments = routePortion.split("/").map(cleanText);
       const yearMatch = segments[0]?.match(/(?:19|20)\d{2}/u);
-      if (yearMatch) year = Number.parseInt(yearMatch[0], 10);
+      year = yearMatch ? Number.parseInt(yearMatch[0], 10) : null;
       make = nullIfMissing(segments[1]);
       model = nullIfMissing(segments[2]);
       if (!engine) engine = nullIfMissing(segments[3]);
+
+      if (normalizeForMatch(segments[0] ?? "") === "other") {
+        // Other is Autel's unknown year/selection marker, never the manufacturer.
+        model = nullIfMissing(segments.slice(2).filter(Boolean).join(" / "));
+        engine = engineMatch?.[1] ? nullIfMissing(engineMatch[1]) : null;
+      } else if (normalizeForMatch(make ?? "") === "audi" && segments.slice(3).some((s) => /^(?:S|RS)\d/iu.test(s))) {
+        model = nullIfMissing(segments.slice(2).filter(Boolean).join(" / "));
+        engine = engineMatch?.[1] ? nullIfMissing(engineMatch[1]) : null;
+      }
 
       const bmwDescriptor = segments[3];
       if (
@@ -263,10 +283,11 @@ function extractVehicle(lines: LocatedLine[], startIndex: number, endIndex: numb
           engine = `${cleanText(descriptorMatch[2])} / ${cleanText(descriptorMatch[3])}`;
         }
       }
+      routeIdentities.add(JSON.stringify([year, make, model]));
     }
   }
 
-  return { year, make, model, engine, odometer, vinCandidates: [...vinCandidates] };
+  return { year, make, model, engine, odometer, odometerRaw, vinCandidates: [...vinCandidates], ambiguous: routeIdentities.size > 1 };
 }
 
 function isSystemsTableHeader(line: LocatedLine) {
@@ -348,20 +369,26 @@ function parseDtcRow(
   const firstText = cleanText(fragments[0]?.text ?? "");
   const beginsInCodeColumn = descriptionColumnX === null || (fragments[0]?.x ?? Number.POSITIVE_INFINITY) < descriptionColumnX - 4;
   const isContextualDtcCode = (value: string) =>
-    DTC_CODE_PATTERN.test(value) || (allowBmwHexadecimal && BMW_HEXADECIMAL_DTC_PATTERN.test(value));
+    DTC_CODE_PATTERN.test(value) || (allowBmwHexadecimal && (BMW_HEXADECIMAL_DTC_PATTERN.test(value) || VAG_NUMERIC_DTC_PATTERN.test(value) || NUMERIC_MANUFACTURER_DTC_PATTERN.test(value)));
   let code: string | null = beginsInCodeColumn && isContextualDtcCode(firstText) ? firstText.toUpperCase() : null;
 
   if (!code && beginsInCodeColumn) {
     const match = line.text.match(/^(\S+)\s+(.+)$/u);
-    if (!match?.[1] || !isContextualDtcCode(match[1])) return null;
-    code = match[1].toUpperCase();
+    if (match?.[1] && isContextualDtcCode(match[1])) code = match[1].toUpperCase();
   }
+  const recognized = code !== null;
+  // A populated code cell plus a status cell inside a known table is an
+  // observation even when its code is unreadable. Keep its position and data
+  // for review instead of silently losing the row as a module continuation.
+  if (!code && beginsInCodeColumn && firstText.length > 0 && firstText.length <= 32 &&
+    descriptionColumnX !== null && statusColumnX !== null &&
+    fragments.some(f => f.x >= statusColumnX - 4)) code = firstText;
   if (!code) return null;
 
   let statusOriginal: string | null = null;
   let description = "";
 
-  if (fragments.length >= 2 && firstText.toUpperCase() === code) {
+  if (fragments.length >= 2 && (firstText.toUpperCase() === code || !recognized)) {
     const descriptionFragments = fragments.filter((fragment, index) => {
       if (index === 0) return false;
       if (statusColumnX !== null && fragment.x >= statusColumnX - 4) return false;
@@ -372,14 +399,14 @@ function parseDtcRow(
     statusOriginal = nullIfMissing(statusFragments.map((fragment) => fragment.text).join(" "));
   }
 
-  if (!description) {
+  if (!description && (descriptionColumnX === null || statusColumnX === null)) {
     const remainder = cleanText(line.text.slice(line.text.toUpperCase().indexOf(code) + code.length));
     const statusMatch = remainder.match(STATUS_PATTERN);
     statusOriginal = statusMatch?.[1] ? cleanText(statusMatch[1]) : statusOriginal;
     description = cleanText(statusMatch?.index === undefined ? remainder : remainder.slice(0, statusMatch.index));
   }
 
-  return { code, description, statusOriginal };
+  return { code, description, statusOriginal, recognized };
 }
 
 function parseDtcs(lines: LocatedLine[], startIndex: number, markCritical: (code: string) => void) {
@@ -390,7 +417,7 @@ function parseDtcs(lines: LocatedLine[], startIndex: number, markCritical: (code
   let descriptionColumnX: number | null = null;
   let statusColumnX: number | null = null;
   const pendingModuleParts: string[] = [];
-  let pendingDescriptions: Array<{ text: string; lineIndex: number }> = [];
+  let pendingDescriptions: Array<{ text: string; lineIndex: number; y: number; pageNumber: number }> = [];
 
   const finalizeDtc = () => {
     if (!currentDtc) return;
@@ -451,11 +478,18 @@ function parseDtcs(lines: LocatedLine[], startIndex: number, markCritical: (code
       currentModule !== null && descriptionColumnX !== null && statusColumnX !== null,
     );
     if (parsedRow) {
+      if (!parsedRow.recognized) markCritical("DTC_ROW_UNPARSED");
       const descriptionForNewDtc: string[] = [];
       if (currentDtc) {
         for (const pending of pendingDescriptions) {
-          const previousDistance = Math.abs(pending.lineIndex - currentDtc.anchorIndex);
-          const nextDistance = Math.abs(pending.lineIndex - lineIndex);
+          // PDF rows often center code/status between description lines. Compare
+          // geometric distance, not text-line count (which biases toward the prior row).
+          const geometric = currentDtc.pageNumber === line.pageNumber && pending.pageNumber === line.pageNumber && currentDtc.anchorY !== line.y;
+          const previousDistance = pending.pageNumber !== currentDtc.pageNumber ? Infinity : geometric
+            ? Math.abs(pending.y - currentDtc.anchorY) : Math.abs(pending.lineIndex - currentDtc.anchorIndex);
+          const nextDistance = pending.pageNumber !== line.pageNumber ? Infinity : geometric
+            ? Math.abs(pending.y - line.y) : Math.abs(pending.lineIndex - lineIndex);
+          if (geometric && Math.abs(previousDistance - nextDistance) < 0.01) markCritical("DTC_ROW_UNPARSED");
           if (previousDistance <= nextDistance) currentDtc.description.push(pending.text);
           else descriptionForNewDtc.push(pending.text);
         }
@@ -473,6 +507,8 @@ function parseDtcs(lines: LocatedLine[], startIndex: number, markCritical: (code
         description: [...descriptionForNewDtc, ...(parsedRow.description ? [parsedRow.description] : [])],
         statusOriginal: parsedRow.statusOriginal,
         anchorIndex: lineIndex,
+        anchorY: line.y,
+        pageNumber: line.pageNumber,
       };
       continue;
     }
@@ -491,7 +527,7 @@ function parseDtcs(lines: LocatedLine[], startIndex: number, markCritical: (code
     );
 
     if (descriptionContinuation && !beginsBeforeDescription) {
-      pendingDescriptions.push({ text: descriptionContinuation, lineIndex });
+      pendingDescriptions.push({ text: descriptionContinuation, lineIndex, y: line.y, pageNumber: line.pageNumber });
     } else if (beginsBeforeDescription) {
       appendPendingToCurrent();
       finalizeDtc();
@@ -508,7 +544,7 @@ function parseDtcs(lines: LocatedLine[], startIndex: number, markCritical: (code
 
   for (const module of moduleDeclarations) {
     const parsedCount = dtcs.filter((dtc) =>
-      module.code ? dtc.moduleCode === module.code : normalizeForMatch(dtc.moduleName) === normalizeForMatch(module.name),
+      matchesModuleIdentity(module, dtc),
     ).length;
     if (parsedCount !== module.declaredDtcs) markCritical("MODULE_DTC_COUNT_MISMATCH");
   }
@@ -537,7 +573,7 @@ export function parseAutelReport(pages: ExtractedPdfPage[], vinHmacSecret: strin
   if (systemsIndex < 0) markCritical("SYSTEMS_SECTION_MISSING");
   if (dtcIndex < 0) markCritical("DTC_SECTION_MISSING");
 
-  const emptyVehicle = { year: null, make: null, model: null, engine: null, odometer: null, vinCandidates: [] as string[] };
+  const emptyVehicle = { year: null, make: null, model: null, engine: null, odometer: null, odometerRaw: undefined as string | undefined, vinCandidates: [] as string[], ambiguous: false };
   const rawVehicle = vehicleIndex >= 0 ? extractVehicle(lines, vehicleIndex, systemsIndex >= 0 ? systemsIndex : lines.length) : emptyVehicle;
   const systems = systemsIndex >= 0 ? parseSystems(lines, systemsIndex, dtcIndex >= 0 ? dtcIndex : lines.length, markCritical) : [];
   const dtcs = dtcIndex >= 0 ? parseDtcs(lines, dtcIndex, markCritical) : [];
@@ -549,10 +585,11 @@ export function parseAutelReport(pages: ExtractedPdfPage[], vinHmacSecret: strin
   if (rawVehicle.year === null && rawVehicle.make === null && rawVehicle.model === null) {
     markCritical("VEHICLE_IDENTITY_UNREADABLE");
   }
+  if (rawVehicle.ambiguous) markCritical("VEHICLE_IDENTITY_AMBIGUOUS");
 
   for (const system of systems) {
     const parsedCount = dtcs.filter((dtc) =>
-      system.code ? dtc.moduleCode === system.code : normalizeForMatch(dtc.moduleName) === normalizeForMatch(system.name),
+      matchesModuleIdentity(system, dtc),
     ).length;
     if (parsedCount !== system.dtcCount) markCritical("MODULE_DTC_COUNT_MISMATCH");
   }
@@ -567,7 +604,8 @@ export function parseAutelReport(pages: ExtractedPdfPage[], vinHmacSecret: strin
     addWarning("VIN_NOT_PROVIDED");
   }
   if (!rawVehicle.engine) addWarning("ENGINE_NOT_PROVIDED");
-  if (!rawVehicle.odometer) addWarning("ODOMETER_NOT_PROVIDED");
+  if (rawVehicle.year === null) addWarning("YEAR_NOT_PROVIDED");
+  if (!rawVehicle.odometer) addWarning(rawVehicle.odometerRaw ? "ODOMETER_UNIT_NOT_PROVIDED" : "ODOMETER_NOT_PROVIDED");
 
   const protectedVin = protectVin(normalizedVin, vinHmacSecret);
   const partial = criticalCodes.size > 0;
@@ -582,6 +620,7 @@ export function parseAutelReport(pages: ExtractedPdfPage[], vinHmacSecret: strin
       model: rawVehicle.model,
       engine: rawVehicle.engine,
       odometer: rawVehicle.odometer,
+      ...(rawVehicle.odometerRaw ? { odometerRaw: rawVehicle.odometerRaw } : {}),
       ...protectedVin,
     },
     scanSummary: {

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { reportReviewEvidenceSchema } from "./report-review-schema.js";
 
 import { prepareAiAnalysis } from "./ai-analysis-adapter.js";
 import {
@@ -6,7 +7,7 @@ import {
   type DiagnosticAnalysisOutput,
 } from "./ai-analysis-types.js";
 import type { AutelExtraction, DtcClassification, DtcStatus, ParsedDtc, ScannedSystem } from "./report-types.js";
-import { containsVinCandidate } from "./text-normalization.js";
+import { containsVinCandidate, matchesModuleIdentity } from "./text-normalization.js";
 
 const nullableTextSchema = z.string().nullable();
 const dtcStatusSchema = z.enum([
@@ -16,12 +17,17 @@ const dtcStatusSchema = z.enum([
   "pending",
   "permanent",
   "intermittent",
+  "on_demand",
+  "continuous_memory",
+  "provisional",
+  "reviewed_uncertain",
   "history",
   "unknown",
 ]);
 
 const extractionSchema = z
   .object({
+    review: reportReviewEvidenceSchema.optional(),
     status: z.enum(["completed", "partial"]),
     format: z.literal("autel_vehicle_diagnostic_report"),
     requiresManualReview: z.boolean(),
@@ -31,6 +37,7 @@ const extractionSchema = z
         make: nullableTextSchema,
         model: nullableTextSchema,
         engine: nullableTextSchema,
+        odometerRaw: z.string().max(80).optional(),
         odometer: z
           .object({
             value: z.number().finite().nonnegative(),
@@ -189,8 +196,7 @@ function positioned(values: string[]): PersistablePositionedText[] {
 }
 
 function matchesSystem(system: ScannedSystem, dtc: ParsedDtc) {
-  if (system.code !== null) return dtc.moduleCode === system.code;
-  return dtc.moduleCode === null && dtc.moduleName === system.name;
+  return matchesModuleIdentity(system, dtc);
 }
 
 function dtcIdentity(value: { code: string; moduleCode: string | null; moduleName: string }) {

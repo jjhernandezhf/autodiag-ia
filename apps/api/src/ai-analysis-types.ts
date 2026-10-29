@@ -1,10 +1,14 @@
 import { z } from "zod";
+import { normalizeDtcStatus } from "./text-normalization.js";
+import { reviewDecisionSchema } from "./report-review-schema.js";
 
 export const DIAGNOSTIC_OUTPUT_SCHEMA_VERSION = "diagnostic_output_schema_v1";
 
 const MAX_MODULES = 40;
-const MAX_DTCS_PER_MODULE = 20;
-const MAX_TOTAL_DTCS = 100;
+export const MAX_ANALYSIS_DTCS = 50;
+export const MAX_ANALYSIS_OBSERVATIONS = 200;
+const MAX_DTCS_PER_MODULE = MAX_ANALYSIS_DTCS;
+const MAX_TOTAL_DTCS = MAX_ANALYSIS_DTCS;
 const NON_WHITESPACE_PATTERN = ".*\\S.*";
 export const MAX_VEHICLE_OBSERVATIONS_LENGTH = 1_000;
 
@@ -15,6 +19,11 @@ export const actionableDtcStatusSchema = z.enum([
   "pending",
   "permanent",
   "intermittent",
+  "on_demand",
+  "continuous_memory",
+  "provisional",
+  "reviewed_uncertain",
+  "multiple_observed",
 ]);
 
 const diagnosticDtcSchema = z
@@ -23,6 +32,11 @@ const diagnosticDtcSchema = z
     description: z.string().trim().min(1).max(1_000),
     status: actionableDtcStatusSchema,
     alsoHistorical: z.boolean(),
+    observations: z.array(z.object({
+      description: z.string().trim().min(1).max(1_000),
+      status: actionableDtcStatusSchema.exclude(["multiple_observed"]).or(z.enum(["history", "unknown"])),
+      statusOriginal: z.string().trim().min(1).max(120).nullable(),
+    }).strict()).min(1).max(MAX_ANALYSIS_OBSERVATIONS).optional(),
   })
   .strict();
 
@@ -34,6 +48,14 @@ const diagnosticModuleSchema = z
   })
   .strict();
 
+const legacyReviewContextSchema = z.object({ version: z.literal("review_context_v1"), reason: z.string().trim().min(10).max(500),
+  correctedFields: z.array(z.string().trim().min(1).max(120)).min(1).max(1400),
+}).strict();
+const reviewContextSchema = z.discriminatedUnion("version", [legacyReviewContextSchema, legacyReviewContextSchema.extend({
+  version: z.literal("review_context_v2"), provenance: z.literal("user_review_unverified"),
+  decisions: z.array(reviewDecisionSchema).min(1).max(1400),
+}).strict()]);
+
 export const diagnosticAnalysisInputSchema = z
   .object({
     vehicle: z
@@ -44,6 +66,7 @@ export const diagnosticAnalysisInputSchema = z
       })
       .strict(),
     modules: z.array(diagnosticModuleSchema).min(1).max(MAX_MODULES),
+    reviewContext: reviewContextSchema.optional(),
     observations: z.preprocess(
       (value) => {
         if (value === null) return undefined;
@@ -65,7 +88,38 @@ export const diagnosticAnalysisInputSchema = z
         path: ["modules"],
       });
     }
+    const dtcs = value.modules.flatMap(module => module.dtcs);
+    const observations = dtcs.reduce((sum, dtc) => sum + (dtc.observations?.length ?? 1), 0);
+    if (observations > MAX_ANALYSIS_OBSERVATIONS || JSON.stringify(value).length > 100_000) {
+      context.addIssue({ code: "custom", message: "La solicitud supera los límites de observaciones o texto.", path: ["modules"] });
+    }
+    for (const dtc of dtcs) {
+      if (dtc.status === "multiple_observed" && (!dtc.observations || new Set(dtc.observations.filter(row => row.status !== "history").map(row => row.status)).size < 2)) {
+        context.addIssue({ code: "custom", message: "Faltan los estados observados de la identidad.", path: ["modules"] });
+      }
+      if (dtc.observations) {
+        const observed = new Set(dtc.observations.filter(row => row.status !== "history").map(row => row.status));
+        const expected = observed.size > 1 ? "multiple_observed" : [...observed][0];
+        if (observed.has("unknown") || dtc.status !== expected || dtc.alsoHistorical !== dtc.observations.some(row => row.status === "history") ||
+          dtc.observations.some(row => row.status !== "reviewed_uncertain" && normalizeDtcStatus(row.statusOriginal) !== row.status)) {
+          context.addIssue({ code: "custom", message: "El estado agregado no representa todas las observaciones.", path: ["modules"] });
+        }
+      }
+    }
   });
+
+// Read-only compatibility with previously saved inputs. Never used to admit new
+// requests: older releases allowed 100 total / 20 per module.
+const legacyHistoryInputSchema = z.object({
+  vehicle: diagnosticAnalysisInputSchema.shape.vehicle,
+  modules: z.array(z.object({ code: z.string().trim().min(1).max(32).nullable(), name: z.string().trim().min(1).max(160),
+    dtcs: z.array(z.object({ code: z.string().trim().min(1).max(32), description: z.string().trim().min(1).max(1000),
+      status: z.enum(["current", "confirmed", "stored", "pending", "permanent", "intermittent"]), alsoHistorical: z.boolean(),
+    }).strict()).min(1).max(20),
+  }).strict()).min(1).max(40),
+  observations: diagnosticAnalysisInputSchema.shape.observations,
+}).strict().refine(value => value.modules.reduce((sum, m) => sum + m.dtcs.length, 0) <= 100);
+export const historicalAnalysisInputSchema = z.union([diagnosticAnalysisInputSchema, legacyHistoryInputSchema]);
 
 const diagnosticFindingSchema = z
   .object({
@@ -107,7 +161,7 @@ const observationCorrelationSchema = z
   .object({
     status: z.enum(["not_provided", "no_clear_match", "matches_found"]),
     summary: z.string().trim().min(1).max(1_000),
-    matches: z.array(observationMatchSchema).max(20),
+    matches: z.array(observationMatchSchema).max(MAX_ANALYSIS_DTCS),
   })
   .strict()
   .superRefine((value, context) => {
@@ -124,7 +178,7 @@ const observationCorrelationSchema = z
 export const diagnosticAnalysisOutputSchema = z
   .object({
     technicalSummary: z.string().trim().min(1).max(1_500),
-    findings: z.array(diagnosticFindingSchema).min(1).max(20),
+    findings: z.array(diagnosticFindingSchema).min(1).max(MAX_ANALYSIS_DTCS),
     observationCorrelation: observationCorrelationSchema,
     safetyWarnings: z.array(z.string().trim().min(1).max(500)).min(1).max(10),
     confidence: z.enum(["high", "medium", "low"]),
@@ -143,7 +197,7 @@ export const DIAGNOSTIC_ANALYSIS_JSON_SCHEMA = {
     findings: {
       type: "array",
       minItems: 1,
-      maxItems: 20,
+      maxItems: MAX_ANALYSIS_DTCS,
       items: {
         type: "object",
         additionalProperties: false,
@@ -214,7 +268,7 @@ export const DIAGNOSTIC_ANALYSIS_JSON_SCHEMA = {
         summary: { type: "string", minLength: 1, maxLength: 1_000, pattern: NON_WHITESPACE_PATTERN },
         matches: {
           type: "array",
-          maxItems: 20,
+          maxItems: MAX_ANALYSIS_DTCS,
           items: {
             type: "object",
             additionalProperties: false,

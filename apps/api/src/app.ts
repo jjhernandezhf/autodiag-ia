@@ -16,6 +16,8 @@ import {
 } from "./ai-analysis-service.js";
 import { DIAGNOSTIC_OUTPUT_SCHEMA_VERSION, type DiagnosticAnalysisOutput } from "./ai-analysis-types.js";
 import { prepareAiAnalysis } from "./ai-analysis-adapter.js";
+import { confirmVehicleData } from "./vehicle-confirmation.js";
+import { createExtractionToken, reviewReport, validatedReportMatchesInput, verifyExtractionToken, ReportValidationCapacityError } from "./report-review.js";
 import {
   AnalysisCoordinationError,
   AnalysisIdempotencyCoordinator,
@@ -72,6 +74,9 @@ const PDF_SIGNATURE = Buffer.from("%PDF-");
 const ANALYSIS_JSON_LIMIT_BYTES = 256 * 1024;
 
 type ErrorCode =
+  | "REPORT_VALIDATION_UNAVAILABLE"
+  | "REPORT_REVIEW_INVALID"
+  | "VEHICLE_CONFIRMATION_INVALID"
   | "ANALYTICS_REQUEST_INVALID"
   | "ANALYTICS_INVALID"
   | "ANALYTICS_LIMIT"
@@ -244,9 +249,8 @@ export function createApp(options: AppOptions) {
 
   app.disable("x-powered-by");
   app.use(preventPrivateCaching);
-  // The largest contract-valid analysis DTO (40 modules, 100 DTC and all text
-  // fields at their maxima) stays below 256 KiB; the bounded margin rejects
-  // unrelated oversized JSON without changing Multer's multipart file limit.
+  // Independent JSON resource cap, also covering original/effective review
+  // evidence. Oversized reviews fail explicitly, never truncate their trace.
   const jsonParser = express.json({ limit: ANALYSIS_JSON_LIMIT_BYTES });
 
   // The in-memory store is appropriate only for this local prototype. A
@@ -393,12 +397,15 @@ export function createApp(options: AppOptions) {
     }
     const analysisPreparation = prepareAiAnalysis(extraction);
 
+    const id = randomUUID();
+    const contentToken = createPdfContentToken(file.buffer, options.vinHmacSecret, request.usuario!.id);
     response.status(201).json({
-      id: randomUUID(),
+      id,
       originalName: file.originalname,
       size: file.size,
       sha256: createHash("sha256").update(file.buffer).digest("hex"),
-      contentToken: createPdfContentToken(file.buffer, options.vinHmacSecret, request.usuario!.id),
+      contentToken,
+      extractionToken: createExtractionToken(extraction, request.usuario!.id, id, contentToken, options.vinHmacSecret),
       type: PDF_MIME_TYPE,
       status: "received",
       extraction,
@@ -406,10 +413,42 @@ export function createApp(options: AppOptions) {
     });
   });
 
+  app.post("/api/reports/confirm-vehicle", requireAuthentication, (request, response) => {
+    const confirmed = confirmVehicleData(request.body);
+    if (!confirmed) {
+      sendError(response, 400, "VEHICLE_CONFIRMATION_INVALID", "Confirma únicamente los datos ausentes con marca, modelo y año válidos.");
+      return;
+    }
+    response.json(confirmed);
+  });
+
+  app.post("/api/reports/review", requireAuthentication, (request, response) => {
+    const reviewed = reviewReport(request.body, request.usuario!.id, options.vinHmacSecret);
+    if (!reviewed) {
+      sendError(response, 400, "REPORT_REVIEW_INVALID", "No se pudo validar la revisión. Conserva las filas originales, explica cada corrección y vuelve a cargar el PDF si la referencia venció.");
+      return;
+    }
+    response.json(reviewed);
+  });
+
   app.post("/api/reports/analyze", requireAuthentication, async (request, response) => {
     const parsedRequest = parseAnalysisRequest(request.body);
     const input = validateDiagnosticAnalysisInput(parsedRequest.input);
     const idempotencyKey = parseAnalysisIdempotencyKey(request.get("Idempotency-Key"));
+    const userId = request.usuario!.id;
+    const contentFingerprint = parsedRequest.historyContext?.contentToken === undefined
+      ? null
+      : verifyPdfContentToken(parsedRequest.historyContext.contentToken, options.vinHmacSecret, userId);
+    if (!validatedReportMatchesInput(input, parsedRequest.historyContext, request.usuario!.id, options.vinHmacSecret)) {
+      sendError(response, 400, "AI_INPUT_INVALID", "El reporte no es elegible o la revisión no corresponde a esta sesión. Revisa los datos antes de analizar.");
+      return;
+    }
+    const assertCurrentReport = () => {
+      const context = parsedRequest.historyContext!;
+      if (verifyExtractionToken(context.extractionToken, context.extraction, userId, context.reportReference, context.contentToken!, options.vinHmacSecret) === null) {
+        throw new AiAnalysisError("AI_INPUT_INVALID");
+      }
+    };
 
     if (!analysisService) {
       if (!openAiApiKey) {
@@ -428,10 +467,6 @@ export function createApp(options: AppOptions) {
       );
     }
 
-    const userId = request.usuario!.id;
-    const contentFingerprint = parsedRequest.historyContext?.contentToken === undefined
-      ? null
-      : verifyPdfContentToken(parsedRequest.historyContext.contentToken, options.vinHmacSecret, userId);
     const analysisFingerprint = contentFingerprint !== null && openAiModel
       ? createAnalysisFingerprint({
           contentFingerprint,
@@ -459,8 +494,15 @@ export function createApp(options: AppOptions) {
         }, options.vinHmacSecret)
       : fingerprintAnalysisRequest({ input, historyContext: parsedRequest.historyContext ?? null,
           ...(openAiReasoningEffort === undefined ? {} : { reasoningEffort: openAiReasoningEffort }) });
-    const result = await analysisCoordinator.execute(userId, idempotencyKey, analysisFingerprint, () =>
+    // A superseded manual revision must not poison an equivalent current
+    // revision by sharing its in-flight authorization failure. Durable history
+    // still uses the content/evidence fingerprint, never the rotating proof.
+    const operationFingerprint = parsedRequest.historyContext!.extraction.review
+      ? fingerprintAnalysisRequest({ analysisFingerprint, revision: parsedRequest.historyContext!.extractionToken })
+      : analysisFingerprint;
+    const result = await analysisCoordinator.execute(userId, idempotencyKey, operationFingerprint, () =>
       runWithAnalysisBudget(async (signal, deadlineAtMs, observePhysical) => {
+        assertCurrentReport();
         if (options.historyService && contentFingerprint !== null && analysisFingerprint.startsWith("analysis_v1_")) {
           try {
             const existing = await options.historyService.findByAnalysisFingerprint(
@@ -469,6 +511,7 @@ export function createApp(options: AppOptions) {
               signal,
             );
             if (existing) {
+              assertCurrentReport();
               return {
                 status: "completed" as const,
                 reused: true,
@@ -478,12 +521,13 @@ export function createApp(options: AppOptions) {
               };
             }
           } catch (error) {
-            if (error instanceof AnalysisCoordinationError) throw error;
+            if (error instanceof AnalysisCoordinationError || error instanceof AiAnalysisError) throw error;
             // History is best-effort; an unavailable lookup must not block analysis.
           }
         }
 
         signal.throwIfAborted();
+        assertCurrentReport();
         let ragResult = options.ragEnabled ? NOT_CONFIGURED_RAG_RESULT : DISABLED_RAG_RESULT;
         if (options.ragEnabled && options.ragService) {
           try {
@@ -495,8 +539,10 @@ export function createApp(options: AppOptions) {
         }
 
         signal.throwIfAborted();
-        const analysis = await analysisService!.analyze(input, ragResult.evidence, signal, deadlineAtMs, observePhysical);
+        assertCurrentReport();
+        const analysis = await analysisService!.analyze(input, ragResult.evidence, signal, deadlineAtMs, observePhysical, assertCurrentReport);
         signal.throwIfAborted();
+        assertCurrentReport();
         const history: AnalysisResponsePayload["history"] = { status: "unavailable" };
         const historyDeadlineAtMs = Date.now() + diagnosticHistorySaveTimeoutMs;
         // Best-effort history must fit before the integral deadline; otherwise
@@ -532,6 +578,7 @@ export function createApp(options: AppOptions) {
               }, abortController.signal);
               assertHistoryBudget();
               if (saved.reused && analysisFingerprint.startsWith("analysis_v1_")) {
+                assertCurrentReport();
                 const winner = await options.historyService!.findByAnalysisFingerprint(userId, analysisFingerprint, abortController.signal);
                 assertHistoryBudget();
                 if (!winner) throw new DiagnosticHistoryError("HISTORY_UNAVAILABLE");
@@ -559,6 +606,7 @@ export function createApp(options: AppOptions) {
         return { status: "completed", reused: false, analysis, rag: ragResult.metadata, history };
       }, analysisTotalTimeoutMs)
     );
+    assertCurrentReport();
     if (responseIsAvailable(response)) response.json(result);
   });
 
@@ -693,6 +741,10 @@ export function createApp(options: AppOptions) {
       return;
     }
 
+    if (error instanceof ReportValidationCapacityError) {
+      sendError(response, 503, "REPORT_VALIDATION_UNAVAILABLE", "La validación de reportes está temporalmente ocupada. Inténtalo más tarde.");
+      return;
+    }
     if (error instanceof AiAnalysisError) {
       const statusByCode: Record<typeof error.code, number> = {
         AI_INPUT_INVALID: 400,
@@ -721,6 +773,14 @@ export function createApp(options: AppOptions) {
 
     if (error instanceof AnalysisFingerprintError) {
       sendError(response, 400, "CONTENT_TOKEN_INVALID", "La referencia privada del reporte no es válida.");
+      return;
+    }
+
+    if (["/api/reports/review", "/api/reports/confirm-vehicle"].includes(request.path) && error instanceof Error) {
+      const status = "status" in error && error.status === 413 ? 413 : error instanceof SyntaxError ? 400 : 500;
+      sendError(response, status, "REPORT_REVIEW_INVALID", status === 413
+        ? "La revisión supera el tamaño permitido. No se descartaron filas ni evidencia."
+        : "No se pudo validar la revisión del reporte.");
       return;
     }
 

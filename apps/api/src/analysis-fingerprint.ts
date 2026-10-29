@@ -5,7 +5,7 @@ import { z } from "zod";
 import type { DiagnosticAnalysisInput } from "./ai-analysis-types.js";
 import type { AnalysisReasoningEffort } from "./analysis-generation.js";
 
-export const ANALYSIS_PIPELINE_VERSION = "analysis_pipeline_v2_rag_provenance";
+export const ANALYSIS_PIPELINE_VERSION = "analysis_pipeline_v3_manual_review";
 export const PDF_CONTENT_FINGERPRINT_VERSION = "pdf_v1";
 export const ANALYSIS_FINGERPRINT_VERSION = "analysis_v1";
 

@@ -41,17 +41,25 @@ describe("configuración sensible", () => {
       OPENAI_REASONING_EFFORT: "low" })).toThrow();
   });
 
-  it.each([80_001, 89_000, 1.5, 0, -1, Number.NaN, Number.POSITIVE_INFINITY])("rechaza presupuesto integral inválido %s en ambos esquemas", (value) => {
+  it.each([150_001, 180_000, 1.5, 0, -1, Number.NaN, Number.POSITIVE_INFINITY])("rechaza presupuesto integral inválido %s en ambos esquemas", (value) => {
     expect(() => resolveAnalysisTotalTimeout(value)).toThrow();
     expect(() => loadEnv({ VIN_HMAC_SECRET: "synthetic-config-secret-with-32-bytes", ANALYSIS_TOTAL_TIMEOUT_MS: String(value) })).toThrow();
   });
 
-  it("limita el presupuesto integral a 80000 y conserva el default para blancos", () => {
+  it("conserva el presupuesto predeterminado de 80000 para blancos", () => {
     expect(resolveAnalysisTotalTimeout(80_000)).toBe(80_000);
     expect(resolveAnalysisTotalTimeout()).toBe(80_000);
     for (const value of ["", "   ", "80000"]) {
       expect(loadEnv({ VIN_HMAC_SECRET: "synthetic-config-secret-with-32-bytes", ANALYSIS_TOTAL_TIMEOUT_MS: value }).ANALYSIS_TOTAL_TIMEOUT_MS).toBe(80_000);
     }
+  });
+  it("permite 120 s por intento y 150 s totales sin aceptar presupuestos incoherentes", () => {
+    const base = { VIN_HMAC_SECRET: "synthetic-config-secret-with-32-bytes", OPENAI_TIMEOUT_MS: "120000" };
+    expect(loadEnv({ ...base, ANALYSIS_TOTAL_TIMEOUT_MS: "150000" }).OPENAI_TIMEOUT_MS).toBe(120_000);
+    expect(resolveAnalysisTotalTimeout(150_000)).toBe(150_000);
+    expect(() => loadEnv(base)).toThrow();
+    expect(() => loadEnv({ ...base, ANALYSIS_TOTAL_TIMEOUT_MS: "120000" })).toThrow();
+    expect(() => loadEnv({ ...base, OPENAI_TIMEOUT_MS: "120001", ANALYSIS_TOTAL_TIMEOUT_MS: "150000" })).toThrow();
   });
   it("rechaza el arranque cuando falta VIN_HMAC_SECRET", () => {
     expect(() => loadEnv({})).toThrow();

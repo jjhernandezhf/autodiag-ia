@@ -38,11 +38,12 @@ function fingerprintInput(overrides: Record<string, unknown> = {}) {
 }
 
 describe("huella privada del PDF", () => {
-  it("separa referencias opacas de generaciones anteriores sin cambiar el historial público", () => {
-    expect(DIAGNOSTIC_PROMPT_VERSION).toBe("diagnostic_prompt_v2_reference_ids");
+  it("separa el contexto de tipos de prueba DTC de generaciones anteriores sin cambiar el historial público", () => {
+    expect(DIAGNOSTIC_PROMPT_VERSION).toBe("diagnostic_prompt_v5_manual_evidence");
     const current = createAnalysisFingerprint(fingerprintInput({ promptVersion: DIAGNOSTIC_PROMPT_VERSION }), SECRET);
-    const previous = createAnalysisFingerprint(fingerprintInput({ promptVersion: "diagnostic_prompt_v1" }), SECRET);
+    const previous = createAnalysisFingerprint(fingerprintInput({ promptVersion: "diagnostic_prompt_v3_dtc_test_context" }), SECRET);
     expect(current).not.toBe(previous);
+    expect(current).not.toBe(createAnalysisFingerprint(fingerprintInput({ promptVersion: "diagnostic_prompt_v4_observed_states_review" }), SECRET));
     expect(createAnalysisFingerprint(fingerprintInput({ promptVersion: DIAGNOSTIC_PROMPT_VERSION }), SECRET)).toBe(current);
   });
   it("produce el mismo token para los mismos bytes y otro para contenido diferente", () => {

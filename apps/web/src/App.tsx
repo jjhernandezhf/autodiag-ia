@@ -3,6 +3,8 @@ import autodiagLogoUrl from "./assets/autodiag-ia-logo.png";
 import { HistoryAnalyticsExport } from "./HistoryAnalyticsExport";
 import { HistoryAutomation } from "./HistoryAutomation";
 import { HistoryStatistics } from "./HistoryStatistics";
+import { ReportReviewPanel } from "./ReportReviewPanel";
+import { isReviewEvidence, isDtcObservations, isReviewContext, hasConsistentObservedStates, MAX_ANALYSIS_DTCS, MAX_ANALYSIS_OBSERVATIONS, type ReportReviewEvidence, type ReviewContext } from "./report-review-data";
 import { describeRagProvenance, isRagProvenance } from "./rag-provenance";
 import {
   API_UNAVAILABLE_MESSAGE,
@@ -39,12 +41,18 @@ type DtcStatus =
   | "pending"
   | "permanent"
   | "intermittent"
+  | "on_demand"
+  | "continuous_memory"
+  | "provisional"
+  | "reviewed_uncertain"
+  | "multiple_observed"
   | "history"
   | "unknown";
 type ActionableDtcStatus = Exclude<DtcStatus, "history" | "unknown">;
 type DtcClassification = "actionable" | "historical" | "unknown";
 
 interface ExtractionResult {
+  review?: ReportReviewEvidence;
   status: "completed" | "partial";
   format: "autel_vehicle_diagnostic_report";
   requiresManualReview: boolean;
@@ -54,6 +62,7 @@ interface ExtractionResult {
     model: string | null;
     engine: string | null;
     odometer: { value: number; unit: "km" | "mi" } | null;
+    odometerRaw?: string;
     vinMasked: string | null;
     vinPseudonym: string | null;
   };
@@ -81,15 +90,18 @@ interface DiagnosticAnalysisInput {
   modules: Array<{
     code: string | null;
     name: string;
-    dtcs: Array<{ code: string; description: string; status: ActionableDtcStatus; alsoHistorical: boolean }>;
+    dtcs: Array<{ code: string; description: string; status: ActionableDtcStatus; alsoHistorical: boolean;
+      observations?: Array<{ description: string; status: Exclude<DtcStatus, "multiple_observed">; statusOriginal: string | null }> }>;
   }>;
   observations?: string;
+  reviewContext?: ReviewContext;
 }
 
 interface AnalysisCounts {
   detected: number;
   actionable: number;
   historical: number;
+  identities?: number;
 }
 
 interface AnalysisAvailabilityReason {
@@ -168,6 +180,7 @@ interface AnalysisUiState {
 }
 
 interface UploadResponse {
+  extractionToken?: string;
   id: string;
   originalName: string;
   size: number;
@@ -241,6 +254,16 @@ const PUBLIC_API_ERROR_MESSAGES: Record<string, string> = {
   HISTORY_NOT_FOUND: "El diagnóstico solicitado no existe.",
   HISTORY_DATA_INVALID: "El historial almacenado no cumple el contrato esperado.",
   HISTORY_UNAVAILABLE: "El historial no está disponible temporalmente.",
+};
+const UPLOAD_RECOVERY: Record<string, string> = {
+  [PUBLIC_API_ERROR_MESSAGES.FILE_TOO_LARGE]: "Selecciona otro reporte Autel completo dentro del tamaño permitido; no se analizará una selección truncada.",
+  [PUBLIC_API_ERROR_MESSAGES.INVALID_FILE_FORMAT]: "Vuelve a exportar un PDF válido desde Autel y selecciona el archivo nuevo.",
+  [PUBLIC_API_ERROR_MESSAGES.PDF_ENCRYPTED]: "Solicita una exportación autorizada sin protección y vuelve a cargarla.",
+  [PUBLIC_API_ERROR_MESSAGES.PDF_UNREADABLE]: "Vuelve a exportar el reporte desde Autel, comprueba que se abre correctamente y selecciona el nuevo PDF.",
+  [PUBLIC_API_ERROR_MESSAGES.PDF_NO_USABLE_TEXT]: "Usa la exportación original de Autel con texto seleccionable, no una fotografía o escaneo. No se inventarán datos ni se ejecutará IA.",
+  [PUBLIC_API_ERROR_MESSAGES.PDF_EXTRACTION_LIMIT_EXCEEDED]: "Selecciona un reporte completo que cumpla los límites de páginas y texto. Este archivo no se truncará ni se analizará parcialmente.",
+  [PUBLIC_API_ERROR_MESSAGES.PDF_EXTRACTION_TIMEOUT]: "Puedes reintentar explícitamente una vez. Si vuelve a ocurrir, reexporta el reporte compatible; no se elevarán los límites automáticamente.",
+  [PUBLIC_API_ERROR_MESSAGES.AUTEL_FORMAT_NOT_RECOGNIZED]: "Usa un informe de diagnóstico Autel compatible. No se habilita revisión manual para convertir archivos ajenos en reportes válidos.",
 };
 
 const ANALYSIS_AVAILABILITY_REASON_CODES = new Set([
@@ -318,6 +341,7 @@ function isDiagnosticAnalysis(value: unknown): value is DiagnosticAnalysis {
     candidate.technicalSummary.trim().length > 0 &&
     Array.isArray(candidate.findings) &&
     candidate.findings.length > 0 &&
+    candidate.findings.length <= MAX_ANALYSIS_DTCS &&
     candidate.findings.every(
       (finding) =>
         finding !== null &&
@@ -339,7 +363,7 @@ function isDiagnosticAnalysis(value: unknown): value is DiagnosticAnalysis {
     candidate.observationCorrelation.summary.trim().length > 0 &&
     candidate.observationCorrelation.summary.length <= 1_000 &&
     Array.isArray(candidate.observationCorrelation.matches) &&
-    candidate.observationCorrelation.matches.length <= 20 &&
+    candidate.observationCorrelation.matches.length <= MAX_ANALYSIS_DTCS &&
     candidate.observationCorrelation.matches.every((match) =>
       match !== null &&
       typeof match === "object" &&
@@ -443,10 +467,10 @@ function parseHistoryListItem(value: unknown): HistoryListItem | null {
   return candidate as HistoryListItem;
 }
 
-function isHistoryAnalysisInput(value: unknown): value is DiagnosticAnalysisInput {
+function isHistoryAnalysisInput(value: unknown, legacyRead = false): value is DiagnosticAnalysisInput {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<DiagnosticAnalysisInput>;
-  if (!hasOnlyKeys(candidate, ["vehicle", "modules", "observations"])) return false;
+  if (!hasOnlyKeys(candidate, ["vehicle", "modules", "observations", "reviewContext"]) || !isReviewContext(candidate.reviewContext, s => containsSensitiveReportText(s, "source_text"))) return false;
   if (
     !candidate.vehicle || typeof candidate.vehicle !== "object" ||
     !hasOnlyKeys(candidate.vehicle, ["make", "model", "year"]) ||
@@ -468,24 +492,26 @@ function isHistoryAnalysisInput(value: unknown): value is DiagnosticAnalysisInpu
     hasOnlyKeys(module, ["code", "name", "dtcs"]) &&
     (module.code === null || (typeof module.code === "string" && !!module.code.trim() && module.code.length <= 32 && !containsSensitiveReportText(module.code, "structured_identifier"))) &&
     typeof module.name === "string" && !!module.name.trim() && module.name.length <= 160 && !containsSensitiveReportText(module.name, "structured_identifier") &&
-    Array.isArray(module.dtcs) && module.dtcs.length > 0 && module.dtcs.length <= 20 &&
-    (totalDtcs += module.dtcs.length) <= 100 &&
+    Array.isArray(module.dtcs) && module.dtcs.length > 0 && module.dtcs.length <= (legacyRead && !candidate.reviewContext ? 50 : MAX_ANALYSIS_DTCS) &&
+    (totalDtcs += module.dtcs.length) <= (legacyRead && !candidate.reviewContext ? 100 : MAX_ANALYSIS_DTCS) &&
     module.dtcs.every((dtc) =>
       dtc !== null && typeof dtc === "object" &&
-      hasOnlyKeys(dtc, ["code", "description", "status", "alsoHistorical"]) &&
+      hasOnlyKeys(dtc, ["code", "description", "status", "alsoHistorical", "observations"]) && isDtcObservations(dtc.observations, s => containsSensitiveReportText(s, "source_text")) &&
       typeof dtc.code === "string" && !!dtc.code.trim() && dtc.code.length <= 32 && !containsSensitiveReportText(dtc.code, "structured_identifier") &&
       typeof dtc.description === "string" && !!dtc.description.trim() && dtc.description.length <= 1_000 && !containsSensitiveReportText(dtc.description, "free_text") &&
-      ["current", "confirmed", "stored", "pending", "permanent", "intermittent"].includes(dtc.status) &&
-      typeof dtc.alsoHistorical === "boolean"
+      ["current", "confirmed", "stored", "pending", "permanent", "intermittent", "on_demand", "continuous_memory", "provisional", "reviewed_uncertain", "multiple_observed"].includes(dtc.status) &&
+      typeof dtc.alsoHistorical === "boolean" && hasConsistentObservedStates(dtc)
     )
   );
-  return modulesValid && totalDtcs <= 100;
+  const legacy = legacyRead && !candidate.reviewContext && candidate.modules.every(m => m.dtcs.length <= 20 && m.dtcs.every(d => !d.observations && ["current", "confirmed", "stored", "pending", "permanent", "intermittent"].includes(d.status)));
+  return modulesValid && ((legacy && totalDtcs <= 100) || (totalDtcs <= MAX_ANALYSIS_DTCS && candidate.modules.reduce((sum, m) => sum + m.dtcs.reduce((n, d) => n + (d.observations?.length ?? 1), 0), 0) <= MAX_ANALYSIS_OBSERVATIONS && JSON.stringify(candidate).length <= 100_000));
 }
 
 function parseUploadExtraction(value: unknown): ExtractionResult | null {
   if (!value || typeof value !== "object") return null;
   const candidate = value as Partial<ExtractionResult>;
-  if (!hasOnlyKeys(candidate, ["status", "format", "requiresManualReview", "vehicle", "scanSummary", "systems", "dtcs", "warnings"])) return null;
+  if (!hasOnlyKeys(candidate, ["status", "format", "requiresManualReview", "vehicle", "scanSummary", "systems", "dtcs", "warnings", "review"]) ||
+    (candidate.review !== undefined && !isReviewEvidence(candidate.review, s => containsSensitiveReportText(s, "source_text")))) return null;
   const vehicle = candidate.vehicle;
   const scan = candidate.scanSummary;
   const nullableText = (item: unknown, maxLength = 500) => item === null
@@ -498,7 +524,8 @@ function parseUploadExtraction(value: unknown): ExtractionResult | null {
     || candidate.format !== "autel_vehicle_diagnostic_report"
     || typeof candidate.requiresManualReview !== "boolean"
     || !vehicle || typeof vehicle !== "object"
-    || !hasOnlyKeys(vehicle, ["year", "make", "model", "engine", "odometer", "vinMasked", "vinPseudonym"])
+    || !hasOnlyKeys(vehicle, ["year", "make", "model", "engine", "odometer", "vinMasked", "vinPseudonym", "odometerRaw"])
+    || (vehicle.odometerRaw !== undefined && (typeof vehicle.odometerRaw !== "string" || vehicle.odometerRaw.length > 80))
     || !(vehicle.year === null || (typeof vehicle.year === "number" && Number.isInteger(vehicle.year) && vehicle.year >= 1886 && vehicle.year <= 9_999))
     || !nullableText(vehicle.make, 200)
     || !nullableText(vehicle.model, 200)
@@ -535,10 +562,10 @@ function parseUploadExtraction(value: unknown): ExtractionResult | null {
     && typeof dtc.code === "string" && dtc.code.trim().length > 0 && dtc.code.length <= 32
     && nullableText(dtc.moduleCode, 64)
     && typeof dtc.moduleName === "string" && dtc.moduleName.trim().length > 0 && dtc.moduleName.length <= 300
-    && ["current", "confirmed", "stored", "pending", "permanent", "intermittent", "history", "unknown"].includes(dtc.status)
+    && ["current", "confirmed", "stored", "pending", "permanent", "intermittent", "on_demand", "continuous_memory", "provisional", "reviewed_uncertain", "history", "unknown"].includes(dtc.status)
     && nullableText(dtc.statusOriginal, 200)
     && ["actionable", "historical", "unknown"].includes(dtc.classification)
-    && typeof dtc.descriptionOriginal === "string" && dtc.descriptionOriginal.trim().length > 0 && dtc.descriptionOriginal.length <= 1_000
+    && typeof dtc.descriptionOriginal === "string" && dtc.descriptionOriginal.length <= 1_000
   );
   const warningsValid = candidate.warnings.every((warning) =>
     warning !== null && typeof warning === "object"
@@ -559,7 +586,8 @@ function parseAnalysisPreparation(value: unknown): AnalysisPreparation | null {
   const counts = candidate.counts;
   const reasons = candidate.reasons;
   if (
-    !counts || typeof counts !== "object" || !hasOnlyKeys(counts, ["detected", "actionable", "historical"])
+    !counts || typeof counts !== "object" || !hasOnlyKeys(counts, ["detected", "actionable", "historical", "identities"])
+    || (counts.identities !== undefined && (!Number.isInteger(counts.identities) || counts.identities < 0))
     || ![counts.detected, counts.actionable, counts.historical].every((item) => typeof item === "number" && Number.isInteger(item) && item >= 0)
     || !Array.isArray(reasons) || !reasons.every((reason) =>
       reason !== null && typeof reason === "object" && hasOnlyKeys(reason, ["code", "message"])
@@ -578,7 +606,8 @@ function parseAnalysisPreparation(value: unknown): AnalysisPreparation | null {
 function parseUploadResponse(value: unknown): UploadResponse | null {
   if (!value || typeof value !== "object") return null;
   const candidate = value as Partial<UploadResponse>;
-  if (!hasOnlyKeys(candidate, ["id", "originalName", "size", "sha256", "contentToken", "type", "status", "extraction", "analysisPreparation"])) return null;
+  if (!hasOnlyKeys(candidate, ["id", "originalName", "size", "sha256", "contentToken", "type", "status", "extraction", "analysisPreparation", "extractionToken"]) ||
+    (candidate.extractionToken !== undefined && (typeof candidate.extractionToken !== "string" || !/^review_v1_\d{13}\.[a-f0-9]{64}$/u.test(candidate.extractionToken)))) return null;
   const extraction = parseUploadExtraction(candidate.extraction);
   const analysisPreparation = parseAnalysisPreparation(candidate.analysisPreparation);
   if (
@@ -598,13 +627,15 @@ function parseUploadResponse(value: unknown): UploadResponse | null {
 function parseHistoryExtraction(value: unknown): ExtractionResult | null {
   if (!value || typeof value !== "object") return null;
   const candidate = value as Partial<ExtractionResult>;
-  if (!hasOnlyKeys(candidate, ["status", "format", "requiresManualReview", "vehicle", "scanSummary", "systems", "dtcs", "warnings"])) return null;
+  if (!hasOnlyKeys(candidate, ["status", "format", "requiresManualReview", "vehicle", "scanSummary", "systems", "dtcs", "warnings", "review"]) ||
+    (candidate.review !== undefined && !isReviewEvidence(candidate.review, s => containsSensitiveReportText(s, "source_text")))) return null;
   const vehicle = candidate.vehicle;
   const scan = candidate.scanSummary;
   if (
     candidate.status !== "completed" || candidate.format !== "autel_vehicle_diagnostic_report" ||
     candidate.requiresManualReview !== false || !vehicle || typeof vehicle !== "object" ||
-    !hasOnlyKeys(vehicle, ["year", "make", "model", "engine", "odometer", "vinMasked", "vinPseudonym"]) ||
+    !hasOnlyKeys(vehicle, ["year", "make", "model", "engine", "odometer", "vinMasked", "vinPseudonym", "odometerRaw"]) ||
+    (vehicle.odometerRaw !== undefined && (typeof vehicle.odometerRaw !== "string" || vehicle.odometerRaw.length > 80 || containsSensitiveReportText(vehicle.odometerRaw, "source_text"))) ||
     !(vehicle.year === null || (Number.isInteger(vehicle.year) && vehicle.year >= 1886 && vehicle.year <= 9_999)) ||
     !(vehicle.make === null || (typeof vehicle.make === "string" && !!vehicle.make.trim() && !containsSensitiveReportText(vehicle.make, "structured_identifier"))) ||
     !(vehicle.model === null || (typeof vehicle.model === "string" && !!vehicle.model.trim() && !containsSensitiveReportText(vehicle.model, "structured_identifier"))) ||
@@ -638,7 +669,7 @@ function parseHistoryExtraction(value: unknown): ExtractionResult | null {
     typeof dtc.code === "string" && !!dtc.code.trim() && !containsSensitiveReportText(dtc.code, "structured_identifier") &&
     (dtc.moduleCode === null || (typeof dtc.moduleCode === "string" && !!dtc.moduleCode.trim() && !containsSensitiveReportText(dtc.moduleCode, "structured_identifier"))) &&
     typeof dtc.moduleName === "string" && !!dtc.moduleName.trim() && !containsSensitiveReportText(dtc.moduleName, "structured_identifier") &&
-    ["current", "confirmed", "stored", "pending", "permanent", "intermittent", "history", "unknown"].includes(dtc.status) &&
+    ["current", "confirmed", "stored", "pending", "permanent", "intermittent", "on_demand", "continuous_memory", "provisional", "reviewed_uncertain", "history", "unknown"].includes(dtc.status) &&
     (dtc.statusOriginal === null || (typeof dtc.statusOriginal === "string" && !containsSensitiveReportText(dtc.statusOriginal, "source_text"))) &&
     ["actionable", "historical", "unknown"].includes(dtc.classification) &&
     typeof dtc.descriptionOriginal === "string" && !!dtc.descriptionOriginal.trim() &&
@@ -651,6 +682,14 @@ function parseHistoryExtraction(value: unknown): ExtractionResult | null {
     !containsSensitiveReportText(warning.message, "source_text")
   );
   return systemsValid && dtcsValid && warningsValid ? candidate as ExtractionResult : null;
+}
+
+function parseReviewedReport(value: unknown): Pick<UploadResponse, "extraction" | "analysisPreparation" | "extractionToken"> | null {
+  if (!value || typeof value !== "object" || !hasOnlyKeys(value, ["extraction", "analysisPreparation", "extractionToken"])) return null;
+  const candidate = value as Record<string, unknown>;
+  const extraction = parseUploadExtraction(candidate.extraction), analysisPreparation = parseAnalysisPreparation(candidate.analysisPreparation);
+  return extraction && analysisPreparation && typeof candidate.extractionToken === "string" && /^review_v1_\d{13}\.[a-f0-9]{64}$/u.test(candidate.extractionToken)
+    ? { extraction, analysisPreparation, extractionToken: candidate.extractionToken } : null;
 }
 
 function parseHistoryDetail(value: unknown): HistoryDetail | null {
@@ -683,7 +722,7 @@ function parseHistoryDetail(value: unknown): HistoryDetail | null {
     !hasOnlyKeys(snapshot.analysis, ["input", "counts", "output", "submittedObservations"])
   ) return null;
   const extraction = parseHistoryExtraction(snapshot.extraction);
-  const input = isHistoryAnalysisInput(snapshot.analysis.input) ? snapshot.analysis.input : null;
+  const input = isHistoryAnalysisInput(snapshot.analysis.input, true) ? snapshot.analysis.input : null;
   const output = isDiagnosticAnalysis(snapshot.analysis.output) ? snapshot.analysis.output : null;
   const rag = isRagMetadata(snapshot.rag) ? snapshot.rag : null;
   const counts = snapshot.analysis.counts;
@@ -696,7 +735,8 @@ function parseHistoryDetail(value: unknown): HistoryDetail | null {
   const correlationIdentities = output?.observationCorrelation.matches.map((match) => dtcIdentity(match.relatedDtc)) ?? [];
   if (
     !extraction || !input || !output || !rag || !counts || typeof counts !== "object" ||
-    !hasOnlyKeys(counts, ["detected", "actionable", "historical"]) ||
+    !hasOnlyKeys(counts, ["detected", "actionable", "historical", "identities"]) ||
+    (counts.identities !== undefined && (!Number.isInteger(counts.identities) || counts.identities < 0)) ||
     ![counts.detected, counts.actionable, counts.historical].every((count) => typeof count === "number" && Number.isInteger(count) && count >= 0) ||
     typeof snapshot.analysis.submittedObservations !== "string" ||
     snapshot.analysis.submittedObservations !== (input.observations ?? "") ||
@@ -775,7 +815,8 @@ const AI_ERROR_MESSAGES: Record<string, string> = {
   CONTENT_TOKEN_INVALID: "La referencia privada del reporte no es válida. Vuelve a cargar el PDF.",
 };
 
-const ANALYSIS_HTTP_TIMEOUT_MS = 90_000;
+// Exceeds the bounded API budget (maximum 150 s), including response delivery.
+const ANALYSIS_HTTP_TIMEOUT_MS = 160_000;
 const ANALYSIS_TIMEOUT_MESSAGE =
   "El análisis está tardando más de lo esperado. Puede continuar procesándose. Usa Reintentar para recuperar el mismo resultado sin iniciar un análisis duplicado.";
 
@@ -794,6 +835,69 @@ const CONFIDENCE_LABELS: Record<AnalysisConfidence, string> = {
 
 function displayVehicleName(extraction: ExtractionResult) {
   return [extraction.vehicle.year, extraction.vehicle.make, extraction.vehicle.model].filter(Boolean).join(" · ") || "No disponible";
+}
+
+function isConfirmedZeroDtc(extraction: ExtractionResult) {
+  return extraction.status === "completed" && !extraction.requiresManualReview && extraction.scanSummary.declaredDtcs === 0 &&
+    extraction.scanSummary.parsedDtcs === 0 && extraction.dtcs.length === 0 && extraction.scanSummary.declaredSystems === extraction.systems.length &&
+    extraction.scanSummary.parsedSystems === extraction.systems.length && extraction.systems.every(s => s.dtcCount === 0);
+}
+
+function VehicleConfirmation({ result, apiClient, disabled, onConfirmed, onSessionInvalid }: {
+  result: UploadResponse; apiClient: BrowserApiClient; disabled: boolean;
+  onConfirmed: (value: Pick<UploadResponse, "extraction" | "analysisPreparation">) => void;
+  onSessionInvalid: () => void;
+}) {
+  const [make, setMake] = useState(result.extraction.vehicle.make ?? "");
+  const [model, setModel] = useState(result.extraction.vehicle.model ?? "");
+  const [year, setYear] = useState("");
+  const [message, setMessage] = useState("");
+  const [pending, setPending] = useState(false);
+  const active = useRef<AbortController | null>(null);
+  useEffect(() => {
+    if (disabled) { active.current?.abort(); active.current = null; }
+    return () => { active.current?.abort(); active.current = null; };
+  }, [disabled]);
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (disabled || active.current) return;
+    const controller = new AbortController(); active.current = controller;
+    setPending(true); setMessage("");
+    try {
+      const value = await apiClient.requestJson("/api/reports/confirm-vehicle", {
+        init: { method: "POST", headers: { "Content-Type": "application/json" }, signal: controller.signal,
+          body: JSON.stringify({ extraction: result.extraction, vehicle: {
+            make, model, year: result.extraction.vehicle.year ?? (year.trim() ? Number(year) : null),
+          } }) },
+        retry: "none",
+        parse: raw => {
+          if (!raw || typeof raw !== "object" || !hasOnlyKeys(raw, ["extraction", "analysisPreparation"])) return null;
+          const data = raw as Record<string, unknown>;
+          const extraction = parseUploadExtraction(data.extraction);
+          const analysisPreparation = parseAnalysisPreparation(data.analysisPreparation);
+          return extraction && analysisPreparation ? { extraction, analysisPreparation } : null;
+        },
+        invalidResponseMessage: "No se pudo validar la confirmación del vehículo.",
+        errorMessage: () => "No se pudieron confirmar los datos. Revisa los campos e inténtalo de nuevo.",
+      });
+      if (active.current === controller && !controller.signal.aborted) onConfirmed(value);
+    } catch (error) {
+      if (active.current !== controller || controller.signal.aborted) return;
+      if (error instanceof ApiRequestError && error.type === "unauthorized") { onSessionInvalid(); return; }
+      setMessage("No se pudieron confirmar los datos. Revisa los campos o la conexión e inténtalo de nuevo.");
+    } finally {
+      if (active.current === controller) { active.current = null; setPending(false); }
+    }
+  }
+  return <form className="warnings-panel vehicle-confirmation" onSubmit={event => void submit(event)}>
+    <h3>Completar datos del vehículo</h3>
+    <p>Confirma solo los datos ausentes usando documentación del vehículo. El nombre del archivo no acredita el año. Esto no elimina otras revisiones del reporte.</p>
+    <label>Marca confirmada<input value={make} onChange={event => setMake(event.target.value)} required maxLength={80} readOnly={result.extraction.vehicle.make !== null} disabled={pending || disabled} /></label>
+    <label>Modelo confirmado<input value={model} onChange={event => setModel(event.target.value)} required maxLength={120} readOnly={result.extraction.vehicle.model !== null} disabled={pending || disabled} /></label>
+    <label>Año confirmado<input type="number" min={1886} max={new Date().getUTCFullYear() + 1} step={1} required value={result.extraction.vehicle.year ?? year} onChange={event => setYear(event.target.value)} readOnly={result.extraction.vehicle.year !== null} disabled={pending || disabled} /></label>
+    <button className="analysis-button" type="submit" disabled={pending || disabled}>{pending ? "Confirmando…" : "Confirmar datos del vehículo"}</button>
+    {message && <p role="alert">{message}</p>}
+  </form>;
 }
 
 function ExtractionResults({ extraction, counts }: { extraction: ExtractionResult; counts: AnalysisCounts }) {
@@ -825,6 +929,7 @@ function ExtractionResults({ extraction, counts }: { extraction: ExtractionResul
         <dl className="vehicle-details">
           {vehicle.engine && <div><dt>Motor</dt><dd>{vehicle.engine}</dd></div>}
           {vehicle.odometer && <div><dt>Odómetro</dt><dd>{vehicle.odometer.value.toLocaleString("es-GT")} {vehicle.odometer.unit}</dd></div>}
+          {!vehicle.odometer && vehicle.odometerRaw && <div><dt>Odómetro impreso</dt><dd>{vehicle.odometerRaw} (unidad no indicada)</dd></div>}
           {vehicle.vinMasked && <div><dt>VIN protegido</dt><dd>{vehicle.vinMasked}</dd></div>}
         </dl>
       </div>
@@ -836,6 +941,17 @@ function ExtractionResults({ extraction, counts }: { extraction: ExtractionResul
         <div><strong>{counts.historical}</strong><span>Registros históricos</span></div>
       </div>
 
+      <p>{counts.detected} observaciones originales · {counts.identities ?? new Set(extraction.dtcs.map(d => dtcIdentity({ code: d.code, moduleCode: d.moduleCode, moduleName: d.moduleName }))).size} identidades código/módulo · {counts.actionable} elementos preparados para IA. Las observaciones repetidas conservan sus estados.</p>
+      {isConfirmedZeroDtc(extraction) && <div className="status-message success" role="status">
+        <p>¡Buenas noticias! Este escaneo no reportó códigos DTC en los {extraction.systems.length} sistemas revisados.</p>
+        <p>Esto no descarta problemas no detectados. No hay códigos DTC que analizar.</p>
+      </div>}
+      {extraction.review && <details className="review-evidence"><summary>Originales y correcciones confirmadas por el usuario</summary>
+        <p>{extraction.review.reason}</p>
+        <p>Original: {extraction.review.original.scanSummary.declaredSystems ?? "?"} sistemas y {extraction.review.original.scanSummary.declaredDtcs ?? "?"} filas declarados. Interpretadas: {extraction.review.original.dtcs.length}.</p>
+        <ul>{extraction.review.decisions.map((d, i) => <li key={i}><strong>{d.path}</strong>: {d.before ?? "No indicado"} → {d.after ?? "No indicado"}. Motivo: {d.reason}</li>)}</ul>
+      </details>}
+
       {extraction.warnings.length > 0 && (
         <div className="warnings-panel">
           <h3>Advertencias de extracción</h3>
@@ -846,7 +962,7 @@ function ExtractionResults({ extraction, counts }: { extraction: ExtractionResul
       <div className="dtc-section">
         <h3>DTC reportados</h3>
         {extraction.dtcs.length === 0 ? (
-          <p className="empty-dtc">No se reportaron DTC en este escaneo</p>
+          <p className="empty-dtc">{extraction.scanSummary.declaredDtcs === 0 ? "No se reportaron DTC en este escaneo" : "No se pudieron interpretar los DTC declarados; revisa el reporte."}</p>
         ) : (
           <div className="table-scroll" tabIndex={0}>
             <table>
@@ -857,7 +973,7 @@ function ExtractionResults({ extraction, counts }: { extraction: ExtractionResul
                   <tr key={`${dtc.moduleCode ?? dtc.moduleName}-${dtc.code}-${index}`}>
                     <td><code>{dtc.code}</code></td>
                     <td>{dtc.moduleCode ? `${dtc.moduleCode} · ${dtc.moduleName}` : dtc.moduleName}</td>
-                    <td>{dtc.statusOriginal ?? "No indicado"}</td>
+                    <td>{dtc.statusOriginal ?? "No indicado"}{["on_demand", "continuous_memory"].includes(dtc.status) && <small> · {dtc.status === "on_demand" ? "Prueba bajo demanda" : "Memoria continua"}; no confirma falla activa</small>}{dtc.status === "reviewed_uncertain" && <small> · Incertidumbre revisada por el usuario; actividad no confirmada</small>}</td>
                     <td>{dtc.descriptionOriginal}</td>
                   </tr>
                 ))}
@@ -1032,11 +1148,13 @@ function normalizeObservations(value: string) {
   return value.replace(/\r\n?/gu, "\n").trim();
 }
 
-function buildHistoryContext(reportReference: string, contentToken: string, extraction: ExtractionResult) {
+function buildHistoryContext(reportReference: string, contentToken: string, extraction: ExtractionResult, extractionToken?: string) {
   return {
     reportReference,
     contentToken,
+    ...(extractionToken ? { extractionToken } : {}),
     extraction: {
+      ...(extraction.review ? { review: extraction.review } : {}),
       status: extraction.status,
       format: extraction.format,
       requiresManualReview: extraction.requiresManualReview,
@@ -1048,6 +1166,7 @@ function buildHistoryContext(reportReference: string, contentToken: string, extr
         odometer: extraction.vehicle.odometer === null ? null : { ...extraction.vehicle.odometer },
         vinMasked: extraction.vehicle.vinMasked,
         vinPseudonym: extraction.vehicle.vinPseudonym,
+        ...(extraction.vehicle.odometerRaw ? { odometerRaw: extraction.vehicle.odometerRaw } : {}),
       },
       scanSummary: { ...extraction.scanSummary },
       systems: extraction.systems.map((system) => ({ ...system })),
@@ -1066,11 +1185,13 @@ function createReportExportSource(
   submittedObservations: string,
 ): ReportExportSource {
   return {
+    ...(extraction.review ? { review: extraction.review } : {}),
     vehicle: {
       make: extraction.vehicle.make,
       model: extraction.vehicle.model,
       year: extraction.vehicle.year,
       odometer: extraction.vehicle.odometer === null ? null : { ...extraction.vehicle.odometer },
+      ...(extraction.vehicle.odometerRaw ? { odometerRaw: extraction.vehicle.odometerRaw } : {}),
     },
     counts: {
       systems: extraction.scanSummary.parsedSystems,
@@ -1317,6 +1438,8 @@ function ReportWorkspace({
   const [status, setStatus] = useState<UploadStatus>("idle");
   const [message, setMessage] = useState("");
   const [uploadResult, setUploadResult] = useState<UploadResponse | null>(null);
+  const [reviewEditing, setReviewEditing] = useState(false);
+  const reviewEditingRef = useRef(false);
   const [analysisState, setAnalysisState] = useState<AnalysisUiState>({ status: "unavailable" });
   const [observations, setObservations] = useState("");
   const [observationsError, setObservationsError] = useState("");
@@ -1447,6 +1570,9 @@ function ReportWorkspace({
   }
 
   function resetAnalysisForReportChange(showCancellation: boolean) {
+    reviewEditingRef.current = false;
+    setReviewEditing(false);
+    retryActionRef.current = null;
     resetPdfGeneration();
     analysisSequenceRef.current += 1;
     activeAnalysisRef.current?.controller.abort();
@@ -1591,7 +1717,7 @@ function ReportWorkspace({
   }
 
   function requestAnalysisConfirmation() {
-    if (!uploadResult?.analysisPreparation.available || analysisInProgressRef.current) return;
+    if (reviewEditingRef.current || !uploadResult?.analysisPreparation.available || analysisInProgressRef.current) return;
     setAnalysisState((current) => ({
       status: "confirming",
       ...(current.analysis ? { analysis: current.analysis } : {}),
@@ -1616,7 +1742,7 @@ function ReportWorkspace({
 
   async function confirmAnalysis() {
     const preparation = uploadResult?.analysisPreparation;
-    if (!uploadResult || !preparation?.available || analysisInProgressRef.current) return;
+    if (reviewEditingRef.current || !uploadResult || !preparation?.available || analysisInProgressRef.current) return;
     const normalizedObservations = normalizeObservations(observations);
     const requestInput: DiagnosticAnalysisInput = {
       ...preparation.input,
@@ -1663,7 +1789,7 @@ function ReportWorkspace({
           },
           body: JSON.stringify({
             input: requestInput,
-            historyContext: buildHistoryContext(uploadResult.id, uploadResult.contentToken, uploadResult.extraction),
+            historyContext: buildHistoryContext(uploadResult.id, uploadResult.contentToken, uploadResult.extraction, uploadResult.extractionToken),
           }),
           signal: controller.signal,
         },
@@ -1766,10 +1892,12 @@ function ReportWorkspace({
 
     try {
       const exportModel = buildReportExportModel({
+        ...(uploadResult.extraction.review ? { review: uploadResult.extraction.review } : {}),
         vehicle: {
           make: uploadResult.extraction.vehicle.make,
           model: uploadResult.extraction.vehicle.model,
           year: uploadResult.extraction.vehicle.year,
+          ...(uploadResult.extraction.vehicle.odometerRaw ? { odometerRaw: uploadResult.extraction.vehicle.odometerRaw } : {}),
           odometer: uploadResult.extraction.vehicle.odometer === null
             ? null
             : { ...uploadResult.extraction.vehicle.odometer },
@@ -2186,6 +2314,7 @@ function ReportWorkspace({
                 <span aria-hidden="true">{status === "success" ? "✓" : status === "error" ? "!" : "↥"}</span>
                 <div>
                   <strong>{message}</strong>
+                  {status === "error" && UPLOAD_RECOVERY[message] && <p>{UPLOAD_RECOVERY[message]}</p>}
                   {uploadResult && <small>Referencia: {uploadResult.id}</small>}
                 </div>
               </div>
@@ -2204,8 +2333,24 @@ function ReportWorkspace({
               extraction={uploadResult.extraction}
               counts={uploadResult.analysisPreparation.counts}
             />
-            <AiAnalysisSection
-              preparation={uploadResult.analysisPreparation}
+            {uploadResult.extractionToken && <ReportReviewPanel key={`${uploadResult.id}:${uploadResult.extractionToken}`} report={uploadResult} apiClient={apiClient}
+              reasons={uploadResult.analysisPreparation.reasons}
+              disabled={isLoggingOut || status === "uploading"} parse={parseReviewedReport}
+              onEditing={() => { resetAnalysisForReportChange(false); reviewEditingRef.current = true; setReviewEditing(true); }}
+              onCancel={() => { reviewEditingRef.current = false; setReviewEditing(false); setAnalysisState({ status: uploadResult.analysisPreparation.available ? "ready" : "unavailable" }); }}
+              onFailure={error => { if (error instanceof ApiRequestError && error.type === "unauthorized") invalidateActiveSession(); }}
+              onReviewed={reviewed => { resetAnalysisForReportChange(false); setUploadResult(current => current?.id === uploadResult.id ? { ...current, ...reviewed } : current);
+                setAnalysisState({ status: reviewed.analysisPreparation.available ? "ready" : "unavailable" }); }} />}
+            {!uploadResult.extractionToken && uploadResult.analysisPreparation.reasons.some(reason => reason.code === "VEHICLE_DATA_MISSING") && (
+              <VehicleConfirmation key={uploadResult.id} result={uploadResult} apiClient={apiClient} disabled={isLoggingOut || status === "uploading"}
+                onSessionInvalid={invalidateActiveSession}
+                onConfirmed={confirmed => {
+                  setUploadResult(current => current?.id === uploadResult.id ? { ...current, ...confirmed } : current);
+                  setAnalysisState({ status: confirmed.analysisPreparation.available ? "ready" : "unavailable" });
+                }} />
+            )}
+            {!isConfirmedZeroDtc(uploadResult.extraction) && <AiAnalysisSection
+              preparation={reviewEditing ? { available: false, reasons: [{ code: "MANUAL_REVIEW_REQUIRED", message: "Valida o cancela las correcciones antes de solicitar orientación." }], warnings: [], counts: uploadResult.analysisPreparation.counts } : uploadResult.analysisPreparation}
               state={analysisState}
               onRequestConfirmation={requestAnalysisConfirmation}
               onCancelConfirmation={cancelAnalysisConfirmation}
@@ -2215,7 +2360,7 @@ function ReportWorkspace({
               pdfStatus={pdfStatus}
               pdfMessage={pdfMessage}
               onDownloadPdf={() => void handleDownloadPdf()}
-            />
+            />}
           </>
         )}
 

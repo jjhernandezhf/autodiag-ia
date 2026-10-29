@@ -12,7 +12,7 @@ function object(value: unknown): Record<string, unknown> {
 // IDs are deterministic within the validated input order, not report/user identifiers.
 export function prepareAnalysisReferences(report: Omit<DiagnosticAnalysisInput, "observations">) {
   const references = new Map<string, { code: string; moduleCode: string | null; moduleName: string }>();
-  const modelReport = { vehicle: report.vehicle, modules: report.modules.map(module => ({
+  const modelReport = { vehicle: report.vehicle, ...(report.reviewContext ? { reviewContext: report.reviewContext } : {}), modules: report.modules.map(module => ({
     ...module, dtcs: module.dtcs.map(dtc => {
       const referenceId = `D${String(references.size + 1).padStart(3, "0")}`;
       references.set(referenceId, { code: dtc.code, moduleCode: module.code, moduleName: module.name });

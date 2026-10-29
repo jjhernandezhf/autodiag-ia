@@ -117,6 +117,62 @@ function pdfText(bytes: Uint8Array) {
 }
 
 describe("procedencia y límites del PDF", () => {
+  it("exporta descripciones equivalentes con todos los originales y estados; rechaza contradicción real", () => {
+    const source = createSource("not_provided");
+    source.actionableModules[0]!.dtcs[0]!.description = "Fallo de encendido";
+    source.documentaryDtcs[0]!.description = "Fallo de encendido";
+    source.documentaryDtcs[1] = { ...source.documentaryDtcs[0]!, description: "FALLO DE ENCENDIDO", originalStatus: "DTC provisional" };
+    const model = buildReportExportModel(source);
+    expect(model.actionableDtcs).toHaveLength(1); expect(model.analysis.findings).toHaveLength(1);
+    expect(model.actionableDtcs[0]!.observations).toEqual([
+      { description: "Fallo de encendido", originalStatus: "Actual" }, { description: "FALLO DE ENCENDIDO", originalStatus: "DTC provisional" },
+    ]);
+    const text = pdfText(renderReportPdf(model, new Date(2026, 8, 7, 10, 15), logo));
+    expect(text).toContain("Fallo de encendido"); expect(text).toContain("FALLO DE ENCENDIDO"); expect(text).toContain("DTC provisional");
+    const legacy = structuredClone(model); delete legacy.actionableDtcs[0]!.observations;
+    expect(() => validateReportExportModel(legacy)).not.toThrow();
+    source.documentaryDtcs[1]!.description = "Circuito de frenos abierto";
+    expect(() => buildReportExportModel(source)).toThrow(ReportPdfValidationError);
+  });
+  it("conserva todos los estados documentales de una identidad sin duplicar hallazgos", () => {
+    const source = createSource();
+    source.documentaryDtcs[1] = { ...source.documentaryDtcs[0]!, originalStatus: "DTC provisional" };
+    source.documentaryDtcs[0]!.originalStatus = "DTC permanente";
+    source.actionableModules[0]!.dtcs[0]!.status = "multiple_observed";
+    source.actionableModules[0]!.dtcs[0]!.alsoHistorical = false;
+    source.counts.historical = 1;
+    const model = buildReportExportModel(source);
+    expect(model.actionableDtcs).toHaveLength(1);
+    expect(model.actionableDtcs[0]!.originalStatus).toBe("DTC permanente; DTC provisional");
+    expect(model.analysis.findings).toHaveLength(1);
+  });
+  it("renderiza originales, decisiones y motivos sin inventar aprobación técnica", () => {
+    const source = createSource();
+    source.review = { version: "report_review_v1", reason: "Revision sintetica con incertidumbre explicita.",
+      original: { status: "partial", requiresManualReview: true, vehicle: { make: source.vehicle.make, model: source.vehicle.model, year: null, engine: null, odometer: null },
+        scanSummary: { declaredSystems: 2, parsedSystems: 2, declaredDtcs: 3, parsedDtcs: 3 },
+        systems: [{ code: "PCM", name: "Módulo motriz", dtcCount: 3 }], dtcs: source.documentaryDtcs.map(d => ({
+          code: d.code, moduleCode: d.moduleCode, moduleName: d.moduleName, status: "unknown", statusOriginal: "1 vez", classification: "unknown", descriptionOriginal: d.description,
+        })), warnings: [{ code: "UNKNOWN_DTC_STATUS", message: "Estado pendiente" }] },
+      decisions: [{ path: "rows.0.status", before: "1 vez", after: "Incertidumbre revisada, actividad no confirmada", reason: "Evidencia sintetica verificada por el usuario." }],
+    };
+    const model = buildReportExportModel(source), text = pdfText(renderReportPdf(model, new Date(2026, 8, 7, 10, 15), logo));
+    expect(model.review).toEqual(source.review);
+    expect(text).toContain("rows.0.status"); expect(text).toContain("1 vez");
+    expect(text).toContain("antes de"); expect(text).toContain("actividad no confirmada");
+    const contaminated = structuredClone(source); contaminated.review!.reason = "API_KEY=synthetic-secret-value";
+    expect(() => buildReportExportModel(contaminated)).toThrow(ReportPdfValidationError);
+  });
+  it.each(["ODDTCs", "CMDTCs"])("conserva %s sin afirmar falla activa", status => {
+    const source = createSource();
+    source.documentaryDtcs[0]!.originalStatus = status;
+    const model = buildReportExportModel(source);
+    expect(model.actionableDtcs[0]!.originalStatus).toBe(`${status}; Histórico`);
+    expect(model.actionableDtcs[0]!.observations?.map(row => row.originalStatus)).toEqual([status, "Histórico"]);
+    const text = pdfText(renderReportPdf(model, new Date(2026, 8, 7, 10, 15), logo));
+    expect(text).toContain(status);
+    expect(text).toContain("no confirma falla activa");
+  });
   const provenance: unknown = JSON.parse(readFileSync(resolve(process.cwd(), "../../fixtures/rag-provenance.synthetic.json"), "utf8"));
   it("conserva el contrato compartido y renderiza límites sin convertir publicación en compatibilidad", () => {
     if (!isRagProvenance(provenance, (text) => containsSensitiveReportText(text, "source_text"))) throw new Error("Invalid fixture");
