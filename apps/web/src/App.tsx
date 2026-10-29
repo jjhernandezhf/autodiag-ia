@@ -3,7 +3,7 @@ import autodiagLogoUrl from "./assets/autodiag-ia-logo.png";
 import { HistoryAnalyticsExport } from "./HistoryAnalyticsExport";
 import { HistoryAutomation } from "./HistoryAutomation";
 import { HistoryStatistics } from "./HistoryStatistics";
-import { ReportReviewPanel } from "./ReportReviewPanel";
+import { ProgressiveReportReviewPanel } from "./ProgressiveReportReviewPanel";
 import { isReviewEvidence, isDtcObservations, isReviewContext, hasConsistentObservedStates, MAX_ANALYSIS_DTCS, MAX_ANALYSIS_OBSERVATIONS, type ReportReviewEvidence, type ReviewContext } from "./report-review-data";
 import { describeRagProvenance, isRagProvenance } from "./rag-provenance";
 import {
@@ -553,7 +553,7 @@ function parseUploadExtraction(value: unknown): ExtractionResult | null {
   const dtcsValid = candidate.dtcs.every((dtc) =>
     dtc !== null && typeof dtc === "object"
     && hasOnlyKeys(dtc, ["code", "moduleCode", "moduleName", "status", "statusOriginal", "classification", "descriptionOriginal"])
-    && typeof dtc.code === "string" && dtc.code.trim().length > 0 && dtc.code.length <= 32
+    && typeof dtc.code === "string" && dtc.code.length <= 32
     && nullableText(dtc.moduleCode, 64)
     && typeof dtc.moduleName === "string" && dtc.moduleName.trim().length > 0 && dtc.moduleName.length <= 300
     && ["current", "confirmed", "stored", "pending", "permanent", "intermittent", "on_demand", "continuous_memory", "provisional", "reviewed_uncertain", "history", "unknown"].includes(dtc.status)
@@ -836,62 +836,6 @@ function isConfirmedZeroDtc(extraction: ExtractionResult) {
     extraction.scanSummary.parsedSystems === extraction.systems.length && extraction.systems.every(s => s.dtcCount === 0);
 }
 
-function VehicleConfirmation({ result, apiClient, disabled, onConfirmed, onSessionInvalid }: {
-  result: UploadResponse; apiClient: BrowserApiClient; disabled: boolean;
-  onConfirmed: (value: Pick<UploadResponse, "extraction" | "analysisPreparation">) => void;
-  onSessionInvalid: () => void;
-}) {
-  const [make, setMake] = useState(result.extraction.vehicle.make ?? "");
-  const [model, setModel] = useState(result.extraction.vehicle.model ?? "");
-  const [year, setYear] = useState("");
-  const [message, setMessage] = useState("");
-  const [pending, setPending] = useState(false);
-  const active = useRef<AbortController | null>(null);
-  useEffect(() => {
-    if (disabled) { active.current?.abort(); active.current = null; }
-    return () => { active.current?.abort(); active.current = null; };
-  }, [disabled]);
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (disabled || active.current) return;
-    const controller = new AbortController(); active.current = controller;
-    setPending(true); setMessage("");
-    try {
-      const value = await apiClient.requestJson("/api/reports/confirm-vehicle", {
-        init: { method: "POST", headers: { "Content-Type": "application/json" }, signal: controller.signal,
-          body: JSON.stringify({ extraction: result.extraction, vehicle: {
-            make, model, year: result.extraction.vehicle.year ?? (year.trim() ? Number(year) : null),
-          } }) },
-        retry: "none",
-        parse: raw => {
-          if (!raw || typeof raw !== "object" || !hasOnlyKeys(raw, ["extraction", "analysisPreparation"])) return null;
-          const data = raw as Record<string, unknown>;
-          const extraction = parseUploadExtraction(data.extraction);
-          const analysisPreparation = parseAnalysisPreparation(data.analysisPreparation);
-          return extraction && analysisPreparation ? { extraction, analysisPreparation } : null;
-        },
-        invalidResponseMessage: "No se pudo validar la confirmación del vehículo.",
-        errorMessage: () => "No se pudieron confirmar los datos. Revisa los campos e inténtalo de nuevo.",
-      });
-      if (active.current === controller && !controller.signal.aborted) onConfirmed(value);
-    } catch (error) {
-      if (active.current !== controller || controller.signal.aborted) return;
-      if (error instanceof ApiRequestError && error.type === "unauthorized") { onSessionInvalid(); return; }
-      setMessage("No se pudieron confirmar los datos. Revisa los campos o la conexión e inténtalo de nuevo.");
-    } finally {
-      if (active.current === controller) { active.current = null; setPending(false); }
-    }
-  }
-  return <form className="warnings-panel vehicle-confirmation" onSubmit={event => void submit(event)}>
-    <h3>Completar datos del vehículo</h3>
-    <p>Confirma solo los datos ausentes usando documentación del vehículo. El nombre del archivo no acredita el año. Esto no elimina otras revisiones del reporte.</p>
-    <label>Marca confirmada<input value={make} onChange={event => setMake(event.target.value)} required maxLength={80} readOnly={result.extraction.vehicle.make !== null} disabled={pending || disabled} /></label>
-    <label>Modelo confirmado<input value={model} onChange={event => setModel(event.target.value)} required maxLength={120} readOnly={result.extraction.vehicle.model !== null} disabled={pending || disabled} /></label>
-    <label>Año confirmado<input type="number" min={1886} max={new Date().getUTCFullYear() + 1} step={1} required value={result.extraction.vehicle.year ?? year} onChange={event => setYear(event.target.value)} readOnly={result.extraction.vehicle.year !== null} disabled={pending || disabled} /></label>
-    <button className="analysis-button" type="submit" disabled={pending || disabled}>{pending ? "Confirmando…" : "Confirmar datos del vehículo"}</button>
-    {message && <p role="alert">{message}</p>}
-  </form>;
-}
 
 function ExtractionResults({ extraction, counts }: { extraction: ExtractionResult; counts: AnalysisCounts }) {
   const vehicle = extraction.vehicle;
@@ -943,9 +887,11 @@ function ExtractionResults({ extraction, counts }: { extraction: ExtractionResul
         <p>¡Buenas noticias! Este escaneo no reportó códigos DTC en los {extraction.systems.length} sistemas revisados.</p>
         <p>Esto no descarta problemas no detectados. No hay códigos DTC que analizar.</p>
       </div>}
-      {extraction.review && <details className="review-evidence"><summary>Originales y correcciones confirmadas por el usuario</summary>
+      {extraction.review && <details className="review-evidence"><summary>Datos originales y acciones registradas</summary>
         <p>{extraction.review.reason}</p>
         <p>Original: {extraction.review.original.scanSummary.declaredSystems ?? "?"} sistemas y {extraction.review.original.scanSummary.declaredDtcs ?? "?"} filas declarados. Interpretadas: {extraction.review.original.dtcs.length}.</p>
+        <ul>{extraction.review.original.systems.map((s, i) => <li key={i}>Sistema original: {s.code} {s.name}; conteo declarado: {s.dtcCount}.</li>)}</ul>
+        {extraction.review.limited?.omittedRows?.map(r => <p key={r.sourceIndex}>Fila original {r.sourceIndex + 1} fuera de la orientación: {r.reason}. Código original: {extraction.review!.original.dtcs[r.sourceIndex]?.code || "no recuperado"}.</p>)}
         <ul>{extraction.review.decisions.map((d, i) => <li key={i}><strong>{d.path}</strong>: {d.before ?? "No indicado"} → {d.after ?? "No indicado"}. Motivo: {d.reason}</li>)}</ul>
       </details>}
 
@@ -2327,27 +2273,20 @@ function ReportWorkspace({
 
         {uploadResult && (
           <>
-            <ExtractionResults
+            <details><summary>Ver datos extraídos</summary><ExtractionResults
               extraction={uploadResult.extraction}
               counts={uploadResult.analysisPreparation.counts}
-            />
-            {uploadResult.extractionToken && <ReportReviewPanel key={`${uploadResult.id}:${uploadResult.extractionToken}`} report={uploadResult} apiClient={apiClient}
-              reasons={uploadResult.analysisPreparation.reasons}
+            /></details>
+            {uploadResult.extractionToken && <ProgressiveReportReviewPanel key={`${uploadResult.id}:${uploadResult.extractionToken}`} report={uploadResult} apiClient={apiClient}
+              available={uploadResult.analysisPreparation.available}
               disabled={isLoggingOut || status === "uploading"} parse={parseReviewedReport}
               onEditing={() => { resetAnalysisForReportChange(false); reviewEditingRef.current = true; setReviewEditing(true); }}
               onCancel={() => { reviewEditingRef.current = false; setReviewEditing(false); setAnalysisState({ status: uploadResult.analysisPreparation.available ? "ready" : "unavailable" }); }}
               onFailure={error => { if (error instanceof ApiRequestError && error.type === "unauthorized") invalidateActiveSession(); }}
               onReviewed={reviewed => { resetAnalysisForReportChange(false); setUploadResult(current => current?.id === uploadResult.id ? { ...current, ...reviewed } : current);
                 setAnalysisState({ status: reviewed.analysisPreparation.available ? "ready" : "unavailable" }); }} />}
-            {!uploadResult.extractionToken && uploadResult.analysisPreparation.reasons.some(reason => reason.code === "VEHICLE_DATA_MISSING") && (
-              <VehicleConfirmation key={uploadResult.id} result={uploadResult} apiClient={apiClient} disabled={isLoggingOut || status === "uploading"}
-                onSessionInvalid={invalidateActiveSession}
-                onConfirmed={confirmed => {
-                  setUploadResult(current => current?.id === uploadResult.id ? { ...current, ...confirmed } : current);
-                  setAnalysisState({ status: confirmed.analysisPreparation.available ? "ready" : "unavailable" });
-                }} />
-            )}
-            {!isConfirmedZeroDtc(uploadResult.extraction) && <AiAnalysisSection
+            {!uploadResult.extractionToken && <p role="alert">Recarga el PDF para obtener una referencia validada vigente; completar campos no sustituye esa autorización.</p>}
+            {uploadResult.extractionToken && !isConfirmedZeroDtc(uploadResult.extraction) && <AiAnalysisSection
               preparation={reviewEditing ? { available: false, reasons: [{ code: "MANUAL_REVIEW_REQUIRED", message: "Valida o cancela las correcciones antes de solicitar orientación." }], warnings: [], counts: uploadResult.analysisPreparation.counts } : uploadResult.analysisPreparation}
               state={analysisState}
               onRequestConfirmation={requestAnalysisConfirmation}

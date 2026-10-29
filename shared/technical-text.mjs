@@ -8,3 +8,6 @@ export function normalizeForMatch(value) {
 export function isSupportedDtcCode(value) {
   return /^(?:[A-Z][A-Z0-9:-]{2,31}|[A-F0-9]{6}|\d{5}:\d{3}|\d{2,5}-\d{1,3})$/u.test(value);
 }
+export function isLiteralDtcCode(value) {
+  return /^[\p{L}\p{N}][\p{L}\p{N}:?._ /-]{0,31}$/u.test(value);
+}

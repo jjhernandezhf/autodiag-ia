@@ -72,7 +72,7 @@ export const historyExtractionInputSchema = z.object({
     dtcCount: z.number().int().nonnegative().max(100_000),
   }).strict()).max(10_000),
   dtcs: z.array(z.object({
-    code: nonBlank(32),
+    code: z.string().max(32),
     moduleCode: nullableNonBlank(32),
     moduleName: nonBlank(160),
     status: dtcStatusSchema,
