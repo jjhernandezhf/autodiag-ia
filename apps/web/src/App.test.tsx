@@ -540,6 +540,102 @@ describe("revisión consolidada firmada y cero legítimo", () => {
 });
 
 describe("identidad visual", () => {
+  it("ofrece una vía explícita de transcripción tras formato no reconocido, sin eludir errores técnicos ni generar IA", async () => {
+    const file = createPdf("formato-sintetico-nuevo.pdf"), candidate = await readyAnalysisUpload(file).json();
+    candidate.extractionToken = `review_v1_${Date.now() + 3600000}.${"a".repeat(64)}`;
+    candidate.extraction.status = "partial"; candidate.extraction.requiresManualReview = true;
+    candidate.extraction.warnings = [{ code: "DOCUMENT_TYPE_UNCONFIRMED", message: "Tipo pendiente de verificacion por el usuario" }];
+    candidate.analysisPreparation = { available: false, reasons: [{ code: "EXTRACTION_INCOMPLETE", message: "Transcribe y revisa los registros" }], warnings: [], counts: { detected: 1, actionable: 1, historical: 0 } };
+    const fetchMock = vi.fn<typeof fetch>(async url => {
+      if (url === "/api/reports/upload") return createJsonResponse(false, { error: { code: "AUTEL_FORMAT_NOT_RECOGNIZED" } });
+      if (url === "/api/reports/upload-manual") return createJsonResponse(true, candidate);
+      throw new Error("Unexpected synthetic request");
+    });
+    vi.stubGlobal("fetch", fetchMock); const user = userEvent.setup(), { container } = await renderAuthenticatedApp();
+    await user.upload(getUploadElements(container).input, file); await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+    await user.click(await screen.findByRole("button", { name: "Preparar transcripción manual del PDF legible" }));
+    expect(await screen.findByText("Documento recibido para transcripción limitada; tipo y contenido aún no confirmados.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Completar manualmente y continuar con limitaciones" })).toBeTruthy();
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(["/api/reports/upload", "/api/reports/upload-manual"]);
+  });
+  it("App permite transcripción limitada con ausencias, exige análisis explícito y conserva el alcance al exportar", async () => {
+    const file = createPdf("variante-sintetica.pdf"), why = "Revisado contra el reporte sintetico, no confirma integridad.";
+    const upload = await readyAnalysisUpload(file).json();
+    upload.extractionToken = `review_v1_${Date.now() + 3600000}.${"a".repeat(64)}`;
+    upload.extraction = { ...upload.extraction, status: "partial", requiresManualReview: true,
+      vehicle: { year: null, make: null, model: null, engine: null, odometer: null, vinMasked: null, vinPseudonym: null },
+      systems: [], dtcs: [], scanSummary: { declaredSystems: null, declaredDtcs: null, parsedSystems: 0, parsedDtcs: 0 },
+      warnings: [{ code: "NEW_LAYOUT", message: "Estructura nueva" }] };
+    upload.analysisPreparation = { available: false, reasons: [{ code: "EXTRACTION_INCOMPLETE", message: "Transcribe los registros" }], warnings: [], counts: { detected: 0, actionable: 0, historical: 0 } };
+    let reviewed: Record<string, unknown>;
+    let completed: unknown;
+    const fetchMock = vi.fn<typeof fetch>(async (url, options) => {
+      if (url === "/api/reports/upload") return createJsonResponse(true, upload);
+      if (url === "/api/reports/review") {
+        const body = JSON.parse(String(options?.body));
+        expect(body.mode).toBe("limited_guidance_v1"); expect(body.vehicle).toEqual({ make: null, model: null, year: null });
+        const limited = { mode: "limited_guidance_v1", coverage: "reviewed_rows_only", limitations: ["Conjunto incompleto; año y módulo desconocidos"],
+          positions: [{ rowIndex: 0, page: 2, line: null, provenance: "manual_transcription", reason: why }] };
+        const { vinMasked: _vin, vinPseudonym: _hash, ...vehicle } = upload.extraction.vehicle; void _vin; void _hash;
+        const { format: _format, ...original } = upload.extraction; void _format;
+        const review = { version: "report_review_v1", original: { ...original, vehicle }, reason: why,
+          decisions: [{ path: "extraction", before: "partial", after: "Solo filas revisadas", reason: why }], limited };
+        const dtc = { code: "P0300", description: "Descripcion del PDF", status: "reviewed_uncertain", alsoHistorical: false,
+          observations: [{ description: "Descripcion del PDF", status: "reviewed_uncertain", statusOriginal: null }] };
+        reviewed = { extractionToken: `review_v1_${Date.now() + 3600000}.${"b".repeat(64)}`,
+          extraction: { ...upload.extraction, review, systems: [{ code: null, name: "Modulo desconocido", dtcCount: 1 }],
+            scanSummary: { ...upload.extraction.scanSummary, parsedSystems: 1, parsedDtcs: 1 }, dtcs: [{ code: "P0300", moduleCode: null, moduleName: "Modulo desconocido",
+              descriptionOriginal: dtc.description, status: dtc.status, statusOriginal: null, classification: "actionable" }] },
+          analysisPreparation: { available: true, reasons: [], warnings: limited.limitations, counts: { detected: 1, actionable: 1, historical: 0 },
+            input: { vehicle: body.vehicle, modules: [{ code: null, name: "Modulo desconocido", dtcs: [dtc] }],
+              reviewContext: { version: "review_context_v2", provenance: "user_review_unverified", reason: why, correctedFields: ["extraction"], decisions: review.decisions, limited } } } };
+        return createJsonResponse(true, reviewed);
+      }
+      if (url === "/api/reports/analyze") {
+        const b = JSON.parse(String(options?.body)); expect(b.input.vehicle.year).toBeNull(); expect(b.input.reviewContext.limited.mode).toBe("limited_guidance_v1");
+        const response = await successfulAnalysis().json(); response.analysis.findings[0].relatedDtc = { code: "P0300", moduleCode: null, moduleName: "Modulo desconocido" };
+        response.analysis.technicalSummary = "Orientacion limitada del reporte sintetico"; completed = response.analysis; return createJsonResponse(true, response);
+      }
+      if (url === "/api/automation/capabilities") return createJsonResponse(true, { enabled: false });
+      if (url === `/api/history/${HISTORY_ID}`) {
+        const detail = await historyDetailResponse().json(), prep = reviewed.analysisPreparation as { input: unknown; counts: unknown };
+        Object.assign(detail.history, { vehicle: { make: null, model: null, year: null }, odometer: null, ragStatus: "disabled", embeddingModel: null });
+        detail.history.snapshot = { extraction: reviewed.extraction, analysis: { input: prep.input, counts: prep.counts, output: completed, submittedObservations: "" }, rag: DISABLED_RAG };
+        return createJsonResponse(true, detail);
+      }
+      if (String(url).startsWith("/api/history?")) {
+        const list = await historyListResponse().json(); Object.assign(list.items[0], { vehicle: { make: null, model: null, year: null }, odometer: null, ragStatus: "disabled" });
+        return createJsonResponse(true, list);
+      }
+      throw new Error("Unexpected synthetic request");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup(), { container } = await renderAuthenticatedApp();
+    await user.upload(getUploadElements(container).input, file); await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+    await user.click(await screen.findByRole("button", { name: "Completar manualmente y continuar con limitaciones" }));
+    await user.click(screen.getByRole("checkbox", { name: "Reconozco esta limitación: NEW_LAYOUT" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Motivo y alcance para NEW_LAYOUT" }), { target: { value: why } });
+    await user.click(screen.getByRole("button", { name: "Transcribir otra fila del PDF" }));
+    for (const [name, value] of [["Código literal 1", "P0300"], ["Descripción técnica 1", "Descripcion del PDF"], ["Motivo técnico 1", why], ["Motivo general de orientación limitada", why]]) {
+      fireEvent.change(screen.getByRole("textbox", { name }), { target: { value } });
+    }
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Página del PDF 1" }), { target: { value: "2" } });
+    await user.selectOptions(screen.getByRole("combobox", { name: "Tratamiento 1" }), "reviewed_uncertain");
+    await user.click(screen.getByRole("button", { name: "Validar transcripción y limitaciones" }));
+    const analyze = await screen.findByRole("button", { name: "Analizar DTC con IA" });
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/reports/analyze")).toHaveLength(0);
+    expect(screen.getByText(/Orientación limitada: solo filas revisadas/)).toBeTruthy();
+    await user.click(analyze); await user.click(screen.getByRole("button", { name: "Confirmar y analizar" }));
+    expect(await screen.findByText("Orientacion limitada del reporte sintetico")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Descargar informe PDF" }));
+    await waitFor(() => expect(downloadReportPdf).toHaveBeenCalled());
+    expect(vi.mocked(downloadReportPdf).mock.calls.at(-1)?.[0]).toMatchObject({ review: { limited: { coverage: "reviewed_rows_only" } }, vehicle: { year: null } });
+    await user.click(screen.getByRole("button", { name: "Historial" }));
+    await user.click(await screen.findByRole("button", { name: "Abrir diagnóstico de Marca no confirmada Modelo no confirmado" }));
+    expect(await screen.findByRole("heading", { name: "Orientación guardada" })).toBeTruthy();
+    expect(screen.getByText(/Orientación limitada: solo filas revisadas/)).toBeTruthy();
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/reports/analyze")).toHaveLength(1);
+  });
   it("renderiza el logo oficial como recurso local, accesible y con proporción reservada", async () => {
     await renderAuthenticatedApp();
     const logo = screen.getByRole("img", { name: "AutoDiag IA" }) as HTMLImageElement;

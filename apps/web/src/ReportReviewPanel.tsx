@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { ApiRequestError, type BrowserApiClient } from "./api-client";
 import type { ReviewableExtraction } from "./report-review-data";
 import { isSupportedDtcCode, normalizeForMatch } from "../../../shared/technical-text.mjs";
+import { LimitedReportReviewPanel } from "./LimitedReportReviewPanel";
 
 interface Report { id: string; contentToken: string; extractionToken?: string; extraction: ReviewableExtraction }
 interface Row { sourceIndex: number | null; moduleIndex: number; code: string; description: string;
@@ -12,6 +13,7 @@ export function ReportReviewPanel<T>({ report, apiClient, disabled, parse, onRev
   reasons?: Array<{ code: string; message: string }>;
 }) {
   const source = report.extraction.review?.original ?? report.extraction;
+  const [limited, setLimited] = useState(false);
   const e = report.extraction;
   const missingVehicle = !e.vehicle.make || !e.vehicle.model || e.vehicle.year === null;
   const [open, setOpen] = useState(missingVehicle || e.requiresManualReview);
@@ -89,7 +91,9 @@ export function ReportReviewPanel<T>({ report, apiClient, disabled, parse, onRev
     }
   }
   if (!report.extractionToken || source.dtcs.length > 200 || source.systems.length > 100) return <p>La revisión local no está disponible para esta referencia o excede su capacidad (200 observaciones o 100 sistemas). Vuelve a cargar un reporte Autel legible dentro de los límites; no se generará un análisis parcial.</p>;
-  if (!open) return <button type="button" className="analysis-button" disabled={disabled} onClick={() => { onEditing(); setOpen(true); }}>Revisar o corregir datos</button>;
+  if (limited) return <LimitedReportReviewPanel report={report} apiClient={apiClient} parse={parse} disabled={disabled} onReviewed={onReviewed} onEditing={onEditing} onFailure={onFailure} onCancel={() => { setLimited(false); onCancel(); }} />;
+  const contingency = !zeroConfirmed && <button type="button" className="analysis-button" disabled={disabled || pending} onClick={() => { onEditing(); setLimited(true); }}>Completar manualmente y continuar con limitaciones</button>;
+  if (!open) return <><button type="button" className="analysis-button" disabled={disabled} onClick={() => { onEditing(); setOpen(true); }}>Revisar o corregir datos</button>{contingency}</>;
   const vehicleFields = <div className="review-grid" id="review-vehicle" tabIndex={-1}>{(["make", "model", "year"] as const).map(key =>
     <label key={key}>{key === "make" ? "Marca confirmada" : key === "model" ? "Modelo confirmado" : "Año confirmado"}
       <input aria-label={key === "make" ? "Marca confirmada" : key === "model" ? "Modelo confirmado" : "Año confirmado"} type={key === "year" ? "number" : "text"} value={vehicle[key]} required
@@ -99,6 +103,7 @@ export function ReportReviewPanel<T>({ report, apiClient, disabled, parse, onRev
     </label>)}</div>;
   return <form className="warnings-panel vehicle-confirmation report-review-panel" onSubmit={event => void submit(event)}>
     <h3>Revisión manual del reporte</h3>
+    {contingency}
     <p>Corrige solo con evidencia del documento o del vehículo. Se conservan los originales y tus motivos; no es una validación profesional ni se genera IA automáticamente.</p>
     <section aria-label="Bloqueos y acciones disponibles">
       <h4>Qué revisar antes de analizar</h4>
@@ -109,7 +114,7 @@ export function ReportReviewPanel<T>({ report, apiClient, disabled, parse, onRev
         {source.warnings.some(w => w.code === "DTC_ROW_UNPARSED") && <li><a href="#review-reconstruction">Revisa las filas no interpretadas: corrige la fila conservada; añade una fila solo si realmente falta.</a> Confirma la comprobación contra el PDF y su motivo.</li>}
         {reasons.filter(r => ["ANALYSIS_LIMIT_EXCEEDED", "SENSITIVE_CONTENT_DETECTED"].includes(r.code)).map(r => <li key={r.code}>{r.message} {r.code === "ANALYSIS_LIMIT_EXCEEDED" ? "El máximo es 50 identidades código/módulo y 200 observaciones. Corrige solo errores verificables; si el total real excede el máximo, usa otro reporte compatible, sin truncar este." : "Exporta nuevamente un reporte técnico sin información personal en sus textos."}</li>)}
       </ul>
-      {structuralWarnings.map(w => <p key={w.code} role="alert">{w.message} Vuelve a exportar un reporte completo y legible desde Autel. Este impedimento no se elimina ignorando advertencias ni inventando módulos.</p>)}
+      {structuralWarnings.map(w => <p key={w.code} role="alert">{w.message} Para una extracción completa, vuelve a exportar un reporte Autel compatible. Para orientar solo sobre registros que puedas transcribir, usa “Completar manualmente y continuar con limitaciones”; el impedimento permanecerá documentado, sin inventar módulos ni declarar completo el reporte.</p>)}
       <p>Después de validar, el servidor recalculará la elegibilidad y mostrará los impedimentos que permanezcan. Corregir no solicita IA.</p>
     </section>
     {e.warnings.filter(w => !["ENGINE_NOT_PROVIDED", "ODOMETER_NOT_PROVIDED", "ODOMETER_UNIT_NOT_PROVIDED"].includes(w.code)).map(w => <p key={w.code}>{w.message}</p>)}

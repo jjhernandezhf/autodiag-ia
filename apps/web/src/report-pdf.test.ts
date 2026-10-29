@@ -358,6 +358,19 @@ describe("fuentes RAG del informe", () => {
 });
 
 describe("documento PDF", () => {
+  it("rotula la orientación limitada y conserva procedencia sin convertir ausencias en datos", () => {
+    const source = createSource("not_provided"); source.vehicle = { make: null, model: null, year: null };
+    source.review = { version: "report_review_v1", reason: "Transcripcion de documento sintetico revisada.",
+      original: { status: "partial", requiresManualReview: true, vehicle: { make: null, model: null, year: null, engine: null, odometer: null },
+        systems: [], dtcs: [], scanSummary: { declaredSystems: null, declaredDtcs: null, parsedSystems: 0, parsedDtcs: 0 }, warnings: [] },
+      decisions: [{ path: "extraction", before: "partial", after: "Solo filas revisadas", reason: "El documento no pudo estructurarse." }],
+      limited: { mode: "limited_guidance_v1", coverage: "reviewed_rows_only", limitations: ["Conjunto posiblemente incompleto"],
+        positions: [{ rowIndex: 0, page: 2, line: 3, provenance: "manual_transcription", reason: "Leido de la segunda pagina sintetica." }] } };
+    const model = buildReportExportModel(source);
+    const raw = pdfText(renderReportPdf(model, new Date("2026-10-29T12:00:00Z"), logo));
+    expect(raw).toContain("LIMITADA"); expect(raw).toContain("manual_transcription"); expect(raw).toContain("Conjunto posiblemente incompleto");
+    expect(model.vehicle.year).toBeNull(); expect(model.review?.limited?.positions[0]?.page).toBe(2);
+  });
   it("genera un PDF no vacío, con imagen, texto autorizado, fecha y numeración", () => {
     const generatedAt = new Date(2026, 8, 7, 10, 15, 0);
     const bytes = renderReportPdf(buildReportExportModel(createSource()), generatedAt, logo);

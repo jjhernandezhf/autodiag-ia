@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { normalizeDtcStatus } from "./text-normalization.js";
-import { reviewDecisionSchema } from "./report-review-schema.js";
+import { reviewDecisionSchema, limitedGuidanceSchema } from "./report-review-schema.js";
 
 export const DIAGNOSTIC_OUTPUT_SCHEMA_VERSION = "diagnostic_output_schema_v1";
 
@@ -54,15 +54,16 @@ const legacyReviewContextSchema = z.object({ version: z.literal("review_context_
 const reviewContextSchema = z.discriminatedUnion("version", [legacyReviewContextSchema, legacyReviewContextSchema.extend({
   version: z.literal("review_context_v2"), provenance: z.literal("user_review_unverified"),
   decisions: z.array(reviewDecisionSchema).min(1).max(1400),
+  limited: limitedGuidanceSchema.optional(),
 }).strict()]);
 
 export const diagnosticAnalysisInputSchema = z
   .object({
     vehicle: z
       .object({
-        make: z.string().trim().min(1).max(80),
-        model: z.string().trim().min(1).max(120),
-        year: z.number().int().min(1886).max(new Date().getUTCFullYear() + 1),
+        make: z.string().trim().min(1).max(80).nullable(),
+        model: z.string().trim().min(1).max(120).nullable(),
+        year: z.number().int().min(1886).max(new Date().getUTCFullYear() + 1).nullable(),
       })
       .strict(),
     modules: z.array(diagnosticModuleSchema).min(1).max(MAX_MODULES),
@@ -80,6 +81,9 @@ export const diagnosticAnalysisInputSchema = z
   })
   .strict()
   .superRefine((value, context) => {
+    if (Object.values(value.vehicle).some(v => v === null) && !(value.reviewContext?.version === "review_context_v2" && value.reviewContext.limited)) {
+      context.addIssue({ code: "custom", message: "Los datos desconocidos requieren revisión limitada validada.", path: ["vehicle"] });
+    }
     const totalDtcs = value.modules.reduce((total, module) => total + module.dtcs.length, 0);
     if (totalDtcs > MAX_TOTAL_DTCS) {
       context.addIssue({

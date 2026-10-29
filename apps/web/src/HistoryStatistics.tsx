@@ -6,11 +6,11 @@ interface Statistics {
   dates: { date: string; count: number }[];
   vehicles: { make: string; model: string; count: number }[];
   codes: { code: string; count: number; descriptions?: {
-    make: string; model: string; year: number; moduleCode: string | null; moduleName: string;
+    make: string; model: string; year: number | null; moduleCode: string | null; moduleName: string;
     description: string | null; analysisIds: string[];
   }[] }[];
   modules: { moduleCode: string | null; moduleName: string; count: number }[];
-  analyses: { id: string; date: string; make: string; model: string; year: number; dtcCount: number }[];
+  analyses: { id: string; date: string; make: string; model: string; year: number | null; dtcCount: number }[];
 }
 function parseStatistics(value: unknown): Statistics | null {
   if (!value || typeof value !== "object") return null;
@@ -25,13 +25,13 @@ function parseStatistics(value: unknown): Statistics | null {
     !list(v.vehicles, 200, r => text(r.make, 80) && text(r.model, 120) && count(r.count, 200)) ||
     !list(v.codes, 10_000, r => text(r.code, 32) && count(r.count, 200) &&
       (r.descriptions === undefined || list(r.descriptions, 10_000, d =>
-        text(d.make, 80) && text(d.model, 120) && count(d.year, 9999) &&
+        text(d.make, 80) && text(d.model, 120) && (d.year === null || count(d.year, 9999)) &&
         (d.moduleCode === null || text(d.moduleCode, 32)) && text(d.moduleName) &&
         (d.description === null || text(d.description, 1000)) && Array.isArray(d.analysisIds) &&
         d.analysisIds.length <= 200 && d.analysisIds.every(id => typeof id === "string" && /^[0-9a-f-]{36}$/iu.test(id))))) ||
     !list(v.modules, 10_000, r => (r.moduleCode === null || text(r.moduleCode, 32)) && text(r.moduleName) && count(r.count, 200)) ||
     !list(v.analyses, 200, r => text(r.id, 36) && /^[0-9a-f-]{36}$/iu.test(r.id as string) &&
-      text(r.date, 10) && text(r.make, 80) && text(r.model, 120) && count(r.year, 9999) && count(r.dtcCount, 500)) ||
+      text(r.date, 10) && text(r.make, 80) && text(r.model, 120) && (r.year === null || count(r.year, 9999)) && count(r.dtcCount, 500)) ||
     v.analyses.length !== v.totalAnalyses || v.analyses.reduce((s, r) => s + r.dtcCount, 0) !== v.dtcRecords ||
     v.dates.reduce((s, r) => s + r.count, 0) !== v.totalAnalyses ||
     v.vehicles.reduce((s, r) => s + r.count, 0) !== v.totalAnalyses || v.codes.length !== v.distinctCodes) return null;
@@ -90,7 +90,7 @@ function DtcList({ codes, onOpen }: { codes: Statistics["codes"]; onOpen: (id: s
             : code.descriptions[0]!.description ?? "Descripción no disponible"}</p>
           <details><summary>Leer texto completo y contexto ({code.descriptions.length})</summary>
             {code.descriptions.map((d, index) => <div className="statistics-context" key={index}>
-              <strong>{d.make} / {d.model} · {d.year} · {d.moduleCode ?? "sin código"} / {d.moduleName}</strong>
+              <strong>{d.make} / {d.model} · {d.year ?? "Año no informado"} · {d.moduleCode ?? "sin código"} / {d.moduleName}</strong>
               <p>{d.description ?? "Descripción no disponible"}</p>
               <details><summary>Consultar análisis ({d.analysisIds.length})</summary>
                 {d.analysisIds.map((id, i) => <button className="statistics-secondary" key={id} onClick={() => onOpen(id)}>Abrir diagnóstico {i + 1}</button>)}
@@ -191,7 +191,7 @@ export function HistoryStatistics({ apiClient, onFailure, onOpen }: {
       <div className="statistics-table"><table><caption>Análisis de la selección</caption>
         <thead><tr>{["Fecha Guatemala", "Marca", "Modelo", "Año", "DTC", "Consulta"].map(label => <th key={label} scope="col">{label}</th>)}</tr></thead>
         <tbody>{data.analyses.map(row => <tr key={row.id}><td>{row.date}</td><td>{row.make}</td><td>{row.model}</td>
-          <td>{row.year}</td><td>{row.dtcCount}</td><td><button type="button" onClick={() => onOpen(row.id)}>Abrir diagnóstico</button></td></tr>)}</tbody>
+          <td>{row.year ?? "No informado"}</td><td>{row.dtcCount}</td><td><button type="button" onClick={() => onOpen(row.id)}>Abrir diagnóstico</button></td></tr>)}</tbody>
       </table></div>
     </>}
   </section>;

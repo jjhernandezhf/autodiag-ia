@@ -39,7 +39,7 @@ function fingerprintInput(overrides: Record<string, unknown> = {}) {
 
 describe("huella privada del PDF", () => {
   it("separa el contexto de tipos de prueba DTC de generaciones anteriores sin cambiar el historial público", () => {
-    expect(DIAGNOSTIC_PROMPT_VERSION).toBe("diagnostic_prompt_v5_manual_evidence");
+    expect(DIAGNOSTIC_PROMPT_VERSION).toBe("diagnostic_prompt_v6_limited_guidance");
     const current = createAnalysisFingerprint(fingerprintInput({ promptVersion: DIAGNOSTIC_PROMPT_VERSION }), SECRET);
     const previous = createAnalysisFingerprint(fingerprintInput({ promptVersion: "diagnostic_prompt_v3_dtc_test_context" }), SECRET);
     expect(current).not.toBe(previous);

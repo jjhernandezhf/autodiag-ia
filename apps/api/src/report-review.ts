@@ -84,9 +84,11 @@ function originalEvidence(extraction: AutelExtraction): ReportReviewEvidence["or
 }
 
 export function reviewReport(raw: unknown, userId: string, secret: string) {
+  if (raw && typeof raw === "object" && "mode" in raw) return reviewLimitedReport(raw, userId, secret);
   const parsed = requestSchema.safeParse(raw);
   if (!parsed.success) return null;
   const data = parsed.data;
+  if (Object.values(data.vehicle).some(v => v === null)) return null;
   const expires = verifyExtractionToken(data.extractionToken, data.extraction, userId, data.reportReference, data.contentToken, secret);
   if (expires === null) return null;
   const original = originalEvidence(data.extraction);
@@ -175,6 +177,90 @@ export function reviewReport(raw: unknown, userId: string, secret: string) {
   const extractionToken = currentProofs.issue(effective, userId, data.reportReference, data.contentToken, secret, expires, data.extractionToken);
   if (extractionToken === null) return null;
   return { extraction: effective, analysisPreparation: prepareAiAnalysis(effective), extractionToken };
+}
+
+const limitedRequestSchema = requestSchema.omit({ reviewedWarnings: true, countsDecision: true, rows: true }).extend({
+  mode: z.literal("limited_guidance_v1"),
+  acknowledgements: z.array(z.object({ code: z.string().min(1).max(80), reason }).strict()).max(100),
+  rows: z.array(rowSchema.omit({ moduleIndex: true }).extend({
+    code: z.string().trim().min(1).max(32),
+    moduleIndex: z.number().int().min(0).max(99).nullable(),
+    moduleName: z.string().trim().min(1).max(160).nullable(),
+    page: z.number().int().min(1).max(1000).nullable(), line: z.number().int().min(1).max(100000).nullable(),
+    reason,
+  }).strict()).min(1).max(MAX_ANALYSIS_OBSERVATIONS),
+}).strict();
+
+function reviewLimitedReport(raw: unknown, userId: string, secret: string) {
+  const parsed = limitedRequestSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  const d = parsed.data;
+  const expires = verifyExtractionToken(d.extractionToken, d.extraction, userId, d.reportReference, d.contentToken, secret);
+  if (expires === null) return null;
+  const original = originalEvidence(d.extraction);
+  if (original.dtcs.length > 200 || original.systems.length > 100 || containsSensitiveValue(original, "source_text")) return null;
+  const zero = original.status === "completed" && !original.requiresManualReview && original.scanSummary.declaredDtcs === 0 &&
+    original.scanSummary.parsedDtcs === 0 && !original.dtcs.length && original.scanSummary.declaredSystems === original.systems.length &&
+    original.scanSummary.parsedSystems === original.systems.length && original.systems.every(s => s.dtcCount === 0);
+  if (zero) return null;
+  const ack = new Set(d.acknowledgements.map(a => a.code));
+  if (ack.size !== d.acknowledgements.length || original.warnings.some(w => !ack.has(w.code)) ||
+      d.acknowledgements.some(a => !original.warnings.some(w => w.code === a.code))) return null;
+  const decisions: ReportReviewEvidence["decisions"] = [{ path: "extraction", before: original.status,
+    after: "Orientación limitada solo sobre filas revisadas; no confirma integridad", reason: d.reason }];
+  const limitations = ["Solo filas revisadas. El conjunto puede estar incompleto. No se confirma una avería ni la integridad del reporte.",
+    "Tipo documental y transcripción declarados por el usuario; no son una verificación del fabricante."];
+  for (const a of d.acknowledgements) { limitations.push(`${a.code}: ${a.reason}`); decisions.push({ path: "extraction", before: a.code, after: "Limitación reconocida, no resuelta", reason: a.reason }); }
+  for (const field of ["make", "model", "year"] as const) {
+    decisions.push({ path: `vehicle.${field}`, before: original.vehicle[field] === null ? null : String(original.vehicle[field]),
+      after: d.vehicle[field] === null ? null : String(d.vehicle[field]), reason: d.reason });
+    if (d.vehicle[field] === null) limitations.push(`vehicle.${field}: desconocido; excluir conclusiones y procedimientos que dependan de este dato.`);
+  }
+  const systems: AutelExtraction["systems"] = [];
+  const dtcs: AutelExtraction["dtcs"] = [];
+  const positions: NonNullable<ReportReviewEvidence["limited"]>["positions"] = [];
+  const seen = new Set<number>();
+  for (const [index, row] of d.rows.entries()) {
+    const source = row.sourceIndex === null ? undefined : original.dtcs[row.sourceIndex];
+    if (row.sourceIndex !== null && (!source || seen.has(row.sourceIndex) || row.sourceIndex !== index)) return null;
+    if (row.sourceIndex !== null) seen.add(row.sourceIndex);
+    if (row.sourceIndex === null && row.page === null) return null; // New transcription needs a document locator.
+    if (source && row.statusLabel !== undefined && row.statusLabel !== source.statusOriginal) return null;
+    const originalSystem = row.moduleIndex === null ? undefined : original.systems[row.moduleIndex];
+    if (row.moduleIndex !== null && !originalSystem) return null;
+    if (originalSystem && row.moduleName !== null && row.moduleName !== originalSystem.name) return null;
+    const module = originalSystem ?? { code: null, name: row.moduleName ?? `Módulo no confirmado (fila ${index + 1})`, dtcCount: 0 };
+    if (!originalSystem && !row.moduleName) limitations.push(`Fila ${index + 1}: módulo desconocido; el rótulo de fila no es una identidad de módulo confirmada. Excluir procedimientos específicos del módulo.`);
+    const label = source?.statusOriginal ?? row.statusLabel ?? null;
+    const normalized = normalizeDtcStatus(label);
+    if ((normalized === "unknown" || !isSupportedDtcCode(row.code) || !row.moduleName && !originalSystem) && row.state !== "reviewed_uncertain") return null;
+    const status = row.state === "reviewed_uncertain" ? "reviewed_uncertain" as const : normalized;
+    if (!isSupportedDtcCode(row.code) && !/^[\p{L}\p{N}][\p{L}\p{N}:?._ /-]{0,31}$/u.test(row.code)) return null;
+    if (dtcs.some(r => r.code === row.code && ((r.moduleCode === module.code && r.moduleName === module.name) ||
+      (!originalSystem && !row.moduleName && r.moduleCode === null && /^Módulo no confirmado \(fila \d+\)$/u.test(r.moduleName))) &&
+      r.statusOriginal === label && normalizeForMatch(r.descriptionOriginal) === normalizeForMatch(row.description)) && !source && !row.duplicateReason) return null;
+    if (!systems.some(s => s.code === module.code && s.name === module.name)) systems.push({ ...module, dtcCount: 0 });
+    for (const [field, before, after] of [["code", source?.code ?? null, row.code], ["description", source?.descriptionOriginal ?? null, row.description],
+      ["module", source ? `${source.moduleCode ?? ""} · ${source.moduleName}` : null, `${module.code ?? ""} · ${module.name}`],
+      ["status", label, status]] as const) decisions.push({ path: `rows.${index}.${field}`, before, after, reason: row.reason });
+    dtcs.push({ code: row.code, moduleCode: module.code, moduleName: module.name, descriptionOriginal: row.description,
+      status, statusOriginal: label, classification: classifyDtcStatus(status) });
+    positions.push({ rowIndex: index, page: row.page, line: row.line, provenance: source ? "parser_row_reviewed" : "manual_transcription", reason: row.reason });
+    if (!isSupportedDtcCode(row.code)) limitations.push(`Fila ${index + 1}: código literal no reconocido; no interpretar equivalencias ni atribuir una definición confirmada.`);
+    if (row.duplicateReason) decisions.push({ path: "extraction", before: "Posible repetición de fila", after: `Fila ${index + 1}: observación independiente declarada`, reason: row.duplicateReason });
+  }
+  if (seen.size !== original.dtcs.length) return null;
+  for (const s of systems) s.dtcCount = dtcs.filter(r => r.moduleCode === s.code && r.moduleName === s.name).length;
+  const evidence = reportReviewEvidenceSchema.safeParse({ version: "report_review_v1", reason: d.reason, original, decisions,
+    limited: { mode: d.mode, coverage: "reviewed_rows_only", limitations, positions } });
+  if (!evidence.success || containsSensitiveValue({ vehicle: d.vehicle, dtcs, evidence: evidence.data }, "source_text")) return null;
+  const effective: AutelExtraction = { ...d.extraction, vehicle: { ...d.extraction.vehicle, ...d.vehicle }, status: "partial", requiresManualReview: true,
+    systems, dtcs, review: evidence.data, scanSummary: { ...original.scanSummary, parsedSystems: systems.length, parsedDtcs: dtcs.length },
+    warnings: [...original.warnings, { code: "LIMITED_GUIDANCE", message: "Orientación limitada a filas revisadas; el reporte puede estar incompleto." }] };
+  const preparation = prepareAiAnalysis(effective);
+  if (!preparation.available) return null;
+  const token = currentProofs.issue(effective, userId, d.reportReference, d.contentToken, secret, expires, d.extractionToken);
+  return token === null ? null : { extraction: effective, analysisPreparation: preparation, extractionToken: token };
 }
 
 export function validatedReportMatchesInput(input: DiagnosticAnalysisInput, context: HistoryCaptureContext | undefined, userId: string, secret: string) {

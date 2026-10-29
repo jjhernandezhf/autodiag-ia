@@ -723,8 +723,8 @@ export function renderReportPdf(model: ReportExportModel, generatedAt: Date, log
 
   heading("Resumen del reporte");
   const summaryItems = [
-    ["Sistemas escaneados", model.summary.systemsScanned],
-    ["Filas DTC detectadas", model.summary.detectedRows],
+    [model.review?.limited ? "Sistemas transcritos/revisados" : "Sistemas escaneados", model.summary.systemsScanned],
+    [model.review?.limited ? "Filas DTC revisadas (conjunto parcial)" : "Filas DTC detectadas", model.summary.detectedRows],
     ["DTC accionables analizados", model.summary.actionableDtcs],
     ["Registros históricos", model.summary.historicalRows],
     ["Hallazgos generados", model.summary.findings],
@@ -732,6 +732,11 @@ export function renderReportPdf(model: ReportExportModel, generatedAt: Date, log
   for (const [label, value] of summaryItems) labelValue(label, String(value));
 
   if (model.review) {
+    if (model.review.limited) {
+      heading("ORIENTACIÓN LIMITADA — conjunto posiblemente incompleto");
+      for (const limitation of model.review.limited.limitations) paragraph(limitation);
+      for (const p of model.review.limited.positions) paragraph(`Fila ${p.rowIndex + 1}; página ${p.page ?? "no capturada"}; línea ${p.line ?? "no capturada"}; ${p.provenance}. ${p.reason}`);
+    }
     heading("Revisión y correcciones del usuario");
     paragraph("Los valores efectivos no sustituyen la evidencia original. Esta revisión no acredita validación profesional.");
     labelValue("Motivo", model.review.reason);

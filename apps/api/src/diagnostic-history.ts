@@ -150,9 +150,9 @@ const historyListItemSchema = z.object({
   createdAt: z.string().datetime({ offset: true }),
   reportReference: z.string().uuid().nullable(),
   vehicle: z.object({
-    make: nonBlank(80),
-    model: nonBlank(120),
-    year: z.number().int().min(1886).max(9_999),
+    make: nullableNonBlank(80),
+    model: nullableNonBlank(120),
+    year: z.number().int().min(1886).max(9_999).nullable(),
   }).strict(),
   odometer: z.object({
     value: z.number().finite().nonnegative(),
@@ -176,9 +176,9 @@ const storedListRowSchema = z.object({
   id: z.string().uuid(),
   created_at: z.string().datetime({ offset: true }),
   report_reference: z.string().uuid().nullable(),
-  make: nonBlank(80),
-  model: nonBlank(120),
-  year: z.number().int().min(1886).max(9_999),
+  make: nullableNonBlank(80),
+  model: nullableNonBlank(120),
+  year: z.number().int().min(1886).max(9_999).nullable(),
   odometer_value: z.number().finite().nonnegative().nullable(),
   odometer_unit: z.enum(["km", "mi"]).nullable(),
   dtc_count: z.number().int().nonnegative(),
@@ -202,9 +202,9 @@ interface HistoryInsertRecord {
   reportReference: string;
   contentFingerprint: string | null;
   analysisFingerprint: string | null;
-  make: string;
-  model: string;
-  year: number;
+  make: string | null;
+  model: string | null;
+  year: number | null;
   odometer: { value: number; unit: "km" | "mi" } | null;
   vinHmac: string | null;
   vinLast4: string | null;
@@ -462,8 +462,8 @@ function listItem(row: z.infer<typeof storedListRowSchema>): HistoryListItem {
     ragStatus: row.rag_status,
   });
   if (
-    containsSensitiveText(item.vehicle.make, "structured_identifier") ||
-    containsSensitiveText(item.vehicle.model, "structured_identifier")
+    (item.vehicle.make !== null && containsSensitiveText(item.vehicle.make, "structured_identifier")) ||
+    (item.vehicle.model !== null && containsSensitiveText(item.vehicle.model, "structured_identifier"))
   ) throw new DiagnosticHistoryError("HISTORY_DATA_INVALID");
   return item;
 }

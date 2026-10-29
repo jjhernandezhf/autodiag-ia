@@ -67,8 +67,8 @@ export function containsSensitiveValue(value: unknown, context: SensitiveTextCon
 export function containsSensitiveDiagnosticReport(
   report: Omit<DiagnosticAnalysisInput, "observations">,
 ) {
-  return containsSensitiveText(report.vehicle.make, "structured_identifier")
-    || containsSensitiveText(report.vehicle.model, "structured_identifier")
+  return (report.vehicle.make !== null && containsSensitiveText(report.vehicle.make, "structured_identifier"))
+    || (report.vehicle.model !== null && containsSensitiveText(report.vehicle.model, "structured_identifier"))
     || (report.reviewContext !== undefined && containsSensitiveValue(report.reviewContext, "source_text"))
     || report.modules.some((module) =>
       (module.code !== null && containsSensitiveText(module.code, "structured_identifier"))

@@ -21,6 +21,13 @@ function repository(count = 1) {
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe("CSV analítico basado en historial persistido", () => {
+  it("representa datos de vehículo desconocidos sin números ficticios y conserva conteos", async () => {
+    const { repo } = repository();
+    vi.mocked(repo.page).mockResolvedValueOnce([{ ...row(1), make: null, model: null, year: null }]);
+    const result = await new HistoryAnalyticsService(repo).export(A);
+    expect(result.analysesCsv).toContain('"No informado","No informado","",');
+    expect(result.analysesCount).toBe(1); expect(result.dtcCount).toBe(2);
+  });
   it("exporta dos conjuntos completos, identidad por módulo y cero campos privados", async () => {
     const { repo } = repository();
     const result = await new HistoryAnalyticsService(repo).export(A);

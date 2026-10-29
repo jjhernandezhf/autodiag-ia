@@ -86,7 +86,7 @@ interface ExtractionResult {
 }
 
 interface DiagnosticAnalysisInput {
-  vehicle: { make: string; model: string; year: number };
+  vehicle: { make: string | null; model: string | null; year: number | null };
   modules: Array<{
     code: string | null;
     name: string;
@@ -196,7 +196,7 @@ interface HistoryListItem {
   id: string;
   createdAt: string;
   reportReference: string | null;
-  vehicle: { make: string; model: string; year: number };
+  vehicle: { make: string | null; model: string | null; year: number | null };
   odometer: { value: number; unit: "km" | "mi" } | null;
   dtcCount: number;
   ragStatus: RagStatus;
@@ -263,7 +263,7 @@ const UPLOAD_RECOVERY: Record<string, string> = {
   [PUBLIC_API_ERROR_MESSAGES.PDF_NO_USABLE_TEXT]: "Usa la exportación original de Autel con texto seleccionable, no una fotografía o escaneo. No se inventarán datos ni se ejecutará IA.",
   [PUBLIC_API_ERROR_MESSAGES.PDF_EXTRACTION_LIMIT_EXCEEDED]: "Selecciona un reporte completo que cumpla los límites de páginas y texto. Este archivo no se truncará ni se analizará parcialmente.",
   [PUBLIC_API_ERROR_MESSAGES.PDF_EXTRACTION_TIMEOUT]: "Puedes reintentar explícitamente una vez. Si vuelve a ocurrir, reexporta el reporte compatible; no se elevarán los límites automáticamente.",
-  [PUBLIC_API_ERROR_MESSAGES.AUTEL_FORMAT_NOT_RECOGNIZED]: "Usa un informe de diagnóstico Autel compatible. No se habilita revisión manual para convertir archivos ajenos en reportes válidos.",
+  [PUBLIC_API_ERROR_MESSAGES.AUTEL_FORMAT_NOT_RECOGNIZED]: "Si puedes leer y verificar personalmente que es un reporte Autel, prepara una transcripción limitada. Esto no confirma el formato ni convierte un archivo ajeno en un reporte validado.",
 };
 
 const ANALYSIS_AVAILABILITY_REASON_CODES = new Set([
@@ -447,12 +447,7 @@ function parseHistoryListItem(value: unknown): HistoryListItem | null {
     !(candidate.reportReference === null || isUuid(candidate.reportReference)) ||
     !candidate.vehicle || typeof candidate.vehicle !== "object" ||
     !hasOnlyKeys(candidate.vehicle, ["make", "model", "year"]) ||
-    typeof candidate.vehicle.make !== "string" || !candidate.vehicle.make.trim() ||
-    typeof candidate.vehicle.model !== "string" || !candidate.vehicle.model.trim() ||
-    typeof candidate.vehicle.year !== "number" || !Number.isInteger(candidate.vehicle.year) ||
-    candidate.vehicle.year < 1886 || candidate.vehicle.year > 9_999 ||
-    containsSensitiveReportText(candidate.vehicle.make, "structured_identifier") ||
-    containsSensitiveReportText(candidate.vehicle.model, "structured_identifier") ||
+    !validVehicleFacts(candidate.vehicle, true) ||
     typeof candidate.dtcCount !== "number" || !Number.isInteger(candidate.dtcCount) || candidate.dtcCount < 0 ||
     !["used", "disabled", "not_configured", "no_matches", "unavailable"].includes(candidate.ragStatus ?? "")
   ) return null;
@@ -467,6 +462,10 @@ function parseHistoryListItem(value: unknown): HistoryListItem | null {
   return candidate as HistoryListItem;
 }
 
+function validVehicleFacts(v: { make?: unknown; model?: unknown; year?: unknown }, allowUnknown: boolean, maxYear = 9999) {
+  const text = (s: unknown, max: number) => (s === null && allowUnknown) || (typeof s === "string" && !!s.trim() && s.length <= max && !containsSensitiveReportText(s, "structured_identifier"));
+  return text(v.make, 80) && text(v.model, 120) && ((v.year === null && allowUnknown) || (typeof v.year === "number" && Number.isInteger(v.year) && v.year >= 1886 && v.year <= maxYear));
+}
 function isHistoryAnalysisInput(value: unknown, legacyRead = false): value is DiagnosticAnalysisInput {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<DiagnosticAnalysisInput>;
@@ -474,12 +473,7 @@ function isHistoryAnalysisInput(value: unknown, legacyRead = false): value is Di
   if (
     !candidate.vehicle || typeof candidate.vehicle !== "object" ||
     !hasOnlyKeys(candidate.vehicle, ["make", "model", "year"]) ||
-    typeof candidate.vehicle.make !== "string" || !candidate.vehicle.make.trim() || candidate.vehicle.make.length > 80 ||
-    typeof candidate.vehicle.model !== "string" || !candidate.vehicle.model.trim() || candidate.vehicle.model.length > 120 ||
-    typeof candidate.vehicle.year !== "number" || !Number.isInteger(candidate.vehicle.year) ||
-    candidate.vehicle.year < 1886 || candidate.vehicle.year > new Date().getUTCFullYear() + 1 ||
-    containsSensitiveReportText(candidate.vehicle.make, "structured_identifier") ||
-    containsSensitiveReportText(candidate.vehicle.model, "structured_identifier") ||
+    !validVehicleFacts(candidate.vehicle, candidate.reviewContext?.version === "review_context_v2" && !!candidate.reviewContext.limited, legacyRead ? 9999 : new Date().getUTCFullYear() + 1) ||
     !Array.isArray(candidate.modules) || candidate.modules.length === 0 || candidate.modules.length > 40
   ) return false;
   if (candidate.observations !== undefined && (
@@ -632,8 +626,7 @@ function parseHistoryExtraction(value: unknown): ExtractionResult | null {
   const vehicle = candidate.vehicle;
   const scan = candidate.scanSummary;
   if (
-    candidate.status !== "completed" || candidate.format !== "autel_vehicle_diagnostic_report" ||
-    candidate.requiresManualReview !== false || !vehicle || typeof vehicle !== "object" ||
+    (candidate.review?.limited ? candidate.status !== "partial" || candidate.requiresManualReview !== true : candidate.status !== "completed" || candidate.requiresManualReview !== false) || candidate.format !== "autel_vehicle_diagnostic_report" || !vehicle || typeof vehicle !== "object" ||
     !hasOnlyKeys(vehicle, ["year", "make", "model", "engine", "odometer", "vinMasked", "vinPseudonym", "odometerRaw"]) ||
     (vehicle.odometerRaw !== undefined && (typeof vehicle.odometerRaw !== "string" || vehicle.odometerRaw.length > 80 || containsSensitiveReportText(vehicle.odometerRaw, "source_text"))) ||
     !(vehicle.year === null || (Number.isInteger(vehicle.year) && vehicle.year >= 1886 && vehicle.year <= 9_999)) ||
@@ -905,17 +898,21 @@ function ExtractionResults({ extraction, counts }: { extraction: ExtractionResul
 
   return (
     <section className="extraction-results" aria-labelledby="extraction-title">
+      {extraction.review?.limited && <div className="manual-review" role="alert">
+        <strong>Orientación limitada: solo filas revisadas; conjunto posiblemente incompleto.</strong>
+        <ul>{extraction.review.limited.limitations.map((s, i) => <li key={i}>{s}</li>)}</ul>
+      </div>}
       <div className="results-heading">
         <div>
           <span className="eyebrow">RESULTADO DE EXTRACCIÓN</span>
           <h2 id="extraction-title">Datos del reporte</h2>
         </div>
         <span className={`extraction-badge ${extraction.status}`}>
-          {extraction.status === "completed" ? "Completa" : "Revisión requerida"}
+          {extraction.review?.limited ? "Orientación limitada" : extraction.status === "completed" ? "Completa" : "Revisión requerida"}
         </span>
       </div>
 
-      {extraction.requiresManualReview && (
+      {extraction.requiresManualReview && !extraction.review?.limited && (
         <div className="manual-review" role="alert">
           La extracción contiene diferencias o datos que requieren revisión manual.
         </div>
@@ -935,13 +932,13 @@ function ExtractionResults({ extraction, counts }: { extraction: ExtractionResul
       </div>
 
       <div className="scan-totals" aria-label="Resumen del escaneo">
-        <div><strong>{extraction.scanSummary.parsedSystems}</strong><span>Sistemas escaneados</span></div>
-        <div><strong>{counts.detected}</strong><span>DTC detectados</span></div>
+        <div><strong>{extraction.scanSummary.parsedSystems}</strong><span>{extraction.review?.limited ? "Sistemas revisados/transcritos" : "Sistemas escaneados"}</span></div>
+        <div><strong>{counts.detected}</strong><span>{extraction.review?.limited ? "Filas DTC revisadas (parcial)" : "DTC detectados"}</span></div>
         <div><strong>{counts.actionable}</strong><span>DTC para análisis</span></div>
         <div><strong>{counts.historical}</strong><span>Registros históricos</span></div>
       </div>
 
-      <p>{counts.detected} observaciones originales · {counts.identities ?? new Set(extraction.dtcs.map(d => dtcIdentity({ code: d.code, moduleCode: d.moduleCode, moduleName: d.moduleName }))).size} identidades código/módulo · {counts.actionable} elementos preparados para IA. Las observaciones repetidas conservan sus estados.</p>
+      <p>{counts.detected} {extraction.review?.limited ? "observaciones revisadas/transcritas; no acredita todo el reporte" : "observaciones originales"} · {counts.identities ?? new Set(extraction.dtcs.map(d => dtcIdentity({ code: d.code, moduleCode: d.moduleCode, moduleName: d.moduleName }))).size} identidades código/módulo · {counts.actionable} elementos preparados para IA. Las observaciones repetidas conservan sus estados.</p>
       {isConfirmedZeroDtc(extraction) && <div className="status-message success" role="status">
         <p>¡Buenas noticias! Este escaneo no reportó códigos DTC en los {extraction.systems.length} sistemas revisados.</p>
         <p>Esto no descarta problemas no detectados. No hay códigos DTC que analizar.</p>
@@ -1660,7 +1657,7 @@ function ReportWorkspace({
     void submitReport();
   }
 
-  async function submitReport() {
+  async function submitReport(manualTranscription = false) {
     if (!selectedFile || uploadInProgressRef.current) return;
 
     uploadInProgressRef.current = true;
@@ -1683,7 +1680,7 @@ function ReportWorkspace({
     formData.append("report", fileBeingUploaded);
 
     try {
-      const result = await apiClient.requestJson<UploadResponse>("/api/reports/upload", {
+      const result = await apiClient.requestJson<UploadResponse>(manualTranscription ? "/api/reports/upload-manual" : "/api/reports/upload", {
         init: {
           method: "POST",
           body: formData,
@@ -1699,12 +1696,12 @@ function ReportWorkspace({
       setUploadResult(result);
       setAnalysisState({ status: result.analysisPreparation.available ? "ready" : "unavailable" });
       setStatus("success");
-      setMessage("Reporte recibido correctamente.");
+      setMessage(manualTranscription ? "Documento recibido para transcripción limitada; tipo y contenido aún no confirmados." : "Reporte recibido correctamente.");
       retryActionRef.current = null;
       onConnectivityConnected();
     } catch (error) {
       if (!isActiveUpload()) return;
-      if (handleApiFailure(error, () => void submitReport())) return;
+      if (handleApiFailure(error, () => void submitReport(manualTranscription))) return;
 
       setStatus("error");
       setMessage(error instanceof Error ? error.message : "No fue posible enviar el reporte.");
@@ -2315,6 +2312,7 @@ function ReportWorkspace({
                 <div>
                   <strong>{message}</strong>
                   {status === "error" && UPLOAD_RECOVERY[message] && <p>{UPLOAD_RECOVERY[message]}</p>}
+                  {status === "error" && message === PUBLIC_API_ERROR_MESSAGES.AUTEL_FORMAT_NOT_RECOGNIZED && selectedFile && <button type="button" className="analysis-button" onClick={() => void submitReport(true)}>Preparar transcripción manual del PDF legible</button>}
                   {uploadResult && <small>Referencia: {uploadResult.id}</small>}
                 </div>
               </div>
@@ -2406,8 +2404,8 @@ function ReportWorkspace({
               }}>← Volver al historial</button>
               <div className="history-detail-heading">
                 <div>
-                  <h2>{historyDetail.vehicle.make} {historyDetail.vehicle.model}</h2>
-                  <p>{new Date(historyDetail.createdAt).toLocaleString("es-GT")} · Año {historyDetail.vehicle.year}</p>
+                  <h2>{historyDetail.vehicle.make ?? "Marca no confirmada"} {historyDetail.vehicle.model ?? "Modelo no confirmado"}</h2>
+                  <p>{new Date(historyDetail.createdAt).toLocaleString("es-GT")} · Año {historyDetail.vehicle.year ?? "no confirmado"}</p>
                 </div>
                 <span className={`rag-history-status ${historyDetail.ragStatus}`}>RAG: {historyDetail.ragStatus}</span>
               </div>
@@ -2443,8 +2441,8 @@ function ReportWorkspace({
                 <ul className="history-list">
                   {historyState.items.map((item) => (
                     <li key={item.id}>
-                      <button type="button" onClick={() => void openHistory(item.id)} aria-label={`Abrir diagnóstico de ${item.vehicle.make} ${item.vehicle.model}`}>
-                        <span className="history-list-main"><strong>{item.vehicle.make} {item.vehicle.model}</strong><small>{new Date(item.createdAt).toLocaleString("es-GT")} · Año {item.vehicle.year}</small></span>
+                      <button type="button" onClick={() => void openHistory(item.id)} aria-label={`Abrir diagnóstico de ${item.vehicle.make ?? "Marca no confirmada"} ${item.vehicle.model ?? "Modelo no confirmado"}`}>
+                        <span className="history-list-main"><strong>{item.vehicle.make ?? "Marca no confirmada"} {item.vehicle.model ?? "Modelo no confirmado"}</strong><small>{new Date(item.createdAt).toLocaleString("es-GT")} · Año {item.vehicle.year ?? "no confirmado"}</small></span>
                         <span className="history-list-meta">
                           {item.odometer && <span>{item.odometer.value.toLocaleString("es-GT")} {item.odometer.unit}</span>}
                           <span>{item.dtcCount} DTC</span>
