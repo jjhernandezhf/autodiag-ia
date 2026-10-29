@@ -369,7 +369,7 @@ export function createApp(options: AppOptions) {
     } catch (error) { if (responseIsAvailable(response)) automationFailure(response, error); }
   });
 
-  app.post("/api/reports/upload", requireAuthentication, validateReportUpload, async (request, response) => {
+  app.post(["/api/reports/upload", "/api/reports/upload-manual"], requireAuthentication, validateReportUpload, async (request, response) => {
     const file = request.file;
 
     if (!file) {
@@ -390,7 +390,7 @@ export function createApp(options: AppOptions) {
     try {
       const pageExtractor = options.extractPdfPages ?? ((buffer: Buffer) => extractPdfPages(buffer, pdfExtractionLimits,
         { signal: extractionAbort.signal, maxFileSizeBytes }));
-      extraction = await extractAutelReport(file.buffer, options.vinHmacSecret, pageExtractor);
+      extraction = await extractAutelReport(file.buffer, options.vinHmacSecret, pageExtractor, request.path === "/api/reports/upload-manual");
     } finally {
       request.removeListener("aborted", cancelExtraction);
       response.removeListener("close", cancelExtraction);

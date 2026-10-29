@@ -500,3 +500,242 @@ lint y builds; este cierre solo actualiza documentación y verifica el diff y
 el staging. **La suite API global sigue sin aprobarse**: las dos expectativas
 n8n reproducidas en la base se distinguen del timeout PDF de causa desconocida.
 No se ocultó ni corrigió ese timeout en este bloque.
+
+## Contingencia para una variante nueva — 2026-10-29 (local, sin publicar)
+
+Acción visible: **Completar manualmente y continuar con limitaciones**.
+No sustituye la revisión completa ni certifica que el documento sea íntegro.
+La ruta existente `/api/reports/review` admite el modo explícito
+`limited_guidance_v1`, con validación estricta, prueba HMAC del servidor,
+usuario/reporte/contenido y sustitución atómica de la revisión vigente.
+El navegador no autoriza por sí mismo ninguna generación. Validar no llama
+IA/RAG: después siguen siendo necesarios el botón de análisis y su confirmación.
+
+Si la carga normal no reconoce el formato, la interfaz ofrece **Preparar
+transcripción manual del PDF legible**. Reenvía explícitamente el archivo a
+`POST /api/reports/upload-manual`, con idéntica autenticación, firma de contenido,
+extractor hijo, límites, concurrencia y cancelación. Solo produce una referencia
+firmada parcial si se extrajo texto: no salta errores de lectura ni llama IA.
+El usuario debe reconocer `DOCUMENT_TYPE_UNCONFIRMED` y explicar por qué puede
+leer/verificar el documento como reporte Autel. Esto es una declaración manual
+no confiable, no una certificación del servidor o fabricante. Los mínimos técnicos
+y la prueba vigente siguen siendo obligatorios; un booleano no los omite.
+Un reporte reconocido completo conserva su resultado normal, incluido cero DTC,
+también cuando se envía a este endpoint de contingencia.
+
+### Mínimos y alcance
+
+- Al menos una fila con código literal no vacío (máximo 32 caracteres),
+  descripción técnica no vacía y motivo de al menos diez caracteres.
+- Toda fila nueva necesita página del PDF; puede añadirse línea/fila visible.
+  La posición transcrita es declarada por el usuario, no validada geométricamente.
+  Una fila del parser conserva su índice/procedencia aunque no se capturó página.
+- Cada advertencia original, incluida una combinación nueva, exige reconocimiento
+  y motivo propios. No se borra ni se convierte en resuelta por reconocerla.
+- Marca, modelo y año pueden permanecer `null` solo en esta modalidad. Motor y
+  odómetro siguen siendo opcionales. Un módulo desconocido utiliza un rótulo
+  explícito de fila, no una identidad de módulo supuestamente confirmada.
+- Estado desconocido, módulo desconocido o código no normalizado requieren
+  selección expresa de incertidumbre. Se conserva el literal: desconocido/no
+  reconocido no equivale a incorrecto ni a activo. No se inventa una equivalencia.
+- No se eliminan ni reordenan originales. Una nueva transcripción repetida exige
+  motivo de observación independiente, incluso sin módulo conocido. Descripciones
+  contradictorias para la misma identidad requieren corrección con evidencia;
+  no se selecciona una arbitrariamente para conseguir una exportación válida.
+- Máximo 50 identidades, 200 observaciones, 40 módulos para IA y los límites de
+  texto/JSON anteriores. Un exceso se rechaza, nunca se trunca silenciosamente.
+
+La extracción efectiva sigue siendo **partial**, con revisión requerida; solo la
+orientación del conjunto revisado puede finalizar. Los conteos declarados del
+documento no se sobrescriben para simular integridad. La interfaz y el PDF separan
+filas/sistemas revisados de lo escaneado. Decisiones, originales, incertidumbres,
+omisiones y posiciones llegan al contexto real de Responses (como datos de usuario
+no confiables), al snapshot, a la interfaz y al PDF. El contexto limita la orientación
+a comprobaciones generales y excluye procedimientos/conclusiones dependientes de
+datos desconocidos. Estas instrucciones no constituyen una garantía de corrección
+semántica del modelo: toda orientación requiere revisión técnica competente.
+
+Las fuentes RAG específicas de un vehículo no se consideran aplicables cuando
+los datos necesarios del vehículo son desconocidos. No se modificaron corpus,
+umbrales, modelo, SDK, presupuestos, cancelación, capacidad o reintentos.
+Versiones nuevas: `diagnostic_prompt_v6_limited_guidance` y
+`analysis_pipeline_v4_limited_guidance`; decisiones y alcance participan en la huella.
+La lectura de snapshots anteriores se conserva.
+
+### Matriz operativa
+
+| Impedimento | Acción disponible | Límite que permanece |
+| --- | --- | --- |
+| Vehículo incompleto | Completar con evidencia o dejar vacío en modalidad limitada | Sin procedimientos dependientes de datos desconocidos; no inferir año/modelo |
+| Fila no reconocida | Corregir la fila conservada o transcribir una realmente ausente, con página/motivo | No borrar originales ni duplicar accidentalmente |
+| Código literal no normalizado | Conservar el literal y declarar incertidumbre | No decodificación ni equivalencia confirmada |
+| Estado no normalizado | Reconocer incertidumbre explícitamente; conservar etiqueta | Nunca conversión automática a activo |
+| Módulo no asociado o sin sistemas estructurados | Transcribir nombre documentado o dejar desconocido | Rótulo de fila no es un módulo confirmado; sin reparación específica |
+| Conteos discrepantes o advertencias combinadas | Motivo individual por advertencia y alcance solo de filas revisadas | Conjunto posiblemente incompleto; no análisis de todo el reporte |
+| Sin estructura útil | Transcripción técnica después de extracción textual legible; si falla el reconocimiento, botón explícito de preparar transcripción | Sin OCR; el tipo queda no confirmado y exige revisión/motivo del usuario. No convierte un PDF en reporte completo o de procedencia verificada |
+| Descripción ausente o código ilegible sin datos útiles | Aportar el literal y una descripción técnica revisada del documento | No inventar información para cumplir mínimos; si no está disponible, no generar |
+| PDF corrupto, protegido, sin texto o fuera de límites | Reexportar PDF autorizado/compatible; reintento explícito cuando proceda | No omitir aislamiento, límites ni errores del extractor |
+| Red, proveedor o timeout | Conservar datos y recuperar/reintentar por los mecanismos existentes | No resolver reconociendo advertencias; sin éxito ficticio ni nuevos reintentos automáticos |
+| Cero DTC completo y coherente | Resultado informativo existente | No transcripción de códigos inventados ni generación IA |
+
+### Historial y compatibilidad de despliegue
+
+La tabla actual exige marca/modelo/año no nulos. Se preparó, **sin aplicar**,
+`supabase/migrations/20261029000100_allow_unknown_history_vehicle.sql`: elimina
+solo esos tres `NOT NULL`. Los controles de longitud/rango siguen actuando para
+valores presentes; no cambia filas, permisos, RLS ni índices. Su validación es
+estática, no una ejecución real en PostgreSQL/Supabase.
+
+Orden pendiente antes de usar en producción: revisar este bloque y la migración;
+aplicar primero la migración mediante autorización separada (no modifica datos
+existentes y el código anterior sigue enviando vehículos completos); después
+desplegar juntos API y frontend compatibles con ausencias y esperar a que termine
+el reemplazo de la instancia antes de crear casos limitados. Ensayar guardado
+y lectura reales. Sin esa migración, un caso con ausencias puede recibir orientación
+y exportar localmente, pero el guardado falla de forma controlada como
+`history.status=unavailable`, sin presentar `saved`. Casos con vehículo completo
+no necesitan cambiar esos requisitos de columna. No se ha probado remotamente.
+
+CSV/estadísticas aceptan ausencias: marca/modelo se rotulan `No informado` para
+presentación; el año sigue nulo (campo vacío en CSV), sin años centinela. No se
+cambian conteos ni se presentan esas etiquetas como datos documentales originales.
+
+Para volver al flujo completo, recargar el PDF o hacer una revisión completa
+válida. No desplegar un API antiguo incapaz de leer ausencias después de guardar
+casos nuevos con `null`. No retirar registros para revertir; conservar un lector
+compatible. Reversión de la migración requiere evaluar primero las filas nulas,
+sin rellenarlas con datos ficticios ni borrarlas.
+
+#### Lista de publicación y comprobación posterior
+
+1. Revisar el DDL exacto `20261029000100_allow_unknown_history_vehicle.sql` y
+   disponer del procedimiento habitual de respaldo/restauración. No reaplicar
+   migraciones anteriores ni cambiar RLS, grants, índices o datos.
+2. Aplicar ese DDL en Supabase solo con autorización separada. Mientras el código
+   anterior siga desplegado y no se hayan creado filas nulas, conserva compatibilidad
+   de lectura/escritura: solo se retiraron tres requisitos `NOT NULL`.
+3. Desplegar el bloque completo (API y frontend) en una sola instancia; conservar
+   configuración privada y presupuestos documentados. No habilitar uso limitado
+   durante el reemplazo de versiones. Un reinicio obliga a recargar los PDF para
+   obtener pruebas vigentes, sin eliminar historial.
+4. Comprobar `/api/health`, login, un registro anterior y su PDF, estadísticas/CSV,
+   cero DTC sin IA y revisión limitada sin generación automática. Solo con autorización
+   de consumo, comprobar un caso limitado con año desconocido: respuesta válida,
+   `history.status=saved`, reapertura sin IA, límites/ausencias en PDF y estadísticas.
+5. Verificar en SQL Editor, de solo lectura y sin copiar datos privados:
+
+```sql
+select column_name, is_nullable
+from information_schema.columns
+where table_schema = 'public' and table_name = 'diagnostic_history'
+  and column_name in ('make', 'model', 'year')
+order by column_name;
+
+select relrowsecurity, relforcerowsecurity
+from pg_class
+where oid = 'public.diagnostic_history'::regclass;
+
+select count(*) filter (
+  where make is null or model is null or year is null
+) as analyses_with_unknown_vehicle
+from public.diagnostic_history;
+```
+
+Esperado: las tres columnas admiten nulos; RLS sigue habilitado y forzado.
+Comparar restricciones y permisos efectivos con el inventario anterior al DDL:
+esta migración no los modifica. Un agregado de nulos no demuestra por sí solo
+que el historial, RLS o la interfaz funcionen; se necesitan las comprobaciones
+de propiedad y lectura con el usuario de ensayo.
+
+**Si se despliega sin migrar:** PostgreSQL rechaza el INSERT de un vehículo con
+campos desconocidos por `NOT NULL` (23502). La orientación puede devolver HTTP
+200, pero solo con `history.status=unavailable`: no queda en el historial duradero.
+El error SQL no se entrega al navegador. Se conserva la descarga PDF local; no hay
+guardado retroactivo ni reintento automático de persistencia al aplicar después
+la migración. No interpretar la caché/idempotencia temporal como almacenamiento
+duradero ni repetir generación pagada automáticamente para intentar guardarla.
+
+**Reversión:** si todavía no hay registros nulos, puede volver el código previo
+dejando la ampliación nullable instalada. Si ya existen, conservar un API lector
+compatible y corregir hacia adelante; no volver al lector antiguo ni ejecutar
+`SET NOT NULL` sin resolver legítimamente esas ausencias. No inventar valores,
+borrar análisis ni restaurar datos indiscriminadamente para hacer pasar una reversión.
+
+### Ensayo manual antes de publicar
+
+1. Con un PDF sintético/autorizado legible de estructura no soportada, cargarlo y
+   abrir la acción de contingencia; comparar originales y advertencias visibles.
+2. Dejar un dato de vehículo desconocido, transcribir una fila con página/motivo,
+   declarar incertidumbre y reconocer individualmente las advertencias. Validar:
+   debe seguir diciendo parcial/limitado y no ejecutar IA automáticamente.
+3. Confirmar explícitamente una solicitud de orientación solo con autorización de
+   consumo separada (o transporte local simulado); verificar limitaciones, datos
+   desconocidos y ausencia de afirmación de reporte completo.
+4. Comprobar PDF y, en un entorno autorizado con la migración aplicada, historial;
+   reabrirlo sin nueva IA. Sin migración, comprobar el aviso de guardado no disponible.
+5. Cambiar reporte/cerrar sesión durante una revisión pendiente; no deben reaparecer
+   datos anteriores. Probar también un cero DTC completo: resultado informativo sin IA.
+
+Las pruebas de DOM/transporte y PDF sintéticos comprueban software, no un ensayo
+visual interactivo ni calidad diagnóstica. No se releyeron PDF privados ni se hizo
+ninguna llamada pagada, ingestión, migración aplicada, commit, push o despliegue.
+
+### Verificación de la contingencia
+
+- API: **469/469**, 18 archivos focalizados sobre el bloque ampliado (parser,
+  compatibilidad, revisión/vigencia, transporte Responses, huellas, coordinador,
+  historial, estadísticas/CSV y HTTP). No es la suite API global.
+- Frontend: **148/148**, seis archivos focalizados con App, paneles, PDF,
+  estadísticas y CSV. Incluye carga de formato no reconocido, entrada manual,
+  validación sin generación automática, solicitud explícita, historial y PDF.
+- Después del último ajuste local de mensajes/capacidad y módulo no asociado:
+  **7/7** de paneles (incluyen pruebas ya contadas), lint de los archivos
+  afectados y build frontend. Un transporte que ignora abort no puede aplicar
+  su respuesta tras desmontar el panel; timeout y HTTP 413 conservan los datos
+  y no se presentan como éxito documental.
+- Lint de ambos workspaces, build API y build frontend aprobados; advertencia
+  conocida de bundle mayor de 500 kB. Diff-check y whitespace de archivos nuevos
+  comprobados. Dependencias, lockfile, modelo, extractor y configuración privada
+  no se modificaron.
+- Casos sintéticos nuevos: fila no reconocida, estado desconocido, vehículo
+  ausente, conteos discrepantes, combinación no enumerada de advertencias y
+  documento legible sin estructura. Rechazo de alteraciones, usuario ajeno,
+  contenido/revisión obsoletos, caducidad, duplicados y límites. Lectura/exportación
+  anteriores verificadas junto con la nueva trazabilidad limitada.
+
+Fallos encontrados durante la implementación, no atribuidos al ambiente:
+la ampliación del esquema hacía que `confirmVehicleData` aceptara `null` en el
+flujo completo (1/156 fallida); se restauró su rechazo y pasó la regresión original,
+sin cambiar esa expectativa. El primer fixture de App incluía `format` en el
+objeto de originales, campo que el contrato real no devuelve; se corrigió el
+fixture, no el validador. Un build detectó el mock genérico de transporte de la
+prueba de desmontaje: se tipó la función y se separó el contador de llamadas,
+conservando la aserción de cancelación y descarte tardío. No se aumentaron timeouts
+de Vitest ni se cambiaron dependencias/configuración del runner.
+
+**La suite API global continúa no aprobada.** No se repitió durante esta tarea;
+los dos fallos n8n reproducidos en la base se mantienen separados del timeout PDF
+de causa desconocida. No se modificó el extractor ni se investigó de nuevo su
+intermitencia. La migración nueva solo tuvo revisión estática: falta comprobar
+guardado real con datos desconocidos en un PostgreSQL autorizado.
+
+Delta local: API/admisión y contratos, compatibilidad de historial/estadísticas,
+panel de contingencia y validadores de App, presentación PDF, regresiones y esta
+guía. Nuevos: `apps/api/src/limited-guidance.test.ts`,
+`apps/web/src/LimitedReportReviewPanel.tsx`, su prueba y
+`supabase/migrations/20261029000100_allow_unknown_history_vehicle.sql`.
+
+### Cierre de publicación — 2026-10-29
+
+Se reutilizan las verificaciones anteriores sin repetir suites ni builds.
+Se añadió una regresión concreta al historial: el repositorio simula un rechazo
+23502 por falta de migración; el endpoint conserva HTTP 200 y la orientación,
+devuelve `history.status=unavailable`, no filtra el detalle SQL y no reintenta
+generación. El archivo focalizado aprobó **27/27** (incluye pruebas ya contadas).
+
+No pudo ejecutarse PostgreSQL local: Docker CLI está instalado, pero no responde
+el motor Linux de Docker Desktop; `psql` no está en PATH. No se arrancó ni instaló
+un servicio para el cierre. La migración conserva **solo revisión estática**,
+sin comprobación real de restricciones/permisos en PostgreSQL. La simulación
+anterior demuestra el comportamiento HTTP, no sustituye la validación de la base.
+La suite API global continúa no aprobada y el timeout PDF sigue pendiente.

@@ -32,6 +32,26 @@ const change = (name: string | RegExp, value: string) => fireEvent.change(screen
 afterEach(() => cleanup());
 
 describe("acciones manuales accesibles del reporte", () => {
+  it("ofrece contingencia ante una combinación nueva, mantiene ausencias y no solicita análisis", async () => {
+    const r = report(); r.extraction.dtcs = []; r.extraction.systems = [];
+    r.extraction.warnings = [{ code: "NEW_LAYOUT", message: "Variante documental nueva" }];
+    const { calls, onReviewed } = mount(r), user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Completar manualmente y continuar con limitaciones" }));
+    expect(screen.getByText(/El conjunto puede estar incompleto/)).toBeTruthy();
+    await user.click(screen.getByRole("checkbox", { name: "Reconozco esta limitación: NEW_LAYOUT" }));
+    change("Motivo y alcance para NEW_LAYOUT", why);
+    await user.click(screen.getByRole("button", { name: "Transcribir otra fila del PDF" }));
+    change("Código literal 1", "X?77"); change("Descripción técnica 1", "Descripcion tecnica del reporte");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Tratamiento 1" }), "reviewed_uncertain");
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Página del PDF 1" }), { target: { value: "2" } });
+    change("Motivo técnico 1", why); change("Motivo general de orientación limitada", why);
+    expect(calls).toHaveLength(0);
+    await user.click(screen.getByRole("button", { name: "Validar transcripción y limitaciones" }));
+    await waitFor(() => expect(onReviewed).toHaveBeenCalledOnce());
+    expect(calls).toHaveLength(1); expect(calls[0]!.path).toBe("/api/reports/review");
+    expect(calls[0]!.body).toMatchObject({ mode: "limited_guidance_v1", vehicle: { make: null, model: null, year: null },
+      acknowledgements: [{ code: "NEW_LAYOUT", reason: why }], rows: [{ code: "X?77", moduleName: null, moduleIndex: null, sourceIndex: null, page: 2, state: "reviewed_uncertain" }] });
+  });
   it("resuelve desde el panel vehículo, código, descripción, módulo y estado incierto, sin añadir copia ni solicitar IA", async () => {
     const { calls, requestJson, onReviewed } = mount(), user = userEvent.setup();
     expect(screen.getByRole("region", { name: "Bloqueos y acciones disponibles" })).toBeTruthy();

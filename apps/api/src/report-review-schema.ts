@@ -20,7 +20,16 @@ export const reviewSummarySchema = z.object({ declaredSystems: z.number().int().
 export const reviewDecisionSchema = z.object({ path: z.string().regex(/^(?:vehicle\.(?:make|model|year)|rows\.\d+\.(?:code|module|description|status)|counts|extraction)$/u),
   before: z.string().max(2000).nullable(), after: z.string().max(2000).nullable(), reason: text(500).min(10),
 }).strict();
+export const limitedGuidanceSchema = z.object({
+  mode: z.literal("limited_guidance_v1"), coverage: z.literal("reviewed_rows_only"),
+  limitations: z.array(text(500)).min(1).max(510),
+  positions: z.array(z.object({ rowIndex: z.number().int().min(0).max(199),
+    page: z.number().int().min(1).max(1000).nullable(), line: z.number().int().min(1).max(100000).nullable(),
+    provenance: z.enum(["parser_row_reviewed", "manual_transcription"]), reason: text(500).min(10),
+  }).strict()).min(1).max(200),
+}).strict();
 export const reportReviewEvidenceSchema = z.object({
+  limited: limitedGuidanceSchema.optional(),
   version: z.literal("report_review_v1"), reason: text(500).min(10),
   original: z.object({ status: z.enum(["completed", "partial"]), requiresManualReview: z.boolean(), vehicle: reviewVehicleSchema,
     scanSummary: reviewSummarySchema, systems: z.array(reviewSystemSchema).max(100), dtcs: z.array(reviewDtcSchema).max(200),

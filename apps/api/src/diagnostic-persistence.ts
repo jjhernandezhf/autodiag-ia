@@ -145,10 +145,10 @@ export interface PersistableDiagnosticFinding {
 
 export interface PersistableDiagnosticRecord {
   report: {
-    make: string;
-    model: string;
-    year: number;
-    extractionStatus: "completed";
+    make: string | null;
+    model: string | null;
+    year: number | null;
+    extractionStatus: "completed" | "partial";
     analysisStatus: "completed";
   };
   modules: PersistableDiagnosticModule[];
@@ -293,7 +293,7 @@ export function buildDiagnosticPersistenceRecord(
       make: preparation.input.vehicle.make,
       model: preparation.input.vehicle.model,
       year: preparation.input.vehicle.year,
-      extractionStatus: "completed",
+      extractionStatus: extraction.status,
       analysisStatus: "completed",
     },
     modules,

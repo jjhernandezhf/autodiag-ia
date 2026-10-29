@@ -51,10 +51,10 @@ export function parseStoredProvenance(metadata: Record<string, unknown>, url?: s
   return parsed;
 }
 
-export function incompatibleWithVehicle(source: RagProvenance, vehicle: { make: string; model: string; year: number }) {
+export function incompatibleWithVehicle(source: RagProvenance, vehicle: { make: string | null; model: string | null; year: number | null }) {
   const same = (a: string, b: string) => a.trim().toLocaleLowerCase() === b.trim().toLocaleLowerCase();
   return source.applicability === "incompatible"
-    || (source.make !== null && !same(source.make, vehicle.make))
-    || (source.model !== null && !same(source.model, vehicle.model))
+    || (source.make !== null && (vehicle.make === null || !same(source.make, vehicle.make)))
+    || (source.model !== null && (vehicle.model === null || !same(source.model, vehicle.model)))
     || (source.year !== null && source.year !== vehicle.year);
 }

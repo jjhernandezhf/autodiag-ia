@@ -2,7 +2,7 @@ export const MAX_ANALYSIS_DTCS = 50;
 export const MAX_ANALYSIS_OBSERVATIONS = 200;
 export const REPORTED_STATUSES = ["current", "confirmed", "stored", "pending", "permanent", "intermittent", "on_demand", "continuous_memory", "provisional", "reviewed_uncertain", "history", "unknown"];
 export type ReviewContext = { reason: string; correctedFields: string[] } & (
-  { version: "review_context_v1" } | { version: "review_context_v2"; provenance: "user_review_unverified"; decisions: ReportReviewEvidence["decisions"] }
+  { version: "review_context_v1" } | { version: "review_context_v2"; provenance: "user_review_unverified"; decisions: ReportReviewEvidence["decisions"]; limited?: LimitedGuidance }
 );
 export interface ReviewableExtraction {
   status: "completed" | "partial"; requiresManualReview: boolean;
@@ -16,9 +16,14 @@ export interface ReviewableExtraction {
   review?: ReportReviewEvidence;
 }
 export interface ReportReviewEvidence {
+  limited?: LimitedGuidance;
   version: "report_review_v1"; reason: string;
   original: Omit<ReviewableExtraction, "review">;
   decisions: Array<{ path: string; before: string | null; after: string | null; reason: string }>;
+}
+export interface LimitedGuidance {
+  mode: "limited_guidance_v1"; coverage: "reviewed_rows_only"; limitations: string[];
+  positions: Array<{ rowIndex: number; page: number | null; line: number | null; provenance: "parser_row_reviewed" | "manual_transcription"; reason: string }>;
 }
 const record = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
 const keys = (v: Record<string, unknown>, allowed: string[]) => Object.keys(v).every(k => allowed.includes(k));
@@ -26,7 +31,7 @@ const text = (v: unknown, max: number, blank = false): v is string => typeof v =
 const nullableText = (v: unknown, max: number) => v === null || text(v, max);
 const count = (v: unknown, max: number): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= max;
 export function isReviewEvidence(value: unknown, sensitive: (s: string) => boolean): value is ReportReviewEvidence {
-  if (!record(value) || !keys(value, ["version", "reason", "original", "decisions"]) || value.version !== "report_review_v1" ||
+  if (!record(value) || !keys(value, ["version", "reason", "original", "decisions", "limited"]) || !isLimitedGuidance(value.limited, sensitive) || value.version !== "report_review_v1" ||
     !text(value.reason, 500) || value.reason.trim().length < 10 || !record(value.original) || !Array.isArray(value.decisions) || !value.decisions.length || value.decisions.length > 1400) return false;
   const o = value.original;
   if (!keys(o, ["status", "requiresManualReview", "vehicle", "scanSummary", "systems", "dtcs", "warnings"]) ||
@@ -68,10 +73,18 @@ export function isReviewContext(value: unknown, sensitive: (s: string) => boolea
     /^(?:vehicle\.(?:make|model|year)|rows\.\d+\.(?:code|module|description|status)|counts|extraction)$/u.test(d.path) &&
     (d.before === null || text(d.before, 2000, true)) && (d.after === null || text(d.after, 2000, true)) && text(d.reason, 500) && d.reason.trim().length >= 10 &&
     Object.values(d).every(v => v === null || (typeof v === "string" && !sensitive(v)));
-  return keys(value, v2 ? ["version", "reason", "correctedFields", "provenance", "decisions"] : ["version", "reason", "correctedFields"]) &&
+  return keys(value, v2 ? ["version", "reason", "correctedFields", "provenance", "decisions", "limited"] : ["version", "reason", "correctedFields"]) && isLimitedGuidance(value.limited, sensitive) &&
     (v2 ? value.provenance === "user_review_unverified" && Array.isArray(value.decisions) && value.decisions.length > 0 && value.decisions.length <= 1400 && value.decisions.every(decisionValid) : value.version === "review_context_v1") &&
     text(value.reason, 500) && value.reason.trim().length >= 10 && Array.isArray(value.correctedFields) && value.correctedFields.length > 0 &&
     value.correctedFields.length <= 1400 && value.correctedFields.every(s => text(s, 120) && !sensitive(s)) && !sensitive(String(value.reason));
+}
+export function isLimitedGuidance(v: unknown, sensitive: (s: string) => boolean): v is LimitedGuidance | undefined {
+  if (v === undefined) return true;
+  return record(v) && keys(v, ["mode", "coverage", "limitations", "positions"]) && v.mode === "limited_guidance_v1" && v.coverage === "reviewed_rows_only" &&
+    Array.isArray(v.limitations) && v.limitations.length > 0 && v.limitations.length <= 510 && v.limitations.every(s => text(s, 500) && !sensitive(s)) &&
+    Array.isArray(v.positions) && v.positions.length > 0 && v.positions.length <= 200 && v.positions.every(p => record(p) && keys(p, ["rowIndex", "page", "line", "provenance", "reason"]) &&
+      count(p.rowIndex, 199) && (p.page === null || (count(p.page, 1000) && p.page > 0)) && (p.line === null || (count(p.line, 100000) && p.line > 0)) &&
+      ["parser_row_reviewed", "manual_transcription"].includes(String(p.provenance)) && text(p.reason, 500) && p.reason.trim().length >= 10 && !sensitive(p.reason));
 }
 export function hasConsistentObservedStates(dtc: { status: string; alsoHistorical: boolean; observations?: Array<{ status: string }> }) {
   if (!dtc.observations) return dtc.status !== "multiple_observed";

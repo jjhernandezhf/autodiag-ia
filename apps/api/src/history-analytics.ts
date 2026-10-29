@@ -10,7 +10,7 @@ const text = (max: number) => z.string().trim().min(1).max(max).refine(value =>
   [...value].every(character => character.charCodeAt(0) >= 32 && character.charCodeAt(0) !== 127) &&
   !containsSensitiveText(value, "structured_identifier"));
 const metadataSchema = z.object({ id: z.string().uuid(), created_at: z.string().max(40).datetime({ offset: true }),
-  make: text(80), model: text(120), year: z.number().int().min(1886).max(9999),
+  make: text(80).nullable().transform(v => v ?? "No informado"), model: text(120).nullable().transform(v => v ?? "No informado"), year: z.number().int().min(1886).max(9999).nullable(),
   dtc_count: z.number().int().min(0).max(100_000),
   rag_status: z.enum(["used", "disabled", "not_configured", "no_matches", "unavailable"]) }).strict();
 const dtcSchema = z.object({ code: text(32), moduleCode: text(32).nullable(), moduleName: text(160) });

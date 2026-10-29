@@ -32,6 +32,7 @@ function addReason(
 }
 
 export function prepareAiAnalysis(extraction: AutelExtraction, options: { legacyRead?: boolean } = {}): AiAnalysisPreparation {
+  if (extraction.review?.limited) return prepareLimitedAnalysis(extraction);
   const reasons: AiAnalysisAvailabilityReason[] = [];
   const warnings = extraction.warnings.length > 0 ? [GENERIC_EXTRACTION_WARNING] : [];
   if (extraction.dtcs.some(dtc => ["on_demand", "continuous_memory"].includes(dtc.status))) {
@@ -212,4 +213,39 @@ export function prepareAiAnalysis(extraction: AutelExtraction, options: { legacy
 
   if (reasons.length > 0 || validatedInput === null) return { available: false, reasons, warnings, counts };
   return { available: true, input: validatedInput, reasons, warnings, counts };
+}
+
+// Only the signed server review can authorize this DTO at the HTTP boundary.
+// Partial extraction remains partial; no count or missing vehicle is invented.
+function prepareLimitedAnalysis(extraction: AutelExtraction): AiAnalysisPreparation {
+  const review = extraction.review!;
+  const reasons: AiAnalysisAvailabilityReason[] = [];
+  const counts = { detected: extraction.dtcs.length, actionable: 0, historical: extraction.dtcs.filter(d => d.status === "history").length };
+  const modules = extraction.systems.flatMap(system => {
+    const rows = extraction.dtcs.filter(d => matchesSystem(system, d));
+    const codes = [...new Set(rows.map(d => d.code))];
+    return codes.length ? [{ code: system.code, name: system.name, dtcs: codes.map(code => {
+      const observations = rows.filter(d => d.code === code);
+      if (new Set(observations.map(d => normalizeForMatch(d.descriptionOriginal))).size > 1) {
+        addReason(reasons, "DTC_DESCRIPTION_CONFLICT", "Revisa las descripciones contradictorias de una misma identidad; no se elegirá una arbitrariamente.");
+      }
+      const statuses = new Set(observations.filter(d => d.status !== "history").map(d => d.status));
+      const status = statuses.size > 1 ? "multiple_observed" as const : [...statuses][0];
+      return { code, description: observations[0]!.descriptionOriginal, status,
+        alsoHistorical: observations.some(d => d.status === "history"),
+        observations: observations.map(d => ({ description: d.descriptionOriginal, status: d.status, statusOriginal: d.statusOriginal })) };
+    }) }] : [];
+  });
+  counts.actionable = modules.reduce((n, m) => n + m.dtcs.length, 0);
+  const candidate = { vehicle: { make: extraction.vehicle.make, model: extraction.vehicle.model, year: extraction.vehicle.year }, modules,
+    reviewContext: { version: "review_context_v2", provenance: "user_review_unverified", reason: review.reason,
+      correctedFields: review.decisions.map(d => d.path), decisions: review.decisions, limited: review.limited } };
+  const parsed = diagnosticAnalysisInputSchema.safeParse(candidate);
+  if (!parsed.success || !counts.actionable || extraction.dtcs.length > MAX_ANALYSIS_OBSERVATIONS ||
+      extraction.dtcs.some(d => extraction.systems.filter(s => matchesSystem(s, d)).length !== 1)) {
+    addReason(reasons, "DTC_DATA_INVALID", "Aporta al menos una fila con código literal, descripción técnica y procedencia; revisa asociaciones y límites de 50 identidades/200 observaciones.");
+  } else if (containsSensitiveDiagnosticReport(parsed.data)) {
+    addReason(reasons, "SENSITIVE_CONTENT_DETECTED", "Retira datos personales de los textos técnicos antes de continuar.");
+  } else if (!reasons.length) return { available: true, input: parsed.data, counts, reasons, warnings: [...review.limited!.limitations] };
+  return { available: false, reasons, counts, warnings: [...review.limited!.limitations] };
 }

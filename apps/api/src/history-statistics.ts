@@ -46,7 +46,7 @@ export function aggregateStatistics(records: AnalyticsRecord[], cutoff: string, 
     vehicles: ranked(vehicles).map(([key, count]) => { const [make, model] = JSON.parse(key) as string[]; return { make, model, count }; }),
     codes: ranked(codes).map(([code, count]) => ({ code, count,
       descriptions: [...(descriptions.get(code) ?? [])].map(([key, ids]) => {
-        const [make, model, year, moduleCode, moduleName, description] = JSON.parse(key) as [string, string, number, string | null, string, string | null];
+        const [make, model, year, moduleCode, moduleName, description] = JSON.parse(key) as [string, string, number | null, string | null, string, string | null];
         return { make, model, year, moduleCode, moduleName, description, analysisIds: [...ids] };
       }),
     })),

@@ -15,6 +15,7 @@ export function confirmVehicleData(raw: unknown) {
   const parsed = confirmationSchema.safeParse(raw);
   if (!parsed.success || containsSensitiveValue(parsed.data.vehicle, "structured_identifier")) return null;
   const { extraction, vehicle } = parsed.data;
+  if (Object.values(vehicle).some(v => v === null)) return null; // Unknowns belong only to signed limited review.
   const fields = ["make", "model", "year"] as const;
   if (fields.some(key => extraction.vehicle[key] !== null && extraction.vehicle[key] !== vehicle[key])) return null;
   const missing = fields.filter(key => extraction.vehicle[key] === null);
