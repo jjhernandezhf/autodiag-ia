@@ -5,6 +5,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AiAnalysisError, DiagnosticAnalysisService, OpenAiResponsesClient } from "./ai-analysis-service.js";
 import { RagRetrievalService } from "./rag-service.js";
 import { createPdfContentToken } from "./analysis-fingerprint.js";
+import { createExtractionToken } from "./report-review.js";
+import { stableExtractionToken, validatedFixture } from "../test-support/report-proof.js";
+import { historyExtractionInputSchema } from "./diagnostic-history.js";
 import { createApp } from "./app.js";
 import type { AuthenticationService } from "./auth-service.js";
 
@@ -36,7 +39,7 @@ const output = {
   confidence: "medium",
   requiresTechnicianConfirmation: true,
 };
-const historyContext = {
+const historyContextBase = {
   reportReference: "33333333-3333-4333-8333-333333333333",
   contentToken: createPdfContentToken(Buffer.from("%PDF-synthetic-report"), SECRET, USER_A),
   extraction: {
@@ -67,6 +70,10 @@ const historyContext = {
   },
 };
 
+const historyContext = { ...historyContextBase, get extractionToken(): string {
+  return stableExtractionToken(historyExtractionInputSchema.parse(historyContextBase.extraction), USER_A, historyContextBase.reportReference, historyContextBase.contentToken, SECRET);
+} };
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason: unknown) => void;
@@ -90,7 +97,7 @@ function send(app: ReturnType<typeof createApp>, key = KEY, body: unknown = inpu
     .post("/api/reports/analyze")
     .set("Authorization", `Bearer ${token}`)
     .set("Idempotency-Key", key)
-    .send(body);
+    .send(validatedFixture(body, SECRET, token === "user-b-token" ? USER_B : USER_A));
 }
 
 function testApp(overrides: Parameters<typeof createApp>[0] = { vinHmacSecret: "" }) {
@@ -460,6 +467,7 @@ describe("idempotencia HTTP del análisis", () => {
     const secondContext = {
       ...historyContext,
       reportReference: "44444444-4444-4444-8444-444444444444",
+      extractionToken: createExtractionToken(historyExtractionInputSchema.parse(historyContext.extraction), USER_A, "44444444-4444-4444-8444-444444444444", historyContext.contentToken, SECRET),
     };
 
     const first = send(app, KEY, { input, historyContext }).then((response) => response);
@@ -610,15 +618,16 @@ describe("idempotencia HTTP del análisis", () => {
       ...historyContext,
       extraction: {
         ...historyContext.extraction,
-        scanSummary: { ...historyContext.extraction.scanSummary, declaredSystems: 2 },
+        vehicle: { ...historyContext.extraction.vehicle, engine: "Motor sintetico documentado" },
       },
     };
-
-    const response = await send(app, KEY, { input, historyContext: changedContext });
+    expect((await send(app, KEY, { input, historyContext })).status).toBe(200);
+    const signedChangedContext = { ...changedContext, extractionToken: createExtractionToken(historyExtractionInputSchema.parse(changedContext.extraction), USER_A, changedContext.reportReference, changedContext.contentToken, SECRET) };
+    const response = await send(app, "77777777-7777-4777-8777-777777777777", { input, historyContext: signedChangedContext });
 
     expect(response.status).toBe(200);
-    expect(generate).toHaveBeenCalledOnce();
-    expect(historyService.save).toHaveBeenCalledOnce();
+    expect(generate).toHaveBeenCalledTimes(2);
+    expect(historyService.save).toHaveBeenCalledTimes(2);
   });
 
   it("el presupuesto del backend aborta el adaptador y responde de forma controlada", async () => {

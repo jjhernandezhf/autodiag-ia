@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { AiAnalysisError, DiagnosticAnalysisService, type AiAnalysisClient } from "./ai-analysis-service.js";
 import { createApp, type AppOptions } from "./app.js";
 import type { AuthenticationService } from "./auth-service.js";
+import { validatedFixture } from "../test-support/report-proof.js";
 
 const TEST_SECRET = "synthetic-analysis-secret-at-least-32-bytes";
 const AUTHORIZATION = "Bearer synthetic-access-token";
@@ -55,10 +56,13 @@ function createAuthenticatedApp(options: AppOptions) {
 }
 
 function postAnalyze(app: ReturnType<typeof createApp>) {
-  return request(app)
+  const operation = request(app)
     .post("/api/reports/analyze")
     .set("Authorization", AUTHORIZATION)
     .set("Idempotency-Key", IDEMPOTENCY_KEY);
+  const send = operation.send.bind(operation);
+  operation.send = value => send(validatedFixture(value, TEST_SECRET, "6a103df0-8e4d-4c51-89f5-7030c5443d89"));
+  return operation;
 }
 
 function appWithClient(client: AiAnalysisClient) {
@@ -242,11 +246,11 @@ describe("POST /api/reports/analyze", () => {
     expect(longDescriptionResponse.body.error.code).toBe("AI_INPUT_INVALID");
   });
 
-  it("acepta el DTO máximo de 100 DTC con textos en sus máximos contractuales", async () => {
+  it("acepta el DTO máximo autorizado de 50 DTC con textos en sus máximos contractuales", async () => {
     const modules = Array.from({ length: 40 }, (_, moduleIndex) => ({
       code: `M${String(moduleIndex).padStart(2, "0")}${"X".repeat(29)}`,
       name: `M${moduleIndex}${"n".repeat(159 - String(moduleIndex).length)}`,
-      dtcs: Array.from({ length: moduleIndex < 20 ? 3 : 2 }, (_, dtcIndex) => ({
+      dtcs: Array.from({ length: moduleIndex < 10 ? 2 : 1 }, (_, dtcIndex) => ({
             code: `P${String(moduleIndex * 3 + dtcIndex).padStart(3, "0")}${"C".repeat(28)}`,
             description: "d".repeat(1_000),
             status: "current" as const,

@@ -7,7 +7,7 @@ const text = z.string().trim().min(1).max(1_000);
 const id = z.string().regex(/^[a-z][a-z0-9-]{0,79}$/u);
 const reference = z.object({ code: text, moduleCode: text.nullable(), moduleName: text }).strict();
 const row = reference.extend({
-  status: z.enum(["current", "confirmed", "stored", "pending", "permanent", "intermittent", "history", "unknown"]),
+  status: z.enum(["current", "confirmed", "stored", "pending", "permanent", "intermittent", "on_demand", "continuous_memory", "provisional", "reviewed_uncertain", "multiple_observed", "history", "unknown"]),
 }).strict();
 const vehicle = z.object({ make: text.nullable(), model: text.nullable(), year: z.number().int().nullable() }).strict();
 const versions = z.object({

@@ -23,7 +23,9 @@ function createDtc(
     moduleName,
     descriptionOriginal,
     status,
-    statusOriginal: "estado documental",
+    statusOriginal: { current: "Actual", confirmed: "Confirmed / Test Failed", stored: "Almacenado", pending: "Pendiente",
+      permanent: "DTC permanente", intermittent: "Intermitente", on_demand: "ODDTCs", continuous_memory: "CMDTCs",
+      provisional: "DTC provisional", reviewed_uncertain: "1 vez", history: "Histórico", unknown: "Estado no reconocido" }[status],
     classification: classifyDtcStatus(status),
   };
 }
@@ -108,7 +110,7 @@ function createMaximumExtraction(): AutelExtraction {
   const systems = Array.from({ length: 40 }, (_, moduleIndex) => ({
     code: repeatToLength(`M-${moduleIndex}-`, 32),
     name: repeatToLength(`Módulo ${moduleIndex} `, 160),
-    dtcCount: moduleIndex < 5 ? 20 : 0,
+    dtcCount: moduleIndex === 0 ? 50 : 0,
   }));
   const dtcs = systems.flatMap((system, moduleIndex) =>
     Array.from({ length: system.dtcCount }, (_, dtcIndex) =>
@@ -129,7 +131,7 @@ function createMaximumExtraction(): AutelExtraction {
       make: "o".repeat(80),
       model: "o".repeat(120),
     },
-    scanSummary: { declaredSystems: 40, parsedSystems: 40, declaredDtcs: 100, parsedDtcs: 100 },
+    scanSummary: { declaredSystems: 40, parsedSystems: 40, declaredDtcs: 50, parsedDtcs: 50 },
     systems,
     dtcs,
   };
@@ -141,7 +143,7 @@ function createMaximumAnalysis(): CompletedAnalysis {
     status: "completed",
     analysis: {
       technicalSummary: "o".repeat(1_500),
-      findings: Array.from({ length: 20 }, () => ({
+      findings: Array.from({ length: 50 }, () => ({
         relatedDtc: null,
         priority: "critical" as const,
         simpleExplanation: "o".repeat(1_000),
@@ -238,7 +240,7 @@ describe("buildDiagnosticPersistenceRecord", () => {
     }
     expect(getRecord().modules[0]?.dtcs[0]).toMatchObject({
       status: "current",
-      statusOriginal: "estado documental",
+      statusOriginal: "Actual",
       classification: "actionable",
     });
   });
@@ -414,15 +416,15 @@ describe("buildDiagnosticPersistenceRecord", () => {
     const record = getRecord(createMaximumExtraction(), createMaximumAnalysis());
 
     expect(record.modules).toHaveLength(40);
-    expect(record.modules.flatMap((module) => module.dtcs)).toHaveLength(100);
-    expect(record.modules[0]?.dtcs).toHaveLength(20);
+    expect(record.modules.flatMap((module) => module.dtcs)).toHaveLength(50);
+    expect(record.modules[0]?.dtcs).toHaveLength(50);
     expect(record.report.make).toHaveLength(80);
     expect(record.report.model).toHaveLength(120);
     expect(record.modules[0]?.code).toHaveLength(32);
     expect(record.modules[0]?.name).toHaveLength(160);
     expect(record.modules[0]?.dtcs[0]?.description).toHaveLength(1_000);
     expect(record.analysis.technicalSummary).toHaveLength(1_500);
-    expect(record.analysis.findings).toHaveLength(20);
+    expect(record.analysis.findings).toHaveLength(50);
     expect(record.analysis.findings[0]?.possibleCauses).toHaveLength(8);
     expect(record.analysis.findings[0]?.recommendedChecks).toHaveLength(10);
     expect(record.analysis.findings[0]?.safetyWarnings).toHaveLength(8);

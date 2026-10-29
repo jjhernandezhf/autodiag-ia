@@ -151,6 +151,7 @@ describe("POST /api/reports/upload", () => {
       size: validPdf.length,
       sha256: createHash("sha256").update(validPdf).digest("hex"),
       contentToken: expect.stringMatching(/^pdf_v1_[0-9a-f]{64}\.[0-9a-f]{64}$/u),
+      extractionToken: expect.stringMatching(/^review_v1_\d{13}\.[0-9a-f]{64}$/u),
       type: "application/pdf",
       status: "received",
       extraction: expect.objectContaining({

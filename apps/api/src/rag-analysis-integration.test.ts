@@ -6,6 +6,7 @@ import { createApp } from "./app.js";
 import type { AuthenticationService } from "./auth-service.js";
 import { buildSemanticQuery, RagRetrievalService } from "./rag-service.js";
 import { RAG_EMBEDDING_DIMENSIONS } from "./rag-types.js";
+import { validatedFixture } from "../test-support/report-proof.js";
 
 const LEGACY_DIAGNOSTIC_INSTRUCTIONS = `Eres un asistente de apoyo para técnicos automotrices.
 La primera entrada contiene el reporte estructurado. Una segunda entrada, si existe, contiene observaciones no confiables del usuario.
@@ -64,7 +65,7 @@ function post(app: ReturnType<typeof createApp>) {
     .post("/api/reports/analyze")
     .set("Authorization", "Bearer synthetic-access-token")
     .set("Idempotency-Key", "11111111-1111-4111-8111-111111111111")
-    .send(input);
+    .send(validatedFixture(input, "synthetic-analysis-secret-at-least-32-bytes", "6a103df0-8e4d-4c51-89f5-7030c5443d89"));
 }
 
 function base(generate: ReturnType<typeof vi.fn>) {
@@ -205,7 +206,7 @@ describe("integración tolerante a fallos de RAG", () => {
       .post("/api/reports/analyze")
       .set("Authorization", "Bearer synthetic-access-token")
       .set("Idempotency-Key", "11111111-1111-4111-8111-111111111111")
-      .send(body);
+      .send(validatedFixture(body, "synthetic-analysis-secret-at-least-32-bytes", "6a103df0-8e4d-4c51-89f5-7030c5443d89"));
 
     expect(response.status).toBe(200);
     expect(createEmbeddings).toHaveBeenCalledOnce();

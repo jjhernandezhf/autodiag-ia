@@ -45,7 +45,9 @@ function createDtc(
     moduleName,
     descriptionOriginal,
     status,
-    statusOriginal: "Estado original",
+    statusOriginal: { current: "Actual", confirmed: "Confirmed / Test Failed", stored: "Almacenado", pending: "Pendiente",
+      permanent: "DTC permanente", intermittent: "Intermitente", on_demand: "ODDTCs", continuous_memory: "CMDTCs",
+      provisional: "DTC provisional", reviewed_uncertain: "1 vez", history: "Histórico", unknown: "Estado no reconocido" }[status],
     classification: classifyDtcStatus(status),
   };
 }
@@ -219,14 +221,14 @@ describe("prepareAiAnalysis", () => {
     const systems: ScannedSystem[] = Array.from({ length: 41 }, (_, index) => ({
       code: `M${index}`,
       name: `Módulo ${index}`,
-      dtcCount: index === 0 ? 21 : 0,
+      dtcCount: index === 0 ? 51 : 0,
     }));
-    const dtcs = Array.from({ length: 21 }, (_, index) =>
+    const dtcs = Array.from({ length: 51 }, (_, index) =>
       createDtc(`P${String(index).padStart(4, "0")}`, "M0", "Módulo 0", `Descripción ${index}`, "current"),
     );
     extraction.systems = systems;
     extraction.dtcs = dtcs;
-    extraction.scanSummary = { declaredSystems: 41, parsedSystems: 41, declaredDtcs: 21, parsedDtcs: 21 };
+    extraction.scanSummary = { declaredSystems: 41, parsedSystems: 41, declaredDtcs: 51, parsedDtcs: 51 };
 
     const result = prepareAiAnalysis(extraction);
 

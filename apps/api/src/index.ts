@@ -9,6 +9,12 @@ import { stopPdfExtraction } from "./pdf-extractor.js";
 import { createConfiguredHistoryAnalyticsService } from "./history-analytics.js";
 
 const env = loadEnv();
+// Numeric operational budgets only: never log process.env or provider credentials.
+console.info("ANALYSIS_TIMEOUT_CONFIGURATION", {
+  attemptTimeoutMs: env.OPENAI_TIMEOUT_MS,
+  totalTimeoutMs: env.ANALYSIS_TOTAL_TIMEOUT_MS,
+  historySaveTimeoutMs: env.DIAGNOSTIC_HISTORY_SAVE_TIMEOUT_MS,
+});
 const ragService = createConfiguredRagService(env);
 const historyService = createConfiguredDiagnosticHistoryService();
 let automationSettings;

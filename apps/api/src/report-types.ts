@@ -1,4 +1,5 @@
 import type { DiagnosticAnalysisInput } from "./ai-analysis-types.js";
+import type { ReportReviewEvidence } from "./report-review-schema.js";
 
 export interface ExtractedTextFragment {
   text: string;
@@ -24,6 +25,11 @@ export type DtcStatus =
   | "pending"
   | "permanent"
   | "intermittent"
+  | "on_demand"
+  | "continuous_memory"
+  | "provisional"
+  | "reviewed_uncertain"
+  | "multiple_observed"
   | "history"
   | "unknown";
 
@@ -40,6 +46,7 @@ export interface VehicleData {
   model: string | null;
   engine: string | null;
   odometer: { value: number; unit: "km" | "mi" } | null;
+  odometerRaw?: string;
   vinMasked: string | null;
   vinPseudonym: string | null;
 }
@@ -54,13 +61,14 @@ export interface ParsedDtc {
   code: string;
   moduleCode: string | null;
   moduleName: string;
-  status: DtcStatus;
+  status: Exclude<DtcStatus, "multiple_observed">;
   statusOriginal: string | null;
   classification: DtcClassification;
   descriptionOriginal: string;
 }
 
 export interface AutelExtraction {
+  review?: ReportReviewEvidence;
   status: "completed" | "partial";
   format: "autel_vehicle_diagnostic_report";
   requiresManualReview: boolean;
@@ -106,6 +114,7 @@ interface AiAnalysisPreparationBase {
     detected: number;
     actionable: number;
     historical: number;
+    identities?: number;
   };
 }
 
@@ -126,6 +135,7 @@ export interface UploadResponseBody {
   size: number;
   sha256: string;
   contentToken: string;
+  extractionToken?: string;
   type: "application/pdf";
   status: "received";
   extraction: AutelExtraction;

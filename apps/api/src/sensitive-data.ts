@@ -69,12 +69,14 @@ export function containsSensitiveDiagnosticReport(
 ) {
   return containsSensitiveText(report.vehicle.make, "structured_identifier")
     || containsSensitiveText(report.vehicle.model, "structured_identifier")
+    || (report.reviewContext !== undefined && containsSensitiveValue(report.reviewContext, "source_text"))
     || report.modules.some((module) =>
       (module.code !== null && containsSensitiveText(module.code, "structured_identifier"))
       || containsSensitiveText(module.name, "structured_identifier")
       || module.dtcs.some((dtc) =>
         containsSensitiveText(dtc.code, "structured_identifier")
         || containsSensitiveText(dtc.description, "free_text")
+        || (dtc.observations !== undefined && containsSensitiveValue(dtc.observations, "source_text"))
       )
     );
 }

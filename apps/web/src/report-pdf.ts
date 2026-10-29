@@ -1,4 +1,6 @@
 import { jsPDF } from "jspdf";
+import { normalizeForMatch } from "../../../shared/technical-text.mjs";
+import { isReviewEvidence, type ReportReviewEvidence } from "./report-review-data";
 import { describeRagProvenance, isRagProvenance, type RagProvenance } from "./rag-provenance";
 
 export type ReportPriority = "critical" | "high" | "medium" | "low";
@@ -13,11 +15,13 @@ export interface ReportDtcReference {
 }
 
 export interface ReportExportSource {
+  review?: ReportReviewEvidence;
   vehicle: {
     make: string | null;
     model: string | null;
     year: number | null;
     odometer?: { value: number; unit: "km" | "mi" } | null;
+    odometerRaw?: string;
   };
   counts: { systems: number; detected: number; actionable: number; historical: number };
   actionableModules: Array<{
@@ -81,14 +85,17 @@ export interface ReportExportDtc extends ReportDtcReference {
   originalStatus: string | null;
   normalizedClassification: "actionable" | "historical";
   alsoHistorical: boolean;
+  observations?: Array<{ description: string; originalStatus: string | null }>;
 }
 
 export interface ReportExportModel {
+  review?: ReportReviewEvidence;
   vehicle: {
     make: string | null;
     model: string | null;
     year: number | null;
     odometer: { value: number; unit: "km" | "mi" } | null;
+    odometerRaw?: string;
   };
   summary: {
     systemsScanned: number;
@@ -278,8 +285,10 @@ function walkSafeText(value: unknown): void {
 }
 
 export function validateReportExportModel(model: ReportExportModel): void {
-  assertOnlyKeys(model, ["vehicle", "summary", "actionableDtcs", "historicalDtcs", "analysis", "observations", "rag"]);
-  assertOnlyKeys(model.vehicle, ["make", "model", "year", "odometer"]);
+  assertOnlyKeys(model, ["vehicle", "summary", "actionableDtcs", "historicalDtcs", "analysis", "observations", "rag", ...(model.review === undefined ? [] : ["review"])]);
+  if (model.review !== undefined && !isReviewEvidence(model.review, s => containsSensitiveReportText(s, "source_text"))) throw new ReportPdfValidationError();
+  assertOnlyKeys(model.vehicle, ["make", "model", "year", "odometer", ...(model.vehicle.odometerRaw === undefined ? [] : ["odometerRaw"])]);
+  if (model.vehicle.odometerRaw !== undefined && (typeof model.vehicle.odometerRaw !== "string" || model.vehicle.odometerRaw.length > 80)) throw new ReportPdfValidationError();
   assertOnlyKeys(model.summary, ["systemsScanned", "detectedRows", "actionableDtcs", "historicalRows", "findings"]);
   assertOnlyKeys(model.analysis, [
     "technicalSummary",
@@ -319,8 +328,14 @@ export function validateReportExportModel(model: ReportExportModel): void {
       "originalStatus",
       "normalizedClassification",
       "alsoHistorical",
+      ...(dtc.observations === undefined ? [] : ["observations"]),
     ]);
     assertReference({ code: dtc.code, moduleCode: dtc.moduleCode, moduleName: dtc.moduleName });
+    if (dtc.observations !== undefined && (!Array.isArray(dtc.observations) || dtc.observations.length < 1 || dtc.observations.length > 100000 ||
+      !dtc.observations.every(row => row && typeof row === "object" && Object.keys(row).every(k => ["description", "originalStatus"].includes(k)) &&
+        typeof row.description === "string" && row.description.length > 0 && row.description.length <= 1000 &&
+        (row.originalStatus === null || (typeof row.originalStatus === "string" && row.originalStatus.length <= 200)) &&
+        normalizeForMatch(row.description) === normalizeForMatch(dtc.description)))) throw new ReportPdfValidationError();
     if (
       typeof dtc.description !== "string" || dtc.description.length === 0 ||
       (dtc.originalStatus !== null && typeof dtc.originalStatus !== "string") ||
@@ -343,7 +358,7 @@ export function validateReportExportModel(model: ReportExportModel): void {
 
   if (
     typeof model.analysis.technicalSummary !== "string" || model.analysis.technicalSummary.length === 0 ||
-    !Array.isArray(model.analysis.findings) || model.analysis.findings.length === 0 ||
+    !Array.isArray(model.analysis.findings) || model.analysis.findings.length === 0 || model.analysis.findings.length > 50 ||
     !CONFIDENCES.has(model.analysis.confidence) ||
     model.analysis.requiresTechnicianConfirmation !== true
   ) {
@@ -459,17 +474,19 @@ export function buildReportExportModel(source: ReportExportSource): ReportExport
     const reference = { code: dtc.code, moduleCode: module.code, moduleName: module.name };
     const identity = dtcIdentity(reference);
     actionableIdentities.add(identity);
-    const documentary = source.documentaryDtcs.find((candidate) =>
-      dtcIdentity({ code: candidate.code, moduleCode: candidate.moduleCode, moduleName: candidate.moduleName }) === identity &&
-      candidate.normalizedClassification === "actionable"
+    const documentaryRows = source.documentaryDtcs.filter((candidate) =>
+      dtcIdentity({ code: candidate.code, moduleCode: candidate.moduleCode, moduleName: candidate.moduleName }) === identity
     );
-    if (!documentary || documentary.description !== dtc.description) throw new ReportPdfValidationError();
+    const documentary = documentaryRows.find(row => row.normalizedClassification === "actionable");
+    if (documentaryRows.some(row => normalizeForMatch(row.description) !== normalizeForMatch(dtc.description))) throw new ReportPdfValidationError();
+    if (!documentary || normalizeForMatch(documentary.description) !== normalizeForMatch(dtc.description)) throw new ReportPdfValidationError();
     return {
       ...reference,
       description: documentary.description,
-      originalStatus: documentary.originalStatus,
+      originalStatus: documentaryRows.every(row => row.originalStatus === null) ? null : [...new Set(documentaryRows.map(row => row.originalStatus ?? "No indicado"))].join("; "),
       normalizedClassification: "actionable" as const,
       alsoHistorical: dtc.alsoHistorical,
+      observations: documentaryRows.map(row => ({ description: row.description, originalStatus: row.originalStatus })),
     };
   }));
 
@@ -486,10 +503,12 @@ export function buildReportExportModel(source: ReportExportSource): ReportExport
   });
 
   const model: ReportExportModel = {
+    ...(source.review ? { review: structuredClone(source.review) } : {}),
     vehicle: {
       make: source.vehicle.make,
       model: source.vehicle.model,
       year: source.vehicle.year,
+      ...(source.vehicle.odometerRaw ? { odometerRaw: source.vehicle.odometerRaw } : {}),
       odometer: source.vehicle.odometer === undefined || source.vehicle.odometer === null
         ? null
         : { ...source.vehicle.odometer },
@@ -589,7 +608,7 @@ function priorityLabel(priority: ReportPriority) {
 }
 
 function classificationLabel(classification: ReportExportDtc["normalizedClassification"]) {
-  return classification === "actionable" ? "Accionable" : "Histórico";
+  return classification === "actionable" ? "Elegible para orientación; no confirma falla activa" : "Histórico";
 }
 
 export function renderReportPdf(model: ReportExportModel, generatedAt: Date, logo: PdfLogoSource): Uint8Array {
@@ -698,7 +717,7 @@ export function renderReportPdf(model: ReportExportModel, generatedAt: Date, log
   labelValue(
     "Odómetro",
     model.vehicle.odometer === null
-      ? "No disponible"
+      ? model.vehicle.odometerRaw ? `${model.vehicle.odometerRaw} (unidad no indicada)` : "No disponible"
       : `${model.vehicle.odometer.value.toLocaleString("es-GT")} ${model.vehicle.odometer.unit}`,
   );
 
@@ -711,6 +730,19 @@ export function renderReportPdf(model: ReportExportModel, generatedAt: Date, log
     ["Hallazgos generados", model.summary.findings],
   ] as const;
   for (const [label, value] of summaryItems) labelValue(label, String(value));
+
+  if (model.review) {
+    heading("Revisión y correcciones del usuario");
+    paragraph("Los valores efectivos no sustituyen la evidencia original. Esta revisión no acredita validación profesional.");
+    labelValue("Motivo", model.review.reason);
+    for (const d of model.review.decisions) {
+      labelValue(d.path, `${d.before ?? "No indicado"} -> ${d.after ?? "No indicado"}`);
+      labelValue("Motivo de la decisión", d.reason);
+    }
+    heading("Observaciones DTC originales antes de revisión");
+    for (const d of model.review.original.dtcs) paragraph(`${d.code} | ${d.moduleCode ?? ""} ${d.moduleName} | ${d.statusOriginal ?? "No indicado"} | ${d.descriptionOriginal}`);
+    paragraph(`Resumen original: ${model.review.original.scanSummary.declaredSystems ?? "?"} sistemas; ${model.review.original.scanSummary.declaredDtcs ?? "?"} observaciones. Filas interpretadas: ${model.review.original.dtcs.length}.`);
+  }
 
   heading("Observaciones del vehículo", 18);
   if (model.observations.status === "not_provided") {
@@ -750,6 +782,9 @@ export function renderReportPdf(model: ReportExportModel, generatedAt: Date, log
     });
     labelValue("Descripción documental", dtc.description);
     labelValue("Estado original", dtc.originalStatus ?? "No indicado");
+    if (dtc.observations && dtc.observations.length > 1) {
+      for (const [i, row] of dtc.observations.entries()) labelValue(`Observación original ${i + 1}`, `${row.description} | ${row.originalStatus ?? "No indicado"}`);
+    }
     labelValue("Clasificación normalizada", classificationLabel(dtc.normalizedClassification));
     if (dtc.alsoHistorical) paragraph("También existe como antecedente histórico.", { color: COLORS.orange, bold: true });
     y += 1;

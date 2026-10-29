@@ -5,6 +5,7 @@ import { resolveTrustedProxyIps } from "./trusted-proxies.js";
 export const DEFAULT_MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
 export const DEFAULT_OPENAI_TIMEOUT_MS = 60_000;
 export const DEFAULT_ANALYSIS_TOTAL_TIMEOUT_MS = 80_000;
+export const MAX_ANALYSIS_TOTAL_TIMEOUT_MS = 150_000;
 export const DEFAULT_ANALYSIS_IDEMPOTENCY_TTL_MS = 10 * 60_000;
 export const DEFAULT_ANALYSIS_IDEMPOTENCY_MAX_ENTRIES = 500;
 export const DEFAULT_DIAGNOSTIC_HISTORY_SAVE_TIMEOUT_MS = 2_000;
@@ -42,7 +43,7 @@ export function resolvePdfExtractionLimits(input: Partial<PdfExtractionLimits> =
 }
 
 const diagnosticHistorySaveTimeoutSchema = z.number().int().min(100).max(10_000);
-const analysisTotalTimeoutSchema = z.number().int().min(1).max(80_000);
+const analysisTotalTimeoutSchema = z.number().int().min(1).max(MAX_ANALYSIS_TOTAL_TIMEOUT_MS);
 
 export function resolveDiagnosticHistorySaveTimeout(value = DEFAULT_DIAGNOSTIC_HISTORY_SAVE_TIMEOUT_MS) {
   return diagnosticHistorySaveTimeoutSchema.parse(value);
@@ -114,7 +115,7 @@ const envSchema = z.object({
   ),
   OPENAI_TIMEOUT_MS: optionalIntegerFromEnvironment(1_000, 120_000, DEFAULT_OPENAI_TIMEOUT_MS),
   OPENAI_REASONING_EFFORT: optionalReasoningEffortSchema,
-  ANALYSIS_TOTAL_TIMEOUT_MS: optionalIntegerFromEnvironment(1_000, 80_000, DEFAULT_ANALYSIS_TOTAL_TIMEOUT_MS),
+  ANALYSIS_TOTAL_TIMEOUT_MS: optionalIntegerFromEnvironment(1_000, MAX_ANALYSIS_TOTAL_TIMEOUT_MS, DEFAULT_ANALYSIS_TOTAL_TIMEOUT_MS),
   ANALYSIS_IDEMPOTENCY_TTL_MS: optionalIntegerFromEnvironment(
     60_000,
     24 * 60 * 60_000,

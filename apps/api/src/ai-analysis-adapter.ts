@@ -1,4 +1,4 @@
-import { diagnosticAnalysisInputSchema, type DiagnosticAnalysisInput } from "./ai-analysis-types.js";
+import { diagnosticAnalysisInputSchema, historicalAnalysisInputSchema, MAX_ANALYSIS_DTCS, MAX_ANALYSIS_OBSERVATIONS, type DiagnosticAnalysisInput } from "./ai-analysis-types.js";
 import type {
   AiAnalysisAvailabilityReason,
   AiAnalysisPreparation,
@@ -7,17 +7,16 @@ import type {
   ScannedSystem,
 } from "./report-types.js";
 import { containsSensitiveDiagnosticReport } from "./sensitive-data.js";
-import { classifyDtcStatus, normalizeForMatch } from "./text-normalization.js";
+import { classifyDtcStatus, normalizeForMatch, matchesModuleIdentity } from "./text-normalization.js";
 
 const MAX_MODULES = 40;
-const MAX_DTCS_PER_MODULE = 20;
-const MAX_TOTAL_DTCS = 100;
+const MAX_DTCS_PER_MODULE = MAX_ANALYSIS_DTCS;
+const MAX_TOTAL_DTCS = MAX_ANALYSIS_DTCS;
 
 const GENERIC_EXTRACTION_WARNING = "La extracción incluye advertencias que deben revisarse antes de solicitar orientación.";
 
 function matchesSystem(system: ScannedSystem, dtc: ParsedDtc) {
-  if (system.code !== null) return dtc.moduleCode === system.code;
-  return dtc.moduleCode === null && dtc.moduleName === system.name;
+  return matchesModuleIdentity(system, dtc);
 }
 
 function hasRequiredText(value: string | null) {
@@ -32,14 +31,22 @@ function addReason(
   if (!reasons.some((reason) => reason.code === code)) reasons.push({ code, message });
 }
 
-export function prepareAiAnalysis(extraction: AutelExtraction): AiAnalysisPreparation {
+export function prepareAiAnalysis(extraction: AutelExtraction, options: { legacyRead?: boolean } = {}): AiAnalysisPreparation {
   const reasons: AiAnalysisAvailabilityReason[] = [];
   const warnings = extraction.warnings.length > 0 ? [GENERIC_EXTRACTION_WARNING] : [];
+  if (extraction.dtcs.some(dtc => ["on_demand", "continuous_memory"].includes(dtc.status))) {
+    warnings.push("ODDTCs indica prueba bajo demanda y CMDTCs memoria continua; ninguno confirma por sí solo una falla activa. Elegible para orientación no significa avería confirmada.");
+  }
   const counts = {
     detected: extraction.dtcs.length,
     actionable: 0,
     historical: extraction.dtcs.filter((dtc) => dtc.classification === "historical").length,
   };
+  const identities = new Set(extraction.dtcs.map(dtc => JSON.stringify([dtc.moduleCode, dtc.moduleName, dtc.code]))).size;
+  if (identities > (options.legacyRead ? 100 : MAX_ANALYSIS_DTCS) || (!options.legacyRead && extraction.dtcs.length > MAX_ANALYSIS_OBSERVATIONS)) {
+    addReason(reasons, "ANALYSIS_LIMIT_EXCEEDED", "El análisis admite como máximo 50 identidades código/módulo y 200 observaciones originales; no se truncará el reporte.");
+    return { available: false, reasons, warnings, counts };
+  }
 
   if (extraction.status !== "completed") {
     addReason(reasons, "EXTRACTION_INCOMPLETE", "La extracción debe estar completa antes de solicitar orientación por IA.");
@@ -120,24 +127,21 @@ export function prepareAiAnalysis(extraction: AutelExtraction): AiAnalysisPrepar
           "Un mismo DTC contiene descripciones contradictorias entre sus registros y requiere revisión manual.",
         );
       }
-      if (new Set(actionableRows.map((dtc) => dtc.status)).size > 1) {
-        addReason(
-          reasons,
-          "DTC_STATUS_CONFLICT",
-          "Un mismo DTC contiene varios estados accionables incompatibles y requiere revisión manual.",
-        );
-      }
-
       const selected = actionableRows[0]!;
       return [{
         code: selected.code,
         description: selected.descriptionOriginal,
-        status: selected.status,
+        status: new Set(actionableRows.map(dtc => dtc.status)).size > 1 ? "multiple_observed" as const : selected.status,
         alsoHistorical: rows.some((dtc) => dtc.classification === "historical"),
+        ...(rows.length <= 1 && !["on_demand", "continuous_memory", "provisional", "reviewed_uncertain"].includes(selected.status) ? {} : { observations: rows.map(row => ({
+          description: row.descriptionOriginal, status: row.status as Exclude<ParsedDtc["status"], "multiple_observed">, statusOriginal: row.statusOriginal,
+        })) }),
       }];
     });
 
     counts.actionable += dtcs.length;
+    // Reading history must also accept records saved by the current 50-DTC
+    // contract. The legacy schema below separately enforces its old 20/module.
     if (dtcs.length > MAX_DTCS_PER_MODULE) {
       addReason(reasons, "ANALYSIS_LIMIT_EXCEEDED", `Un módulo supera el límite de ${MAX_DTCS_PER_MODULE} DTC accionables para análisis.`);
     }
@@ -165,19 +169,28 @@ export function prepareAiAnalysis(extraction: AutelExtraction): AiAnalysisPrepar
         "El reporte contiene únicamente antecedentes históricos y no hay DTC accionables para orientar.",
       );
     } else {
-      addReason(reasons, "NO_VALID_DTCS", "El reporte no contiene DTC accionables válidos para analizar.");
+      addReason(reasons, "NO_VALID_DTCS", counts.detected > 0
+        ? "Se detectaron DTC, pero sus condiciones todavía no permiten solicitar orientación."
+        : "El reporte no contiene DTC accionables válidos para analizar.");
     }
   }
   if (modules.length > MAX_MODULES) {
     addReason(reasons, "ANALYSIS_LIMIT_EXCEEDED", `El reporte supera el límite de ${MAX_MODULES} módulos con DTC accionables.`);
   }
-  if (counts.actionable > MAX_TOTAL_DTCS) {
+  if (counts.actionable > (options.legacyRead ? 100 : MAX_TOTAL_DTCS)) {
     addReason(reasons, "ANALYSIS_LIMIT_EXCEEDED", `El reporte supera el límite de ${MAX_TOTAL_DTCS} DTC accionables para análisis.`);
   }
 
   let validatedInput: DiagnosticAnalysisInput | null = null;
-  if (make !== null && model !== null && year !== null) {
-    const validation = diagnosticAnalysisInputSchema.safeParse({ vehicle: { make, model, year }, modules });
+  if (make !== null && model !== null && year !== null && counts.actionable > 0) {
+    const candidate = { vehicle: { make, model, year }, modules,
+      ...(extraction.review ? { reviewContext: { version: "review_context_v2", provenance: "user_review_unverified", reason: extraction.review.reason,
+        correctedFields: extraction.review.decisions.map(d => d.path), decisions: extraction.review.decisions.map(d => ({ ...d })) } } : {}),
+    };
+    let validation = diagnosticAnalysisInputSchema.safeParse(candidate);
+    if (!validation.success && options.legacyRead) validation = historicalAnalysisInputSchema.safeParse({ ...candidate,
+      modules: modules.map(m => ({ ...m, dtcs: m.dtcs.map(d => { const { observations: _rows, ...legacy } = d; void _rows; return legacy; }) })),
+    });
     if (validation.success) {
       const codesWerePreserved = validation.data.modules.every((module, moduleIndex) =>
         module.dtcs.every((dtc, dtcIndex) => dtc.code === modules[moduleIndex]?.dtcs[dtcIndex]?.code),

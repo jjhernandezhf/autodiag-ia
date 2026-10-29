@@ -3,7 +3,10 @@ import request from "supertest";
 import { describe, expect, it, vi } from "vitest";
 
 import { DiagnosticAnalysisService } from "./ai-analysis-service.js";
+import { prepareAiAnalysis } from "./ai-analysis-adapter.js";
 import { createPdfContentToken } from "./analysis-fingerprint.js";
+import { createExtractionToken, reviewReport } from "./report-review.js";
+import { stableExtractionToken } from "../test-support/report-proof.js";
 import type { AuthenticationService } from "./auth-service.js";
 import { createApp, type AppOptions } from "./app.js";
 import {
@@ -56,7 +59,7 @@ const output = {
   requiresTechnicianConfirmation: true,
 } as const;
 
-const historyContext: HistoryCaptureContext = {
+const historyContextBase: HistoryCaptureContext = {
   reportReference: REPORT_ID,
   contentToken: createPdfContentToken(Buffer.from("%PDF-synthetic-history"), SECRET, USER_A),
   extraction: {
@@ -86,6 +89,10 @@ const historyContext: HistoryCaptureContext = {
     warnings: [],
   },
 };
+
+const historyContext: HistoryCaptureContext = { ...historyContextBase, get extractionToken(): string {
+  return stableExtractionToken(historyContextBase.extraction, USER_A, historyContextBase.reportReference, historyContextBase.contentToken!, SECRET);
+} };
 
 const authentication: AuthenticationService = {
   login: vi.fn(),
@@ -199,6 +206,60 @@ function analyze(app: ReturnType<typeof createApp>, body: unknown = { input, his
 }
 
 describe("integración HTTP del historial", () => {
+  it("recupera un análisis nuevo con 35 identidades en un módulo sin aplicar el límite legacy de 20", async () => {
+    const raw = structuredClone(historyContext.extraction);
+    raw.dtcs = Array.from({ length: 35 }, (_, i) => ({ ...raw.dtcs[0]!, code: i === 0 ? "P0300" : `P${String(1000 + i)}` }));
+    raw.systems[0]!.dtcCount = 35; raw.scanSummary.declaredDtcs = raw.scanSummary.parsedDtcs = 35;
+    const prep = prepareAiAnalysis(raw); if (!prep.available) throw Error("Synthetic capacity fixture");
+    const memory = createMemoryRepository(), { app, generate } = createTestApp(memory.service);
+    const response = await analyze(app, { input: { ...prep.input, observations: input.observations }, historyContext: {
+      ...historyContext, extraction: raw,
+      extractionToken: createExtractionToken(raw, USER_A, REPORT_ID, historyContext.contentToken!, SECRET),
+    } });
+    expect(response.status).toBe(200); expect(response.body.history.status).toBe("saved");
+    const detail = await request(app).get(`/api/history/${HISTORY_ID}`).set("Authorization", "Bearer user-a-token");
+    expect(detail.status).toBe(200); expect(detail.body.history.snapshot.analysis.input.modules[0].dtcs).toHaveLength(35);
+    expect(generate).toHaveBeenCalledOnce(); expect(memory.insert).toHaveBeenCalledOnce();
+  });
+  it("lee contexto de revisión v1 anterior sin regenerar ni perder su auditoría", async () => {
+    const raw = structuredClone(historyContext.extraction); raw.vehicle.year = null;
+    const contentToken = historyContext.contentToken!;
+    const reviewed = reviewReport({ reportReference: REPORT_ID, contentToken,
+      extractionToken: createExtractionToken(raw, USER_A, REPORT_ID, contentToken, SECRET), extraction: raw,
+      vehicle: input.vehicle, reason: "Año confirmado contra evidencia sintetica.",
+      rows: [{ sourceIndex: 0, moduleIndex: 0, code: "P0300", description: raw.dtcs[0]!.descriptionOriginal, state: "as_reported" }],
+    }, USER_A, SECRET)!;
+    if (!reviewed.analysisPreparation.available) throw Error("Synthetic review");
+    const memory = createMemoryRepository(), { app, generate } = createTestApp(memory.service);
+    expect((await analyze(app, { input: { ...reviewed.analysisPreparation.input, observations: input.observations },
+      historyContext: { reportReference: REPORT_ID, contentToken, extractionToken: reviewed.extractionToken, extraction: reviewed.extraction } })).status).toBe(200);
+    const snapshot = memory.rows[0]!.analysis_snapshot as { input: { reviewContext: unknown } };
+    snapshot.input.reviewContext = { version: "review_context_v1", reason: reviewed.extraction.review!.reason, correctedFields: ["vehicle.year"] };
+    const detail = await request(app).get(`/api/history/${HISTORY_ID}`).set("Authorization", "Bearer user-a-token");
+    expect(detail.status).toBe(200); expect(detail.body.history.snapshot.analysis.input.reviewContext.version).toBe("review_context_v1");
+    expect(detail.body.history.snapshot.extraction.review.original.vehicle.year).toBeNull(); expect(generate).toHaveBeenCalledOnce();
+  });
+  it("guarda y recupera originales y datos efectivos revisados sin regenerar", async () => {
+    const raw = structuredClone(historyContext.extraction); raw.vehicle.year = null;
+    const why = "Año confirmado contra documentacion sintetica autorizada.";
+    const reviewed = reviewReport({ reportReference: REPORT_ID, contentToken: historyContext.contentToken,
+      extractionToken: createExtractionToken(raw, USER_A, REPORT_ID, historyContext.contentToken!, SECRET), extraction: raw,
+      vehicle: input.vehicle, reason: why, rows: [{ sourceIndex: 0, moduleIndex: 0, code: "P0300", description: raw.dtcs[0]!.descriptionOriginal, state: "as_reported" }],
+    }, USER_A, SECRET)!;
+    expect(reviewed).not.toBeNull();
+    const memory = createMemoryRepository(), { app, generate } = createTestApp(memory.service);
+    if (!reviewed.analysisPreparation.available) throw Error("Synthetic review");
+    const response = await analyze(app, { input: { ...reviewed.analysisPreparation.input, observations: input.observations },
+      historyContext: { reportReference: REPORT_ID, contentToken: historyContext.contentToken, extraction: reviewed.extraction, extractionToken: reviewed.extractionToken } });
+    expect(response.status).toBe(200); expect(response.body.history.status).toBe("saved");
+    const detail = await request(app).get(`/api/history/${HISTORY_ID}`).set("Authorization", "Bearer user-a-token");
+    expect(detail.status).toBe(200);
+    expect(detail.body.history.snapshot.extraction.vehicle.year).toBe(2025);
+    expect(detail.body.history.snapshot.extraction.review.original.vehicle.year).toBeNull();
+    expect(detail.body.history.snapshot.analysis.input.reviewContext.reason).toBe(why);
+    expect(JSON.stringify(detail.body.history)).not.toMatch(/extractionToken|contentToken|vin_v1_/u);
+    expect(generate).toHaveBeenCalledOnce(); expect(memory.insert).toHaveBeenCalledOnce();
+  });
   it("conserva alcance en prompt, respuesta y snapshot sin llamadas nuevas al abrir historial", async () => {
     const provenance = ragProvenanceSchema.parse(JSON.parse(readFileSync(new URL("../../../fixtures/rag-provenance.synthetic.json", import.meta.url), "utf8")));
     const memory = createMemoryRepository();
@@ -346,6 +407,7 @@ describe("integración HTTP del historial", () => {
     const secondContext = {
       ...historyContext,
       reportReference: "55555555-5555-4555-8555-555555555555",
+      extractionToken: createExtractionToken(historyContext.extraction, USER_A, "55555555-5555-4555-8555-555555555555", historyContext.contentToken!, SECRET),
     };
     const response = await request(restarted.app)
       .post("/api/reports/analyze")
@@ -431,12 +493,13 @@ describe("integración HTTP del historial", () => {
     warning.mockRestore();
   });
 
-  it("conserva el contrato anterior sin contexto de historial", async () => {
+  it("rechaza generación anterior sin contexto validado; no guarda ni invoca IA", async () => {
     const memory = createMemoryRepository();
-    const { app } = createTestApp(memory.service);
+    const { app, generate } = createTestApp(memory.service);
     const response = await analyze(app, input);
-    expect(response.status).toBe(200);
-    expect(response.body.history).toEqual({ status: "unavailable" });
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe("AI_INPUT_INVALID");
+    expect(generate).not.toHaveBeenCalled();
     expect(memory.insert).not.toHaveBeenCalled();
   });
 

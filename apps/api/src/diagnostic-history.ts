@@ -1,9 +1,11 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
+import { reportReviewEvidenceSchema } from "./report-review-schema.js";
 
 import { prepareAiAnalysis } from "./ai-analysis-adapter.js";
 import {
   diagnosticAnalysisInputSchema,
+  historicalAnalysisInputSchema,
   diagnosticAnalysisOutputSchema,
   type DiagnosticAnalysisInput,
   type DiagnosticAnalysisOutput,
@@ -28,11 +30,16 @@ const dtcStatusSchema = z.enum([
   "pending",
   "permanent",
   "intermittent",
+  "on_demand",
+  "continuous_memory",
+  "provisional",
+  "reviewed_uncertain",
   "history",
   "unknown",
 ]);
 
 export const historyExtractionInputSchema = z.object({
+  review: reportReviewEvidenceSchema.optional(),
   status: z.enum(["completed", "partial"]),
   format: z.literal("autel_vehicle_diagnostic_report"),
   requiresManualReview: z.boolean(),
@@ -45,6 +52,7 @@ export const historyExtractionInputSchema = z.object({
       value: z.number().finite().nonnegative().max(100_000_000),
       unit: z.enum(["km", "mi"]),
     }).strict().nullable(),
+    odometerRaw: nonBlank(80).optional(),
     vinMasked: z.string().regex(/^\*{13}[A-HJ-NPR-Z0-9]{4}$/u).nullable(),
     vinPseudonym: z.string().regex(/^vin_v1_[a-f0-9]{64}$/u).nullable(),
   }).strict().superRefine((vehicle, context) => {
@@ -70,7 +78,7 @@ export const historyExtractionInputSchema = z.object({
     status: dtcStatusSchema,
     statusOriginal: nullableNonBlank(120),
     classification: z.enum(["actionable", "historical", "unknown"]),
-    descriptionOriginal: nonBlank(1_000),
+    descriptionOriginal: z.string().max(1_000),
   }).strict()).max(100_000),
   warnings: z.array(z.object({
     code: nonBlank(80),
@@ -81,6 +89,7 @@ export const historyExtractionInputSchema = z.object({
 export const historyCaptureContextSchema = z.object({
   reportReference: z.string().uuid(),
   contentToken: z.string().regex(/^pdf_v1_[0-9a-f]{64}\.[0-9a-f]{64}$/u).optional(),
+  extractionToken: z.string().regex(/^review_v1_\d{13}\.[0-9a-f]{64}$/u).optional(),
   extraction: historyExtractionInputSchema,
 }).strict();
 
@@ -110,17 +119,19 @@ const historyExtractionSnapshotSchema = historyExtractionInputSchema.extend({
       value: z.number().finite().nonnegative().max(100_000_000),
       unit: z.enum(["km", "mi"]),
     }).strict().nullable(),
+    odometerRaw: nonBlank(80).optional(),
     vinMasked: z.string().regex(/^\*{13}[A-HJ-NPR-Z0-9]{4}$/u).nullable(),
     vinPseudonym: z.null(),
   }).strict(),
 });
 
 const historyAnalysisSnapshotSchema = z.object({
-  input: diagnosticAnalysisInputSchema,
+  input: historicalAnalysisInputSchema,
   counts: z.object({
     detected: z.number().int().nonnegative(),
     actionable: z.number().int().nonnegative(),
     historical: z.number().int().nonnegative(),
+    identities: z.number().int().nonnegative().optional(),
   }).strict(),
   output: diagnosticAnalysisOutputSchema,
   submittedObservations: z.string().max(1_000),
@@ -310,12 +321,19 @@ function sanitizeRagMetadata(value: RagMetadata): RagMetadata {
   return ragMetadataSchema.parse({ ...value, sources: cleanSources });
 }
 
-function sameAnalysisReport(left: DiagnosticAnalysisInput, right: DiagnosticAnalysisInput) {
+function sameAnalysisReport(left: DiagnosticAnalysisInput, right: DiagnosticAnalysisInput, legacyRead = false) {
   const withoutObservations = ({ observations: _observations, ...report }: DiagnosticAnalysisInput) => {
     void _observations;
     return report;
   };
-  return JSON.stringify(withoutObservations(left)) === JSON.stringify(withoutObservations(right));
+  const effective = legacyRead ? { ...left, modules: left.modules.map((m, mi) => ({ ...m, dtcs: m.dtcs.map((d, di) => {
+    if (right.modules[mi]?.dtcs[di]?.observations !== undefined) return d;
+    const { observations: _rows, ...legacy } = d; void _rows; return legacy;
+  }) })) } : left;
+  const comparable = legacyRead && effective.reviewContext?.version === "review_context_v2" && right.reviewContext?.version === "review_context_v1"
+    ? { ...effective, reviewContext: { version: "review_context_v1", reason: effective.reviewContext.reason, correctedFields: effective.reviewContext.correctedFields } }
+    : effective;
+  return JSON.stringify(withoutObservations(comparable as DiagnosticAnalysisInput)) === JSON.stringify(withoutObservations(right));
 }
 
 function analysisOutputMatchesInput(
@@ -392,6 +410,7 @@ export function buildHistoryInsertRecord(raw: HistorySaveInput): HistoryInsertRe
     systems: context.data.extraction.systems.map((system) => ({ ...system })),
     dtcs: context.data.extraction.dtcs.map((dtc) => ({ ...dtc })),
     warnings: context.data.extraction.warnings.map((warning) => ({ ...warning })),
+    ...(context.data.extraction.review ? { review: context.data.extraction.review } : {}),
   });
   const submittedObservations = input.data.observations ?? "";
   const analysisSnapshot = historyAnalysisSnapshotSchema.parse({
@@ -522,10 +541,10 @@ export class DiagnosticHistoryService {
     if (JSON.stringify(sanitizedRag) !== JSON.stringify(row.data.rag_snapshot)) {
       throw new DiagnosticHistoryError("HISTORY_DATA_INVALID");
     }
-    const preparation = prepareAiAnalysis(row.data.extraction_snapshot);
+    const preparation = prepareAiAnalysis(row.data.extraction_snapshot, { legacyRead: !row.data.extraction_snapshot.review });
     if (
       !preparation.available ||
-      !sameAnalysisReport(preparation.input, row.data.analysis_snapshot.input) ||
+      !sameAnalysisReport(preparation.input, row.data.analysis_snapshot.input, true) ||
       !countsMatch(preparation.counts, row.data.analysis_snapshot.counts) ||
       row.data.analysis_snapshot.submittedObservations !== (row.data.analysis_snapshot.input.observations ?? "") ||
       !analysisOutputMatchesInput(row.data.analysis_snapshot.input, row.data.analysis_snapshot.output) ||
