@@ -23,7 +23,9 @@ export interface ReportReviewEvidence {
 }
 export interface LimitedGuidance {
   mode: "limited_guidance_v1"; coverage: "reviewed_rows_only"; limitations: string[];
-  positions: Array<{ rowIndex: number; page: number | null; line: number | null; provenance: "parser_row_reviewed" | "manual_transcription"; reason: string }>;
+  positions: Array<{ rowIndex: number; sourceIndex?: number | null; page: number | null; line: number | null; provenance: "parser_row_reviewed" | "manual_transcription"; reason: string }>;
+  omittedRows?: Array<{ sourceIndex: number; reason: "missing_technical_minimum" | "excluded_by_user" | "description_conflict" | "historical_only" }>;
+  userNotes?: string;
 }
 const record = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
 const keys = (v: Record<string, unknown>, allowed: string[]) => Object.keys(v).every(k => allowed.includes(k));
@@ -80,9 +82,11 @@ export function isReviewContext(value: unknown, sensitive: (s: string) => boolea
 }
 export function isLimitedGuidance(v: unknown, sensitive: (s: string) => boolean): v is LimitedGuidance | undefined {
   if (v === undefined) return true;
-  return record(v) && keys(v, ["mode", "coverage", "limitations", "positions"]) && v.mode === "limited_guidance_v1" && v.coverage === "reviewed_rows_only" &&
+  return record(v) && keys(v, ["mode", "coverage", "limitations", "positions", "omittedRows", "userNotes"]) && v.mode === "limited_guidance_v1" && v.coverage === "reviewed_rows_only" &&
+    (v.userNotes === undefined || (typeof v.userNotes === "string" && v.userNotes.length <= 300 && !sensitive(v.userNotes))) &&
+    (v.omittedRows === undefined || (Array.isArray(v.omittedRows) && v.omittedRows.length <= 200 && v.omittedRows.every(r => record(r) && keys(r, ["sourceIndex", "reason"]) && count(r.sourceIndex, 199) && ["missing_technical_minimum", "excluded_by_user", "description_conflict", "historical_only"].includes(String(r.reason))))) &&
     Array.isArray(v.limitations) && v.limitations.length > 0 && v.limitations.length <= 510 && v.limitations.every(s => text(s, 500) && !sensitive(s)) &&
-    Array.isArray(v.positions) && v.positions.length > 0 && v.positions.length <= 200 && v.positions.every(p => record(p) && keys(p, ["rowIndex", "page", "line", "provenance", "reason"]) &&
+    Array.isArray(v.positions) && v.positions.length > 0 && v.positions.length <= 200 && v.positions.every(p => record(p) && keys(p, ["rowIndex", "sourceIndex", "page", "line", "provenance", "reason"]) && (p.sourceIndex === undefined || p.sourceIndex === null || count(p.sourceIndex, 199)) &&
       count(p.rowIndex, 199) && (p.page === null || (count(p.page, 1000) && p.page > 0)) && (p.line === null || (count(p.line, 100000) && p.line > 0)) &&
       ["parser_row_reviewed", "manual_transcription"].includes(String(p.provenance)) && text(p.reason, 500) && p.reason.trim().length >= 10 && !sensitive(p.reason));
 }

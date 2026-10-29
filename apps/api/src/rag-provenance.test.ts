@@ -173,7 +173,7 @@ describe("procedencia RAG acotada y aplicabilidad conservadora", () => {
   });
 
   it("versiona las reglas nuevas sin cambiar el corpus; separa idempotencia de la política legacy", () => {
-    expect(ANALYSIS_PIPELINE_VERSION).toBe("analysis_pipeline_v4_limited_guidance");
+    expect(ANALYSIS_PIPELINE_VERSION).toBe("analysis_pipeline_v5_progressive_review");
     const base = { input, extraction: {}, contentFingerprint: "fixture", analysisModel: "fixture", promptVersion: "fixture", outputSchemaVersion: "fixture", embeddingModel: "fixture", corpusVersion: "demonstration_corpus_v1", rag: { enabled: true, matchCount: 3, matchThreshold: 0.7, maxContextCharacters: 6000 } };
     const secret = "synthetic-provenance-secret-with-32-bytes";
     const current = createAnalysisFingerprint(base, secret);

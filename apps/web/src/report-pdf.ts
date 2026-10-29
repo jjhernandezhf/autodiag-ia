@@ -736,6 +736,7 @@ export function renderReportPdf(model: ReportExportModel, generatedAt: Date, log
       heading("ORIENTACIÓN LIMITADA — conjunto posiblemente incompleto");
       for (const limitation of model.review.limited.limitations) paragraph(limitation);
       for (const p of model.review.limited.positions) paragraph(`Fila ${p.rowIndex + 1}; página ${p.page ?? "no capturada"}; línea ${p.line ?? "no capturada"}; ${p.provenance}. ${p.reason}`);
+      for (const omitted of model.review.limited.omittedRows ?? []) paragraph(`Fila original ${omitted.sourceIndex + 1} fuera de la orientación: ${omitted.reason}. Se conserva en los originales.`);
     }
     heading("Revisión y correcciones del usuario");
     paragraph("Los valores efectivos no sustituyen la evidencia original. Esta revisión no acredita validación profesional.");
@@ -745,6 +746,7 @@ export function renderReportPdf(model: ReportExportModel, generatedAt: Date, log
       labelValue("Motivo de la decisión", d.reason);
     }
     heading("Observaciones DTC originales antes de revisión");
+    for (const s of model.review.original.systems) paragraph(`Sistema original: ${s.code ?? ""} ${s.name}; conteo declarado ${s.dtcCount}.`);
     for (const d of model.review.original.dtcs) paragraph(`${d.code} | ${d.moduleCode ?? ""} ${d.moduleName} | ${d.statusOriginal ?? "No indicado"} | ${d.descriptionOriginal}`);
     paragraph(`Resumen original: ${model.review.original.scanSummary.declaredSystems ?? "?"} sistemas; ${model.review.original.scanSummary.declaredDtcs ?? "?"} observaciones. Filas interpretadas: ${model.review.original.dtcs.length}.`);
   }

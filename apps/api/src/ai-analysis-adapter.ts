@@ -8,6 +8,7 @@ import type {
 } from "./report-types.js";
 import { containsSensitiveDiagnosticReport } from "./sensitive-data.js";
 import { classifyDtcStatus, normalizeForMatch, matchesModuleIdentity } from "./text-normalization.js";
+import { isSupportedDtcCode } from "../../../shared/technical-text.mjs";
 
 const MAX_MODULES = 40;
 const MAX_DTCS_PER_MODULE = MAX_ANALYSIS_DTCS;
@@ -85,6 +86,7 @@ export function prepareAiAnalysis(extraction: AutelExtraction, options: { legacy
     extraction.dtcs.some(
       (dtc) =>
         dtc.code.length === 0 ||
+        !isSupportedDtcCode(dtc.code) ||
         dtc.code !== dtc.code.trim() ||
         dtc.descriptionOriginal.trim().length === 0 ||
         dtc.moduleName.trim().length === 0 ||

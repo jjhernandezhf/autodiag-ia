@@ -425,7 +425,7 @@ export function createApp(options: AppOptions) {
   app.post("/api/reports/review", requireAuthentication, (request, response) => {
     const reviewed = reviewReport(request.body, request.usuario!.id, options.vinHmacSecret);
     if (!reviewed) {
-      sendError(response, 400, "REPORT_REVIEW_INVALID", "No se pudo validar la revisión. Conserva las filas originales, explica cada corrección y vuelve a cargar el PDF si la referencia venció.");
+      sendError(response, 400, "REPORT_REVIEW_INVALID", "No se pudo validar la revisión. Aporta al menos un código literal y descripción técnica utilizables; revisa duplicados, límites y referencia vigente. No inventes datos para continuar.");
       return;
     }
     response.json(reviewed);

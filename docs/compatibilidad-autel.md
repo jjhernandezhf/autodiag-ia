@@ -739,3 +739,52 @@ un servicio para el cierre. La migración conserva **solo revisión estática**,
 sin comprobación real de restricciones/permisos en PostgreSQL. La simulación
 anterior demuestra el comportamiento HTTP, no sustituye la validación de la base.
 La suite API global continúa no aprobada y el timeout PDF sigue pendiente.
+
+### Revisión mínima y progresiva — 2026-10-29
+
+El workspace utiliza ahora **Continuar con la información disponible**: conserva
+los datos ya validados y solo ofrece completar los pendientes. **Ver datos
+extraídos** permite inspeccionar originales; **Editar otro dato** es opcional.
+Esta interacción sustituye los requisitos de motivos libres y retranscripción
+del panel anterior; los contratos históricos siguen siendo legibles.
+
+| Impedimento | Acción disponible | Límite conservado |
+| --- | --- | --- |
+| Vehículo incompleto | Completar los campos pendientes o dejarlos desconocidos | No se infieren valores ni compatibilidad |
+| Código literal o estado desconocido | Conservar literal y continuar con incertidumbre | Nunca se convierte un estado desconocido en activo |
+| Código/descripción ilegibles | Completar la fila o excluirla de la orientación | Original e índice excluido quedan registrados |
+| Módulo ausente | Completar nombre/código opcionalmente | Asociación desconocida explícita |
+| Conteos discrepantes o extracción parcial | Continuar sobre filas útiles revisadas | No declara extracción completa ni cobertura de todo el PDF |
+| Más de 50 identidades | Excluir filas explícitamente hasta cumplir el límite | No selecciona silenciosamente las primeras 50; máximo 200 observaciones |
+| Información no recuperada | Transcripción técnica opcional | Código legible y descripción necesarios; procedencia manual |
+| Ninguna fila útil | Aportar al menos un código y descripción | No hay generación basada solo en síntomas: requeriría otro contrato |
+| Cero DTC coherentes/completos | Resultado informativo | Sin IA ni transcripción obligatoria |
+| PDF corrupto, ilegible o sobre límites | Mensaje de impedimento y nuevo archivo | No se omiten controles del extractor |
+| Red, proveedor o timeout | Recuperación/reintento explícito | No se convierten fallos técnicos en éxito ni se analizan al editar |
+
+El backend deriva cambios y omisiones desde la extracción firmada. Mantiene
+vinculación usuario/reporte/contenido, vigencia y sustitución atómica de prueba;
+una extracción completa sin cambios conserva su prueba sin confirmación extra.
+Notas libres opcionales, originales y decisiones son datos no confiables, no
+instrucciones del sistema ni revisión profesional. Los motivos automáticos
+describen únicamente la acción realizada; no inventan una explicación técnica.
+Las omisiones conservan índice y motivo, originales y conteos declarados; el
+contexto real Responses, historial y PDF mantienen las limitaciones.
+
+Versiones: `diagnostic_prompt_v7_progressive_review` y
+`analysis_pipeline_v5_progressive_review`, incluidas en el fingerprint. No cambian
+modelo, corpus, presupuestos, autenticación ni migraciones. Sigue pendiente la
+migración nullable indicada arriba: sin ella el análisis puede terminar pero el
+guardado devuelve honestamente `unavailable`, sin recuperación retroactiva.
+
+Verificación local de este delta: ocho archivos API, **179/179**, y cinco archivos
+frontend, **155/155**. Después se añadió la regresión de mínimos ilegibles:
+archivo progresivo **26/26** (incluye pruebas anteriores; no sumar íntegramente).
+Se probaron variantes sintéticas parametrizadas, transporte simulado Responses,
+guardado, identidad/caducidad/alteración, omisiones, límites y limpieza tardía.
+No se releyeron los siete PDF privados ni se efectuó ensayo visual interactivo;
+las pruebas sintéticas no demuestran calidad diagnóstica. Los primeros fallos
+del desarrollo incluyeron una detección real de código literal en elegibilidad
+completa (corregida) y expectativas UI del flujo sustituido (actualizadas al
+contrato nuevo). La suite global API sigue **no aprobada**: los dos fallos n8n
+demostrados en la base son distintos del timeout PDF de causa desconocida.

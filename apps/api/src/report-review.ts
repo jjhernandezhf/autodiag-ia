@@ -8,7 +8,7 @@ import { reportReviewEvidenceSchema, type ReportReviewEvidence } from "./report-
 import type { AutelExtraction } from "./report-types.js";
 import { classifyDtcStatus, normalizeDtcStatus } from "./text-normalization.js";
 import { containsSensitiveValue } from "./sensitive-data.js";
-import { isSupportedDtcCode, normalizeForMatch } from "../../../shared/technical-text.mjs";
+import { isSupportedDtcCode, isLiteralDtcCode, normalizeForMatch } from "../../../shared/technical-text.mjs";
 
 const proofSchema = z.string().regex(/^review_v1_\d{13}\.[0-9a-f]{64}$/u);
 const PROOF_TTL_MS = 60 * 60 * 1000;
@@ -84,6 +84,7 @@ function originalEvidence(extraction: AutelExtraction): ReportReviewEvidence["or
 }
 
 export function reviewReport(raw: unknown, userId: string, secret: string) {
+  if (raw && typeof raw === "object" && "mode" in raw && raw.mode === "progressive_review_v1") return reviewProgressiveReport(raw, userId, secret);
   if (raw && typeof raw === "object" && "mode" in raw) return reviewLimitedReport(raw, userId, secret);
   const parsed = requestSchema.safeParse(raw);
   if (!parsed.success) return null;
@@ -186,12 +187,15 @@ const limitedRequestSchema = requestSchema.omit({ reviewedWarnings: true, counts
     code: z.string().trim().min(1).max(32),
     moduleIndex: z.number().int().min(0).max(99).nullable(),
     moduleName: z.string().trim().min(1).max(160).nullable(),
+    moduleCode: z.string().trim().min(1).max(32).nullable().optional(),
+    statusLabel: z.string().trim().min(1).max(120).nullable().optional(),
     page: z.number().int().min(1).max(1000).nullable(), line: z.number().int().min(1).max(100000).nullable(),
     reason,
   }).strict()).min(1).max(MAX_ANALYSIS_OBSERVATIONS),
 }).strict();
 
-function reviewLimitedReport(raw: unknown, userId: string, secret: string) {
+type OmittedRows = NonNullable<NonNullable<ReportReviewEvidence["limited"]>["omittedRows"]>;
+function reviewLimitedReport(raw: unknown, userId: string, secret: string, progressive?: { omittedRows: OmittedRows; userNotes?: string }) {
   const parsed = limitedRequestSchema.safeParse(raw);
   if (!parsed.success) return null;
   const d = parsed.data;
@@ -211,6 +215,11 @@ function reviewLimitedReport(raw: unknown, userId: string, secret: string) {
   const limitations = ["Solo filas revisadas. El conjunto puede estar incompleto. No se confirma una avería ni la integridad del reporte.",
     "Tipo documental y transcripción declarados por el usuario; no son una verificación del fabricante."];
   for (const a of d.acknowledgements) { limitations.push(`${a.code}: ${a.reason}`); decisions.push({ path: "extraction", before: a.code, after: "Limitación reconocida, no resuelta", reason: a.reason }); }
+  if (progressive?.omittedRows.length) {
+    limitations.push(`${progressive.omittedRows.length} filas originales quedan fuera de la orientación; permanecen en la evidencia original con sus índices y causas.`);
+    for (const omitted of progressive.omittedRows) decisions.push({ path: "extraction", before: `Fila original ${omitted.sourceIndex + 1}`,
+      after: `No enviada a IA: ${omitted.reason}`, reason: "Continuación sobre el subconjunto útil; no se elimina la fila original." });
+  }
   for (const field of ["make", "model", "year"] as const) {
     decisions.push({ path: `vehicle.${field}`, before: original.vehicle[field] === null ? null : String(original.vehicle[field]),
       after: d.vehicle[field] === null ? null : String(d.vehicle[field]), reason: d.reason });
@@ -222,37 +231,42 @@ function reviewLimitedReport(raw: unknown, userId: string, secret: string) {
   const seen = new Set<number>();
   for (const [index, row] of d.rows.entries()) {
     const source = row.sourceIndex === null ? undefined : original.dtcs[row.sourceIndex];
-    if (row.sourceIndex !== null && (!source || seen.has(row.sourceIndex) || row.sourceIndex !== index)) return null;
+    if (row.sourceIndex !== null && (!source || seen.has(row.sourceIndex) || (!progressive && row.sourceIndex !== index))) return null;
     if (row.sourceIndex !== null) seen.add(row.sourceIndex);
-    if (row.sourceIndex === null && row.page === null) return null; // New transcription needs a document locator.
-    if (source && row.statusLabel !== undefined && row.statusLabel !== source.statusOriginal) return null;
+    if (!progressive && row.sourceIndex === null && row.page === null) return null;
+    if (!progressive && (row.moduleCode !== undefined || (source && row.statusLabel !== undefined && row.statusLabel !== source.statusOriginal))) return null;
     const originalSystem = row.moduleIndex === null ? undefined : original.systems[row.moduleIndex];
     if (row.moduleIndex !== null && !originalSystem) return null;
     if (originalSystem && row.moduleName !== null && row.moduleName !== originalSystem.name) return null;
-    const module = originalSystem ?? { code: null, name: row.moduleName ?? `Módulo no confirmado (fila ${index + 1})`, dtcCount: 0 };
+    const module = originalSystem ?? { code: progressive ? row.moduleCode ?? null : null, name: row.moduleName ?? `Módulo no confirmado (fila ${index + 1})`, dtcCount: 0 };
     if (!originalSystem && !row.moduleName) limitations.push(`Fila ${index + 1}: módulo desconocido; el rótulo de fila no es una identidad de módulo confirmada. Excluir procedimientos específicos del módulo.`);
-    const label = source?.statusOriginal ?? row.statusLabel ?? null;
+    if (progressive && !originalSystem && row.moduleName) limitations.push(`Fila ${index + 1}: módulo literal conservado sin asociación confirmada a la tabla de sistemas; no autoriza procedimientos específicos.`);
+    const label = progressive && row.statusLabel !== undefined ? row.statusLabel : source?.statusOriginal ?? row.statusLabel ?? null;
     const normalized = normalizeDtcStatus(label);
-    if ((normalized === "unknown" || !isSupportedDtcCode(row.code) || !row.moduleName && !originalSystem) && row.state !== "reviewed_uncertain") return null;
+    if ((normalized === "unknown" || !isSupportedDtcCode(row.code) || !row.moduleName && !originalSystem) && row.state !== "reviewed_uncertain" && !(progressive && normalized !== "unknown")) return null;
     const status = row.state === "reviewed_uncertain" ? "reviewed_uncertain" as const : normalized;
-    if (!isSupportedDtcCode(row.code) && !/^[\p{L}\p{N}][\p{L}\p{N}:?._ /-]{0,31}$/u.test(row.code)) return null;
+    if (!isLiteralDtcCode(row.code)) return null;
     if (dtcs.some(r => r.code === row.code && ((r.moduleCode === module.code && r.moduleName === module.name) ||
       (!originalSystem && !row.moduleName && r.moduleCode === null && /^Módulo no confirmado \(fila \d+\)$/u.test(r.moduleName))) &&
       r.statusOriginal === label && normalizeForMatch(r.descriptionOriginal) === normalizeForMatch(row.description)) && !source && !row.duplicateReason) return null;
     if (!systems.some(s => s.code === module.code && s.name === module.name)) systems.push({ ...module, dtcCount: 0 });
     for (const [field, before, after] of [["code", source?.code ?? null, row.code], ["description", source?.descriptionOriginal ?? null, row.description],
       ["module", source ? `${source.moduleCode ?? ""} · ${source.moduleName}` : null, `${module.code ?? ""} · ${module.name}`],
-      ["status", label, status]] as const) decisions.push({ path: `rows.${index}.${field}`, before, after, reason: row.reason });
+      ["status", progressive ? source?.status ?? null : source?.statusOriginal ?? null, status]] as const) {
+      if (!progressive || before !== after) decisions.push({ path: `rows.${row.sourceIndex ?? index}.${field}`, before, after, reason: row.reason });
+    }
     dtcs.push({ code: row.code, moduleCode: module.code, moduleName: module.name, descriptionOriginal: row.description,
       status, statusOriginal: label, classification: classifyDtcStatus(status) });
-    positions.push({ rowIndex: index, page: row.page, line: row.line, provenance: source ? "parser_row_reviewed" : "manual_transcription", reason: row.reason });
+    positions.push({ rowIndex: index, ...(progressive ? { sourceIndex: row.sourceIndex } : {}), page: row.page, line: row.line, provenance: source ? "parser_row_reviewed" : "manual_transcription", reason: row.reason });
     if (!isSupportedDtcCode(row.code)) limitations.push(`Fila ${index + 1}: código literal no reconocido; no interpretar equivalencias ni atribuir una definición confirmada.`);
     if (row.duplicateReason) decisions.push({ path: "extraction", before: "Posible repetición de fila", after: `Fila ${index + 1}: observación independiente declarada`, reason: row.duplicateReason });
   }
-  if (seen.size !== original.dtcs.length) return null;
+  const omitted = progressive?.omittedRows ?? [];
+  if (seen.size + omitted.length !== original.dtcs.length || new Set(omitted.map(r => r.sourceIndex)).size !== omitted.length ||
+    omitted.some(r => !original.dtcs[r.sourceIndex] || seen.has(r.sourceIndex))) return null;
   for (const s of systems) s.dtcCount = dtcs.filter(r => r.moduleCode === s.code && r.moduleName === s.name).length;
   const evidence = reportReviewEvidenceSchema.safeParse({ version: "report_review_v1", reason: d.reason, original, decisions,
-    limited: { mode: d.mode, coverage: "reviewed_rows_only", limitations, positions } });
+    limited: { mode: d.mode, coverage: "reviewed_rows_only", limitations, positions, ...(progressive ? { omittedRows: omitted, ...(progressive.userNotes === undefined ? {} : { userNotes: progressive.userNotes }) } : {}) } });
   if (!evidence.success || containsSensitiveValue({ vehicle: d.vehicle, dtcs, evidence: evidence.data }, "source_text")) return null;
   const effective: AutelExtraction = { ...d.extraction, vehicle: { ...d.extraction.vehicle, ...d.vehicle }, status: "partial", requiresManualReview: true,
     systems, dtcs, review: evidence.data, scanSummary: { ...original.scanSummary, parsedSystems: systems.length, parsedDtcs: dtcs.length },
@@ -261,6 +275,107 @@ function reviewLimitedReport(raw: unknown, userId: string, secret: string) {
   if (!preparation.available) return null;
   const token = currentProofs.issue(effective, userId, d.reportReference, d.contentToken, secret, expires, d.extractionToken);
   return token === null ? null : { extraction: effective, analysisPreparation: preparation, extractionToken: token };
+}
+
+const progressiveRowPatch = z.object({ sourceIndex: z.number().int().min(0).max(199),
+  action: z.enum(["use", "omit"]).default("use"), code: z.string().trim().max(32).nullable().optional(),
+  description: z.string().trim().max(1000).nullable().optional(), moduleName: z.string().trim().min(1).max(160).nullable().optional(),
+  moduleCode: z.string().trim().min(1).max(32).nullable().optional(), statusOriginal: z.string().trim().min(1).max(120).nullable().optional(),
+}).strict();
+const progressiveRequest = z.object({ mode: z.literal("progressive_review_v1"), reportReference: z.string().uuid(),
+  contentToken: z.string().max(150), extractionToken: proofSchema, extraction: historyExtractionInputSchema,
+  vehicle: diagnosticAnalysisInputSchema.shape.vehicle.partial().optional(),
+  actions: z.array(progressiveRowPatch).max(200).default([]), notes: z.string().trim().max(300).optional(),
+  additionalRows: z.array(z.object({ code: z.string().trim().min(1).max(32), description: z.string().trim().min(1).max(1000),
+    moduleCode: z.string().trim().min(1).max(32).nullable().optional(), moduleName: z.string().trim().min(1).max(160).nullable().optional(),
+    statusOriginal: z.string().trim().min(1).max(120).nullable().optional(),
+    duplicate: z.literal("separate_observation").optional(),
+  }).strict()).max(200).default([]),
+}).strict();
+
+function reviewProgressiveReport(raw: unknown, userId: string, secret: string) {
+  const parsed = progressiveRequest.safeParse(raw);
+  if (!parsed.success) return null;
+  const d = parsed.data;
+  if (verifyExtractionToken(d.extractionToken, d.extraction, userId, d.reportReference, d.contentToken, secret) === null) return null;
+  const original = originalEvidence(d.extraction);
+  if (original.dtcs.length > 200 || original.systems.length > 100) return null;
+  const patches = new Map(d.actions.map(a => [a.sourceIndex, a]));
+  if (patches.size !== d.actions.length || d.actions.some(a => !original.dtcs[a.sourceIndex])) return null;
+  const unchanged = !d.actions.length && !d.additionalRows.length && d.notes === undefined &&
+    Object.entries(d.vehicle ?? {}).every(([key, value]) => d.extraction.vehicle[key as "make" | "model" | "year"] === value);
+  const ready = prepareAiAnalysis(d.extraction);
+  // Complete, already eligible reports need no extra human confirmation or proof rotation.
+  if (unchanged && ready.available) return { extraction: d.extraction, analysisPreparation: ready, extractionToken: d.extractionToken };
+  const automaticReason = "Acción del usuario: continuar con la información disponible; sin acreditar evidencia consultada ni revisión profesional.";
+  const userNotes = d.notes ?? d.extraction.review?.limited?.userNotes;
+  const reasonText = userNotes ? `Continuación con información disponible. Nota opcional del usuario: ${userNotes}` : automaticReason;
+  type Row = z.infer<typeof limitedRequestSchema>["rows"][number];
+  const rows: Row[] = [], omittedRows: OmittedRows = [], currentUsed = new Set<number>();
+  const previousOmissions = new Map((d.extraction.review?.limited?.omittedRows ?? []).map(r => [r.sourceIndex, r.reason]));
+  const currentIndex = (sourceIndex: number) => {
+    const positions = d.extraction.review?.limited?.positions;
+    return positions ? positions.find(p => (p.sourceIndex === undefined ? (p.provenance === "parser_row_reviewed" ? p.rowIndex : null) : p.sourceIndex) === sourceIndex)?.rowIndex : sourceIndex;
+  };
+  const makeRow = (sourceIndex: number | null, base: AutelExtraction["dtcs"][number], patch?: z.infer<typeof progressiveRowPatch>): Row => {
+    const code = patch?.code === undefined ? base.code : patch.code ?? "";
+    const description = patch?.description === undefined ? base.descriptionOriginal : patch.description ?? "";
+    const moduleName = patch?.moduleName === undefined ? base.moduleName : patch.moduleName;
+    const moduleCode = patch?.moduleCode === undefined ? base.moduleCode : patch.moduleCode;
+    const moduleIndex = original.systems.findIndex(s => s.code === moduleCode && s.name === moduleName);
+    const statusLabel = patch?.statusOriginal === undefined ? base.statusOriginal : patch.statusOriginal;
+    const uncertain = base.status === "unknown" || base.status === "reviewed_uncertain" || statusLabel !== base.statusOriginal;
+    return { sourceIndex, code, description, moduleIndex: moduleIndex < 0 ? null : moduleIndex, moduleName, moduleCode,
+      statusLabel, state: normalizeDtcStatus(statusLabel) === "history" ? "as_reported" : uncertain ? "reviewed_uncertain" : "as_reported",
+      reason: patch ? "Dato aportado o selección realizada por el usuario; no acredita consulta de evidencia." : "Dato conservado automáticamente de la extracción; sin retranscripción del usuario.",
+      page: null, line: null };
+  };
+  for (const [index, source] of original.dtcs.entries()) {
+    const current = currentIndex(index);
+    if (current !== undefined) currentUsed.add(current);
+    const patch = patches.get(index);
+    if (patch?.action === "omit" || (!patch && previousOmissions.has(index))) {
+      omittedRows.push({ sourceIndex: index, reason: previousOmissions.get(index) ?? "excluded_by_user" }); continue;
+    }
+    const row = makeRow(index, current === undefined ? source : d.extraction.dtcs[current] ?? source, patch);
+    if (!row.description.trim() || !isLiteralDtcCode(row.code)) {
+      omittedRows.push({ sourceIndex: index, reason: "missing_technical_minimum" }); continue;
+    }
+    const position = d.extraction.review?.limited?.positions.find(p => p.rowIndex === current);
+    rows.push({ ...row, page: position?.page ?? null, line: position?.line ?? null });
+  }
+  const oldExtras = d.extraction.review ? d.extraction.dtcs.flatMap((row, i) => currentUsed.has(i) ? [] : [{ row, index: i }]) : [];
+  if (original.dtcs.length + oldExtras.length + d.additionalRows.length > 200) return null;
+  for (const extra of oldExtras) {
+    const position = d.extraction.review?.limited?.positions.find(p => p.rowIndex === extra.index);
+    rows.push({ ...makeRow(null, extra.row), page: position?.page ?? null, line: position?.line ?? null,
+      duplicateReason: "Observación adicional ya conservada en una revisión validada anterior." });
+  }
+  for (const extra of d.additionalRows) {
+    const base: AutelExtraction["dtcs"][number] = { code: extra.code, moduleCode: extra.moduleCode ?? null,
+      moduleName: extra.moduleName ?? "Módulo no confirmado", descriptionOriginal: extra.description,
+      status: normalizeDtcStatus(extra.statusOriginal ?? null), statusOriginal: extra.statusOriginal ?? null,
+      classification: classifyDtcStatus(normalizeDtcStatus(extra.statusOriginal ?? null)) };
+    rows.push({ ...makeRow(null, base), ...(extra.duplicate ? { duplicateReason: "El usuario seleccionó observación independiente, sin aportar motivo técnico libre." } : {}) });
+  }
+  // Contradictory identities and historical-only groups are explicitly omitted,
+  // not silently collapsed or transformed into current faults.
+  const groups = new Map<string, Row[]>();
+  for (const row of rows) { const key = JSON.stringify([row.code, row.moduleCode, row.moduleName]); const group = groups.get(key) ?? []; group.push(row); groups.set(key, group); }
+  const omit = new Set<Row>();
+  for (const group of groups.values()) {
+    const conflict = new Set(group.map(r => normalizeForMatch(r.description))).size > 1;
+    const historical = group.every(r => r.state === "as_reported" && normalizeDtcStatus(r.statusLabel ?? null) === "history");
+    if (!conflict && !historical) continue;
+    if (group.some(r => r.sourceIndex === null)) return null;
+    for (const row of group) { omit.add(row); omittedRows.push({ sourceIndex: row.sourceIndex!, reason: conflict ? "description_conflict" : "historical_only" }); }
+  }
+  return reviewLimitedReport({ mode: "limited_guidance_v1", reportReference: d.reportReference, contentToken: d.contentToken,
+    extractionToken: d.extractionToken, extraction: d.extraction, vehicle: { make: d.extraction.vehicle.make, model: d.extraction.vehicle.model,
+      year: d.extraction.vehicle.year, ...d.vehicle }, reason: reasonText,
+    acknowledgements: original.warnings.map(w => ({ code: w.code, reason: "El usuario eligió continuar con la información disponible; esta limitación no se declara resuelta." })),
+    rows: rows.filter(r => !omit.has(r)),
+  }, userId, secret, { omittedRows, userNotes });
 }
 
 export function validatedReportMatchesInput(input: DiagnosticAnalysisInput, context: HistoryCaptureContext | undefined, userId: string, secret: string) {

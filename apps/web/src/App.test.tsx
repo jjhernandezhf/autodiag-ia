@@ -83,6 +83,7 @@ function successfulUpload(file: File) {
     size: file.size,
     sha256: "a".repeat(64),
     contentToken: TEST_CONTENT_TOKEN,
+    extractionToken: `review_v1_${Date.now() + 3600000}.${"a".repeat(64)}`,
     type: "application/pdf",
     status: "received",
     extraction: {
@@ -133,6 +134,7 @@ function extractedUpload(
     size: file.size,
     sha256: "b".repeat(64),
     contentToken: TEST_CONTENT_TOKEN,
+    extractionToken: `review_v1_${Date.now() + 3600000}.${"a".repeat(64)}`,
     type: "application/pdf",
     status: "received",
     extraction,
@@ -356,11 +358,20 @@ describe("confirmación de vehículo y estados Autel", () => {
     return body;
   }
   function confirmedResponse(upload: Awaited<ReturnType<typeof missingYearUpload>>, year: number) {
-    return { extraction: { ...upload.extraction, vehicle: { ...upload.extraction.vehicle, year }, warnings: [{
+    const { format: _format, vehicle: originalVehicle, ...original } = upload.extraction; void _format;
+    const { vinMasked: _masked, vinPseudonym: _pseudonym, ...technicalVehicle } = originalVehicle; void _masked; void _pseudonym;
+    const reason = "Acción del usuario: continuar con la información disponible.";
+    const decisions = [{ path: "vehicle.year", before: null, after: String(year), reason }];
+    const limited = { mode: "limited_guidance_v1", coverage: "reviewed_rows_only", limitations: ["Datos aportados por el usuario, no confirmados profesionalmente"],
+      positions: [{ rowIndex: 0, sourceIndex: 0, page: null, line: null, provenance: "parser_row_reviewed", reason }], omittedRows: [] };
+    const review = { version: "report_review_v1", original: { ...original, vehicle: technicalVehicle }, reason, decisions, limited };
+    return { extractionToken: `review_v1_${Date.now() + 3600000}.${"b".repeat(64)}`, extraction: { ...upload.extraction, status: "partial", requiresManualReview: true, review, vehicle: { ...upload.extraction.vehicle, year }, warnings: [{
       code: "VEHICLE_DATA_CONFIRMED_BY_USER", message: "Año confirmado por el usuario, no extraído del PDF.",
     }] }, analysisPreparation: { available: true, reasons: [], warnings: [], counts: { detected: 1, actionable: 1, historical: 0 }, input: {
       vehicle: { make: upload.extraction.vehicle.make, model: upload.extraction.vehicle.model, year },
-      modules: [{ code: "PCM", name: "Módulo motriz", dtcs: [{ code: "P0300", description: "Fallo de encendido sintético", status: "continuous_memory", alsoHistorical: false }] }],
+      modules: [{ code: "PCM", name: "Módulo motriz", dtcs: [{ code: "P0300", description: "Fallo de encendido sintético", status: "continuous_memory", alsoHistorical: false,
+        observations: [{ description: "Fallo de encendido sintético", status: "continuous_memory", statusOriginal: "CMDTCs" }] }] }],
+      reviewContext: { version: "review_context_v2", provenance: "user_review_unverified", reason, correctedFields: ["vehicle.year"], decisions, limited },
     } } };
   }
   it("no inventa año, confirma en backend y mantiene CMDTC en análisis y PDF", async () => {
@@ -373,12 +384,12 @@ describe("confirmación de vehículo y estados Autel", () => {
     await user.upload(getUploadElements(container).input, file);
     await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
     expect(screen.queryByRole("button", { name: "Analizar DTC con IA" })).toBeNull();
-    expect(screen.getByRole("spinbutton", { name: "Año confirmado" })).toHaveProperty("value", "");
+    expect(screen.getByRole("spinbutton", { name: "Año (opcional)" })).toHaveProperty("value", "");
     expect(screen.getByText(/Memoria continua.*no confirma falla activa/)).toBeTruthy();
-    fireEvent.change(screen.getByRole("spinbutton", { name: "Año confirmado" }), { target: { value: "2014" } });
-    await user.click(screen.getByRole("button", { name: "Confirmar datos del vehículo" }));
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Año (opcional)" }), { target: { value: "2014" } });
+    await user.click(screen.getByRole("button", { name: "Continuar con la información disponible" }));
     const [url, init] = fetchMock.mock.calls[1]!;
-    expect(url).toBe("/api/reports/confirm-vehicle");
+    expect(url).toBe("/api/reports/review");
     expect(JSON.parse(String(init?.body))).toMatchObject({ extraction: { vehicle: { year: null } }, vehicle: { year: 2014 } });
     expect(screen.getByText("Año confirmado por el usuario, no extraído del PDF.")).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Analizar DTC con IA" }));
@@ -400,8 +411,8 @@ describe("confirmación de vehículo y estados Autel", () => {
     const user = userEvent.setup(); const { container } = await renderAuthenticatedApp();
     await user.upload(getUploadElements(container).input, file);
     await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
-    fireEvent.change(screen.getByRole("spinbutton", { name: "Año confirmado" }), { target: { value: "2014" } });
-    await user.click(screen.getByRole("button", { name: "Confirmar datos del vehículo" }));
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Año (opcional)" }), { target: { value: "2014" } });
+    await user.click(screen.getByRole("button", { name: "Continuar con la información disponible" }));
     const signal = fetchMock.mock.calls[1]![1]!.signal!;
     if (change === "nuevo archivo") await user.upload(getUploadElements(container).input, createPdf("other-synthetic.pdf"));
     else await user.click(screen.getByRole("button", { name: "Cerrar sesión" }));
@@ -413,7 +424,7 @@ describe("confirmación de vehículo y estados Autel", () => {
 });
 
 describe("revisión consolidada firmada y cero legítimo", () => {
-  const why = "Confirmado contra documentacion sintetica del vehiculo.";
+  const why = "Acción del usuario: continuar con la información disponible.";
   async function signedUpload(file: File, missingYear = true) {
     const body = await readyAnalysisUpload(file).json();
     body.extractionToken = `review_v1_${Date.now() + 3600000}.${"a".repeat(64)}`; // Browser fixture only, not a server signature.
@@ -441,9 +452,9 @@ describe("revisión consolidada firmada y cero legítimo", () => {
   async function startReview(user: ReturnType<typeof userEvent.setup>, container: HTMLElement, file: File) {
     await user.upload(getUploadElements(container).input, file);
     await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
-    fireEvent.change(await screen.findByRole("spinbutton", { name: "Año confirmado" }), { target: { value: "2014" } });
-    fireEvent.change(screen.getByRole("textbox", { name: "Motivo general y evidencia consultada" }), { target: { value: why } });
-    await user.click(screen.getByRole("button", { name: "Validar revisión del reporte" }));
+    fireEvent.change(await screen.findByRole("spinbutton", { name: "Año (opcional)" }), { target: { value: "2014" } });
+    expect(screen.queryByRole("textbox", { name: /Motivo general/ })).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Continuar con la información disponible" }));
   }
   it("envía revisión firmada, conserva originales y solo analiza mediante confirmación explícita", async () => {
     const file = createPdf("synthetic.pdf"), upload = await signedUpload(file), reviewed = reviewedResponse(upload);
@@ -455,9 +466,10 @@ describe("revisión consolidada firmada y cero legítimo", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock.mock.calls[1]![0]).toBe("/api/reports/review");
     const sent = JSON.parse(String(fetchMock.mock.calls[1]![1]!.body));
-    expect(sent).toMatchObject({ reportReference: upload.id, extractionToken: upload.extractionToken, vehicle: { year: 2014 }, reason: why });
+    expect(sent).toMatchObject({ mode: "progressive_review_v1", reportReference: upload.id, extractionToken: upload.extractionToken, vehicle: { year: 2014 }, actions: [] });
+    expect(sent).not.toHaveProperty("reason");
     expect(sent.extraction.vehicle.year).toBeNull();
-    expect(screen.getByText("Originales y correcciones confirmadas por el usuario")).toBeTruthy();
+    expect(screen.getByText("Datos originales y acciones registradas")).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Analizar DTC con IA" }));
     await user.click(screen.getByRole("button", { name: "Confirmar y analizar" }));
     await screen.findByRole("button", { name: /Descargar.*PDF/i });
@@ -471,21 +483,21 @@ describe("revisión consolidada firmada y cero legítimo", () => {
     await waitFor(() => expect(downloadReportPdfMock).toHaveBeenCalledOnce());
     expect(downloadReportPdfMock.mock.calls[0]![0].review).toMatchObject({ reason: why, decisions: [{ path: "vehicle.year", before: null, after: "2014" }] });
   });
-  it("tras confirmar el año muestra la acción del estado que sigue bloqueado, sin solicitar IA", async () => {
+  it("aportar el año permite continuar conservando el estado incierto, sin solicitar IA automáticamente", async () => {
     const file = createPdf("synthetic-review.pdf"), upload = await signedUpload(file);
     Object.assign(upload.extraction, { status: "partial", requiresManualReview: true, warnings: [{ code: "UNKNOWN_DTC_STATUS", message: "Estado sin interpretar" }] });
     Object.assign(upload.extraction.dtcs[0], { status: "unknown", statusOriginal: "1 vez", classification: "unknown" });
-    const reviewed = { ...reviewedResponse(upload), analysisPreparation: { available: false,
-      reasons: [{ code: "UNKNOWN_DTC_STATUS", message: "Revisa el estado incierto antes de analizar." }],
-      warnings: [], counts: { detected: 1, actionable: 0, historical: 0 } } };
+    const reviewed = reviewedResponse(upload);
+    reviewed.analysisPreparation.input.modules[0]!.dtcs[0]!.status = "reviewed_uncertain";
+    Object.assign(reviewed.extraction.dtcs[0], { status: "reviewed_uncertain", classification: "actionable" });
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(createJsonResponse(true, upload)).mockResolvedValueOnce(createJsonResponse(true, reviewed));
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup(), { container } = await renderAuthenticatedApp();
     await startReview(user, container, file);
-    expect(await screen.findByText("Originales y correcciones confirmadas por el usuario")).toBeTruthy();
-    expect(screen.getByRole("link", { name: /Fila 1: revisa explícitamente el estado incierto/ })).toBeTruthy();
-    expect((screen.getByRole("spinbutton", { name: "Año confirmado" }) as HTMLInputElement).value).toBe("2014");
-    expect(screen.queryByRole("button", { name: "Analizar DTC con IA" })).toBeNull();
+    expect(await screen.findByText("Datos originales y acciones registradas")).toBeTruthy();
+    expect(screen.queryByRole("spinbutton", { name: "Año (opcional)" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Analizar DTC con IA" })).toBeTruthy();
+    expect(reviewed.extraction.dtcs[0].statusOriginal).toBe("1 vez");
     expect(fetchMock).toHaveBeenCalledTimes(2); expect(fetchMock.mock.calls[1]![0]).toBe("/api/reports/review");
   });
   it.each(["otro reporte", "logout", "otra identidad"])("descarta revisión pendiente al cambiar a %s", async change => {
@@ -514,7 +526,8 @@ describe("revisión consolidada firmada y cero legítimo", () => {
     await user.upload(getUploadElements(container).input, file); await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
     await user.click(screen.getByRole("button", { name: "Analizar DTC con IA" })); await user.click(screen.getByRole("button", { name: "Confirmar y analizar" }));
     const signal = fetchMock.mock.calls[1]![1]!.signal!;
-    await user.click(screen.getByRole("button", { name: "Revisar o corregir datos" }));
+    await user.click(screen.getByRole("button", { name: "Editar otro dato" }));
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Año (opcional)" }), { target: { value: "2023" } });
     expect(signal.aborted).toBe(true);
     expect(screen.getByText("Valida o cancela las correcciones antes de solicitar orientación.")).toBeTruthy();
     await act(async () => { pending.resolve(successfulAnalysis()); await pending.promise; });
@@ -555,7 +568,7 @@ describe("identidad visual", () => {
     await user.upload(getUploadElements(container).input, file); await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
     await user.click(await screen.findByRole("button", { name: "Preparar transcripción manual del PDF legible" }));
     expect(await screen.findByText("Documento recibido para transcripción limitada; tipo y contenido aún no confirmados.")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Completar manualmente y continuar con limitaciones" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Continuar con la información disponible" })).toBeTruthy();
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual(["/api/reports/upload", "/api/reports/upload-manual"]);
   });
   it("App permite transcripción limitada con ausencias, exige análisis explícito y conserva el alcance al exportar", async () => {
@@ -573,9 +586,10 @@ describe("identidad visual", () => {
       if (url === "/api/reports/upload") return createJsonResponse(true, upload);
       if (url === "/api/reports/review") {
         const body = JSON.parse(String(options?.body));
-        expect(body.mode).toBe("limited_guidance_v1"); expect(body.vehicle).toEqual({ make: null, model: null, year: null });
+        expect(body.mode).toBe("progressive_review_v1"); expect(body).not.toHaveProperty("vehicle");
+        expect(body.additionalRows).toEqual([{ code: "P0300", description: "Descripcion del PDF", moduleName: null, statusOriginal: null }]);
         const limited = { mode: "limited_guidance_v1", coverage: "reviewed_rows_only", limitations: ["Conjunto incompleto; año y módulo desconocidos"],
-          positions: [{ rowIndex: 0, page: 2, line: null, provenance: "manual_transcription", reason: why }] };
+          positions: [{ rowIndex: 0, sourceIndex: null, page: null, line: null, provenance: "manual_transcription", reason: why }], omittedRows: [] };
         const { vinMasked: _vin, vinPseudonym: _hash, ...vehicle } = upload.extraction.vehicle; void _vin; void _hash;
         const { format: _format, ...original } = upload.extraction; void _format;
         const review = { version: "report_review_v1", original: { ...original, vehicle }, reason: why,
@@ -587,7 +601,7 @@ describe("identidad visual", () => {
             scanSummary: { ...upload.extraction.scanSummary, parsedSystems: 1, parsedDtcs: 1 }, dtcs: [{ code: "P0300", moduleCode: null, moduleName: "Modulo desconocido",
               descriptionOriginal: dtc.description, status: dtc.status, statusOriginal: null, classification: "actionable" }] },
           analysisPreparation: { available: true, reasons: [], warnings: limited.limitations, counts: { detected: 1, actionable: 1, historical: 0 },
-            input: { vehicle: body.vehicle, modules: [{ code: null, name: "Modulo desconocido", dtcs: [dtc] }],
+            input: { vehicle: { make: null, model: null, year: null }, modules: [{ code: null, name: "Modulo desconocido", dtcs: [dtc] }],
               reviewContext: { version: "review_context_v2", provenance: "user_review_unverified", reason: why, correctedFields: ["extraction"], decisions: review.decisions, limited } } } };
         return createJsonResponse(true, reviewed);
       }
@@ -612,16 +626,13 @@ describe("identidad visual", () => {
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup(), { container } = await renderAuthenticatedApp();
     await user.upload(getUploadElements(container).input, file); await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
-    await user.click(await screen.findByRole("button", { name: "Completar manualmente y continuar con limitaciones" }));
-    await user.click(screen.getByRole("checkbox", { name: "Reconozco esta limitación: NEW_LAYOUT" }));
-    fireEvent.change(screen.getByRole("textbox", { name: "Motivo y alcance para NEW_LAYOUT" }), { target: { value: why } });
-    await user.click(screen.getByRole("button", { name: "Transcribir otra fila del PDF" }));
-    for (const [name, value] of [["Código literal 1", "P0300"], ["Descripción técnica 1", "Descripcion del PDF"], ["Motivo técnico 1", why], ["Motivo general de orientación limitada", why]]) {
+    await user.click(await screen.findByText("Aportar información no recuperada (opcional)"));
+    await user.click(screen.getByRole("button", { name: "Añadir una fila no recuperada" }));
+    for (const [name, value] of [["Código nuevo 1", "P0300"], ["Descripción nueva 1", "Descripcion del PDF"]]) {
       fireEvent.change(screen.getByRole("textbox", { name }), { target: { value } });
     }
-    fireEvent.change(screen.getByRole("spinbutton", { name: "Página del PDF 1" }), { target: { value: "2" } });
-    await user.selectOptions(screen.getByRole("combobox", { name: "Tratamiento 1" }), "reviewed_uncertain");
-    await user.click(screen.getByRole("button", { name: "Validar transcripción y limitaciones" }));
+    expect(screen.queryByLabelText(/Motivo|Página del PDF/)).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Continuar con la información disponible" }));
     const analyze = await screen.findByRole("button", { name: "Analizar DTC con IA" });
     expect(fetchMock.mock.calls.filter(([url]) => url === "/api/reports/analyze")).toHaveLength(0);
     expect(screen.getByText(/Orientación limitada: solo filas revisadas/)).toBeTruthy();

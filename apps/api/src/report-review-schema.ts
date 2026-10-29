@@ -24,9 +24,14 @@ export const limitedGuidanceSchema = z.object({
   mode: z.literal("limited_guidance_v1"), coverage: z.literal("reviewed_rows_only"),
   limitations: z.array(text(500)).min(1).max(510),
   positions: z.array(z.object({ rowIndex: z.number().int().min(0).max(199),
+    sourceIndex: z.number().int().min(0).max(199).nullable().optional(),
     page: z.number().int().min(1).max(1000).nullable(), line: z.number().int().min(1).max(100000).nullable(),
     provenance: z.enum(["parser_row_reviewed", "manual_transcription"]), reason: text(500).min(10),
   }).strict()).min(1).max(200),
+  omittedRows: z.array(z.object({ sourceIndex: z.number().int().min(0).max(199),
+    reason: z.enum(["missing_technical_minimum", "excluded_by_user", "description_conflict", "historical_only"]),
+  }).strict()).max(200).optional(),
+  userNotes: z.string().trim().max(300).optional(),
 }).strict();
 export const reportReviewEvidenceSchema = z.object({
   limited: limitedGuidanceSchema.optional(),
