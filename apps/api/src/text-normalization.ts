@@ -17,7 +17,7 @@ export function normalizeDtcStatus(value: string | null): Exclude<DtcStatus, "mu
   if (/^cmdtcs?$/u.test(normalized)) return "continuous_memory";
   if (normalized === "activo / static") return "current";
   if (normalized === "dtc provisional") return "provisional";
-  if (["corriente", "actual", "current", "presente"].includes(normalized)) return "current";
+  if (["activo", "corriente", "actual", "current", "presente"].includes(normalized)) return "current";
   if (/^confirmed\s*\/\s*test\s*failed$/u.test(normalized) || /^confirmed\s*\/\s*testfailed$/u.test(normalized)) {
     return "confirmed";
   }

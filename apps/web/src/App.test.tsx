@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { downloadReportPdf } from "./report-pdf";
 import { App } from "./App";
+import activeHistoryFixture from "../../../shared/fixtures/autel-active-history.synthetic.json";
 import {
   BrowserAuthenticationError,
   type BrowserAuthenticationService,
@@ -526,6 +527,7 @@ describe("revisión consolidada firmada y cero legítimo", () => {
     await user.upload(getUploadElements(container).input, file); await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
     await user.click(screen.getByRole("button", { name: "Analizar DTC con IA" })); await user.click(screen.getByRole("button", { name: "Confirmar y analizar" }));
     const signal = fetchMock.mock.calls[1]![1]!.signal!;
+    await user.click(screen.getByText("Editar datos extraídos (opcional)", { selector: "summary" }));
     await user.click(screen.getByRole("button", { name: "Editar otro dato" }));
     fireEvent.change(screen.getByRole("spinbutton", { name: "Año (opcional)" }), { target: { value: "2023" } });
     expect(signal.aborted).toBe(true);
@@ -1321,6 +1323,52 @@ describe("orientación asistida por IA", () => {
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(screen.queryByText("Requiere confirmación del técnico")).toBeNull();
+  });
+
+  it("permite el flujo normal de Activo/Historial sin revisión, conserva antecedentes y espera la acción explícita", async () => {
+    const file = createPdf("synthetic.pdf"), e = activeHistoryFixture;
+    const modules = e.systems.flatMap(s => {
+      const rows = e.dtcs.filter(d => d.moduleCode === s.code && d.classification === "actionable");
+      return rows.length ? [{ code: s.code, name: s.name, dtcs: rows.map(d => ({ code: d.code, description: d.descriptionOriginal, status: d.status, alsoHistorical: false })) }] : [];
+    });
+    const dto = { vehicle: { make: e.vehicle.make, model: e.vehicle.model, year: e.vehicle.year }, modules };
+    const response = await successfulAnalysis().json();
+    response.analysis.findings = e.dtcs.filter(d => d.classification === "actionable").map(d => ({ ...response.analysis.findings[0],
+      relatedDtc: { code: d.code, moduleCode: d.moduleCode, moduleName: d.moduleName } }));
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValueOnce(extractedUpload(file, e, { available: true, input: dto,
+      reasons: [], warnings: ["El reporte incluye avisos sobre datos opcionales; no impiden solicitar orientación con los datos técnicos disponibles."], counts: { detected: 6, actionable: 3, historical: 3 } }))
+      .mockResolvedValueOnce(createJsonResponse(true, response));
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup(), { container } = await renderAuthenticatedApp();
+    await user.upload(getUploadElements(container).input, file);
+    await user.click(screen.getByRole("button", { name: "Enviar reporte" }));
+    await screen.findByRole("button", { name: "Analizar DTC con IA" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "Continuar con la información disponible" })).toBeNull();
+    const editSummary = screen.getByText("Editar datos extraídos (opcional)", { selector: "summary" });
+    expect((editSummary.closest("details") as HTMLDetailsElement).open).toBe(false);
+    expect(screen.queryByRole("heading", { name: "Revisión mínima de datos pendientes" })).toBeNull();
+    expect(screen.queryByText(/deben revisarse antes de solicitar orientación/)).toBeNull();
+    expect(screen.getByText(/no impiden solicitar orientación/)).toBeTruthy();
+    await user.click(screen.getByText("Ver datos extraídos", { selector: "summary" }));
+    expect(screen.getByText("Completa")).toBeTruthy();
+    expect(screen.getByText("Sistemas escaneados").previousSibling?.textContent).toBe("15");
+    expect(screen.getByText("Registros históricos").previousSibling?.textContent).toBe("3");
+    expect(screen.getByText("DTC para análisis").previousSibling?.textContent).toBe("3");
+    expect(screen.getByText("0 (unidad no indicada)")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Analizar DTC con IA" }));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("button", { name: "Confirmar y analizar" }));
+    await user.click(await screen.findByRole("button", { name: /Descargar.*PDF/i }));
+    await waitFor(() => expect(downloadReportPdfMock).toHaveBeenCalledOnce());
+    const pdfModel = downloadReportPdfMock.mock.calls[0]![0];
+    expect(pdfModel.summary).toEqual({ systemsScanned: 15, detectedRows: 6, actionableDtcs: 3, historicalRows: 3, findings: 3 });
+    expect(pdfModel.actionableDtcs).toHaveLength(3);
+    expect(pdfModel.historicalDtcs.map(d => d.code)).toEqual(["B1102:00", "B1748:00", "B1319"]);
+    expect(pdfModel.actionableDtcs.every(d => d.originalStatus === "Activo")).toBe(true);
+    expect(fetchMock.mock.calls.some(([url]) => url === "/api/reports/review")).toBe(false);
+    const request = JSON.parse(String(fetchMock.mock.calls.find(([url]) => url === "/api/reports/analyze")![1]!.body));
+    expect(request.input).toEqual(dto); expect(request.historyContext.extraction.dtcs).toHaveLength(6);
   });
 
   it("exige confirmación, no analiza automáticamente y envía una sola vez el DTO sanitizado", async () => {

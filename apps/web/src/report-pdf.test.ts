@@ -17,6 +17,7 @@ import {
   type ReportExportSource,
 } from "./report-pdf";
 import { isRagProvenance, describeRagProvenance } from "./rag-provenance";
+import activeHistoryFixture from "../../../shared/fixtures/autel-active-history.synthetic.json";
 
 const logo = new Uint8Array(readFileSync(resolve(process.cwd(), "src/assets/autodiag-ia-logo.png")));
 
@@ -358,6 +359,29 @@ describe("fuentes RAG del informe", () => {
 });
 
 describe("documento PDF", () => {
+  it("conserva 15 sistemas, tres activos y tres históricos sin confundir módulos analizados con escaneados", () => {
+    const e = activeHistoryFixture, source = createSource("not_provided");
+    source.vehicle = e.vehicle;
+    source.counts = { systems: e.systems.length, detected: e.dtcs.length, actionable: 3, historical: 3 };
+    source.actionableModules = e.systems.flatMap(s => {
+      const dtcs = e.dtcs.filter(d => d.moduleCode === s.code && d.classification === "actionable");
+      return dtcs.length ? [{ code: s.code, name: s.name, dtcs: dtcs.map(d => ({ code: d.code, description: d.descriptionOriginal, status: d.status, alsoHistorical: false })) }] : [];
+    });
+    source.documentaryDtcs = e.dtcs.map(d => ({ code: d.code, moduleCode: d.moduleCode, moduleName: d.moduleName,
+      description: d.descriptionOriginal, originalStatus: d.statusOriginal,
+      normalizedClassification: d.classification === "historical" ? "historical" : "actionable" }));
+    source.analysis.findings = e.dtcs.filter(d => d.classification === "actionable").map(d => ({ ...source.analysis.findings[0]!,
+      relatedDtc: { code: d.code, moduleCode: d.moduleCode, moduleName: d.moduleName } }));
+    const model = buildReportExportModel(source), raw = pdfText(renderReportPdf(model, new Date("2026-10-30T12:00:00Z"), logo));
+    expect(source.actionableModules).toHaveLength(2);
+    expect(model.summary).toEqual({ systemsScanned: 15, detectedRows: 6, actionableDtcs: 3, historicalRows: 3, findings: 3 });
+    expect(model.historicalDtcs.map(d => d.code)).toEqual(["B1102:00", "B1748:00", "B1319"]);
+    expect(model.actionableDtcs.every(d => d.originalStatus === "Activo")).toBe(true);
+    expect(model.historicalDtcs.every(d => d.originalStatus === "Historial")).toBe(true);
+    expect(model.vehicle).toMatchObject({ odometer: null, odometerRaw: "0" });
+    expect(raw).toContain("B1319"); expect(raw).toContain("B1102:00"); expect(raw).toContain("B1748:00");
+    expect(raw).not.toContain("No se identificaron antecedentes");
+  });
   it("rotula la orientación limitada y conserva procedencia sin convertir ausencias en datos", () => {
     const source = createSource("not_provided"); source.vehicle = { make: null, model: null, year: null };
     source.review = { version: "report_review_v1", reason: "Transcripcion de documento sintetico revisada.",

@@ -1,0 +1,45 @@
+{
+  "format": "autel_vehicle_diagnostic_report",
+  "status": "completed",
+  "requiresManualReview": false,
+  "vehicle": {
+    "year": 2020,
+    "make": "Marca Sintetica",
+    "model": "Modelo de regresion",
+    "engine": "Motor sintetico",
+    "odometer": null,
+    "odometerRaw": "0",
+    "vinMasked": null,
+    "vinPseudonym": null
+  },
+  "scanSummary": { "declaredSystems": 15, "parsedSystems": 15, "declaredDtcs": 6, "parsedDtcs": 6 },
+  "systems": [
+    { "code": "ENG", "name": "Motor sintetico", "dtcCount": 2 },
+    { "code": "AB", "name": "Seguridad sintetica", "dtcCount": 3 },
+    { "code": "ODS", "name": "Deteccion sintetica", "dtcCount": 1 },
+    { "code": "Z01", "name": "Sistema sintetico 1", "dtcCount": 0 },
+    { "code": "Z02", "name": "Sistema sintetico 2", "dtcCount": 0 },
+    { "code": "Z03", "name": "Sistema sintetico 3", "dtcCount": 0 },
+    { "code": "Z04", "name": "Sistema sintetico 4", "dtcCount": 0 },
+    { "code": "Z05", "name": "Sistema sintetico 5", "dtcCount": 0 },
+    { "code": "Z06", "name": "Sistema sintetico 6", "dtcCount": 0 },
+    { "code": "Z07", "name": "Sistema sintetico 7", "dtcCount": 0 },
+    { "code": "Z08", "name": "Sistema sintetico 8", "dtcCount": 0 },
+    { "code": "Z09", "name": "Sistema sintetico 9", "dtcCount": 0 },
+    { "code": "Z10", "name": "Sistema sintetico 10", "dtcCount": 0 },
+    { "code": "Z11", "name": "Sistema sintetico 11", "dtcCount": 0 },
+    { "code": "Z12", "name": "Sistema sintetico 12", "dtcCount": 0 }
+  ],
+  "dtcs": [
+    { "code": "P0014", "moduleCode": "ENG", "moduleName": "Motor sintetico", "descriptionOriginal": "Descripcion sintetica alfa", "statusOriginal": "Activo", "status": "current", "classification": "actionable" },
+    { "code": "P0078", "moduleCode": "ENG", "moduleName": "Motor sintetico", "descriptionOriginal": "Descripcion sintetica beta", "statusOriginal": "Activo", "status": "current", "classification": "actionable" },
+    { "code": "B1102:00", "moduleCode": "AB", "moduleName": "Seguridad sintetica", "descriptionOriginal": "Descripcion sintetica gamma", "statusOriginal": "Historial", "status": "history", "classification": "historical" },
+    { "code": "B1670:00", "moduleCode": "AB", "moduleName": "Seguridad sintetica", "descriptionOriginal": "Descripcion sintetica delta", "statusOriginal": "Activo", "status": "current", "classification": "actionable" },
+    { "code": "B1748:00", "moduleCode": "AB", "moduleName": "Seguridad sintetica", "descriptionOriginal": "Descripcion sintetica epsilon", "statusOriginal": "Historial", "status": "history", "classification": "historical" },
+    { "code": "B1319", "moduleCode": "ODS", "moduleName": "Deteccion sintetica", "descriptionOriginal": "Descripcion sintetica zeta", "statusOriginal": "Historial", "status": "history", "classification": "historical" }
+  ],
+  "warnings": [
+    { "code": "VIN_NOT_PROVIDED", "message": "El reporte no proporciona VIN." },
+    { "code": "ODOMETER_UNIT_NOT_PROVIDED", "message": "El reporte imprime odómetro 0 sin unidad; se conserva la lectura sin suponer km o mi." }
+  ]
+}

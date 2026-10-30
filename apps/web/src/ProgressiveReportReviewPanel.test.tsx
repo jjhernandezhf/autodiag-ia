@@ -59,8 +59,15 @@ describe("revisión mínima y progresiva de cualquier reporte", () => {
     expect(view.calls[0]!.body).toMatchObject({ actions: [], additionalRows: [], extraction: { vehicle: { year: null } } });
     expect(view.calls[0]!.body).not.toHaveProperty("vehicle"); expect(view.calls[0]!.body).not.toHaveProperty("acknowledgements");
   });
-  it("completo sin advertencias: ningún campo pendiente ni confirmación adicional", () => {
+  it("completo sin advertencias: edición opcional contraída sin decisiones ni confirmación adicional", async () => {
     const view = mount(extraction(), true);
+    const summary = screen.getByText("Editar datos extraídos (opcional)", { selector: "summary" });
+    const editor = summary.closest("details") as HTMLDetailsElement;
+    expect(editor.open).toBe(false);
+    expect(screen.queryByRole("heading", { name: "Revisión mínima de datos pendientes" })).toBeNull();
+    await userEvent.setup().click(summary);
+    expect(editor.open).toBe(true);
+    expect(screen.getByRole("heading", { name: "Edición opcional de datos extraídos" })).toBeTruthy();
     expect(screen.getByText(/No necesitas volver a confirmarlos/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Continuar con la información disponible" })).toBeNull();
     expect((screen.getByRole("textbox", { name: "Nota adicional (opcional)" }).closest("details") as HTMLDetailsElement).open).toBe(false);

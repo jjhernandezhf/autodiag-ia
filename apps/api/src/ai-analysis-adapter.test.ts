@@ -85,6 +85,24 @@ function createToyotaDuplicateExtraction(): AutelExtraction {
 }
 
 describe("prepareAiAnalysis", () => {
+  it("presenta odómetro sin unidad como informativo sin cambiar DTO, conteos o elegibilidad", () => {
+    const e = createExtraction(), before = prepareAiAnalysis(e);
+    e.vehicle.odometer = null; e.vehicle.odometerRaw = "0";
+    e.warnings = [{ code: "ODOMETER_UNIT_NOT_PROVIDED", message: "Odómetro 0 sin unidad" }];
+    const after = prepareAiAnalysis(e);
+    expect(after.available).toBe(true); expect(after.reasons).toEqual(before.reasons); expect(after.counts).toEqual(before.counts);
+    if (!before.available || !after.available) throw new Error("Synthetic fixture unavailable");
+    expect(after.input).toEqual(before.input);
+    expect(after.warnings).toEqual(["El reporte incluye avisos sobre datos opcionales; no impiden solicitar orientación con los datos técnicos disponibles."]);
+  });
+  it("conserva el aviso y los motivos bloqueantes junto con información opcional", () => {
+    const e = createExtraction(); e.status = "partial"; e.requiresManualReview = true;
+    e.warnings = [{ code: "ODOMETER_UNIT_NOT_PROVIDED", message: "Odómetro sin unidad" }, { code: "DTC_COUNT_MISMATCH", message: "Conteos discrepantes" }];
+    const result = prepareAiAnalysis(e);
+    expect(result.available).toBe(false);
+    expect(result.reasons.map(r => r.code)).toEqual(expect.arrayContaining(["EXTRACTION_INCOMPLETE", "MANUAL_REVIEW_REQUIRED"]));
+    expect(result.warnings).toContain("La extracción incluye advertencias que deben revisarse antes de solicitar orientación.");
+  });
   it("convierte la extracción conservando el orden técnico de módulos, DTC y códigos", () => {
     const result = prepareAiAnalysis(createExtraction());
 
