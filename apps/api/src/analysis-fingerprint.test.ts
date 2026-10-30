@@ -46,6 +46,7 @@ describe("huella privada del PDF", () => {
     expect(current).not.toBe(createAnalysisFingerprint(fingerprintInput({ promptVersion: "diagnostic_prompt_v4_observed_states_review" }), SECRET));
     expect(current).not.toBe(createAnalysisFingerprint(fingerprintInput({ promptVersion: "diagnostic_prompt_v6_limited_guidance" }), SECRET));
     expect(current).not.toBe(createAnalysisFingerprint(fingerprintInput({ promptVersion: DIAGNOSTIC_PROMPT_VERSION, pipelineVersion: "analysis_pipeline_v4_limited_guidance" }), SECRET));
+    expect(current).not.toBe(createAnalysisFingerprint(fingerprintInput({ promptVersion: DIAGNOSTIC_PROMPT_VERSION, pipelineVersion: "analysis_pipeline_v5_progressive_review" }), SECRET));
     expect(createAnalysisFingerprint(fingerprintInput({ promptVersion: DIAGNOSTIC_PROMPT_VERSION }), SECRET)).toBe(current);
   });
   it("produce el mismo token para los mismos bytes y otro para contenido diferente", () => {

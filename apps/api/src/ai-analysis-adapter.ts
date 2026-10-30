@@ -15,6 +15,8 @@ const MAX_DTCS_PER_MODULE = MAX_ANALYSIS_DTCS;
 const MAX_TOTAL_DTCS = MAX_ANALYSIS_DTCS;
 
 const GENERIC_EXTRACTION_WARNING = "La extracción incluye advertencias que deben revisarse antes de solicitar orientación.";
+const INFORMATIONAL_EXTRACTION_WARNING = "El reporte incluye avisos sobre datos opcionales; no impiden solicitar orientación con los datos técnicos disponibles.";
+const OPTIONAL_WARNING_CODES = new Set(["VIN_NOT_PROVIDED", "ENGINE_NOT_PROVIDED", "ODOMETER_NOT_PROVIDED", "ODOMETER_UNIT_NOT_PROVIDED"]);
 
 function matchesSystem(system: ScannedSystem, dtc: ParsedDtc) {
   return matchesModuleIdentity(system, dtc);
@@ -35,7 +37,9 @@ function addReason(
 export function prepareAiAnalysis(extraction: AutelExtraction, options: { legacyRead?: boolean } = {}): AiAnalysisPreparation {
   if (extraction.review?.limited) return prepareLimitedAnalysis(extraction);
   const reasons: AiAnalysisAvailabilityReason[] = [];
-  const warnings = extraction.warnings.length > 0 ? [GENERIC_EXTRACTION_WARNING] : [];
+  const warnings = extraction.warnings.length > 0
+    ? [extraction.warnings.every(warning => OPTIONAL_WARNING_CODES.has(warning.code)) ? INFORMATIONAL_EXTRACTION_WARNING : GENERIC_EXTRACTION_WARNING]
+    : [];
   if (extraction.dtcs.some(dtc => ["on_demand", "continuous_memory"].includes(dtc.status))) {
     warnings.push("ODDTCs indica prueba bajo demanda y CMDTCs memoria continua; ninguno confirma por sí solo una falla activa. Elegible para orientación no significa avería confirmada.");
   }

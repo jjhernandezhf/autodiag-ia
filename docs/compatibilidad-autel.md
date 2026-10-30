@@ -788,3 +788,88 @@ del desarrollo incluyeron una detección real de código literal en elegibilidad
 completa (corregida) y expectativas UI del flujo sustituido (actualizadas al
 contrato nuevo). La suite global API sigue **no aprobada**: los dos fallos n8n
 demostrados en la base son distintos del timeout PDF de causa desconocida.
+
+### Etiqueta documental «Activo» — 2026-10-30
+
+Se leyó el original autorizado mediante `extractPdfPages` (proceso hijo productivo)
+y `parseAutelReport`, sin copiar PDF, VIN ni datos del equipo al repositorio.
+Antes del cambio: dos páginas, 15 sistemas, seis observaciones con conteos
+coherentes; tres etiquetas `Activo` quedaban como `unknown`, mientras las tres
+`Historial` se normalizaban correctamente. `UNKNOWN_DTC_STATUS` hacía la extracción
+parcial y bloqueaba la preparación. Se reprodujo continuidad de módulo entre
+páginas: no hubo pérdida de la segunda fila del motor ni desalineación de columnas.
+
+La corrección añade únicamente el nombre completo `activo` al vocabulario de
+`current`, después de normalizar capitalización y espacios. No utiliza búsquedas
+parciales: `Inactivo`, `No activo`, `Activo / Historial` y etiquetas ambiguas siguen
+sin normalizar. No cambia permanente, provisional, CMDTC, ODDTC, «1 vez» ni la
+agregación de observaciones. Estado documental activo no prueba causa, pieza
+averiada ni necesidad de reparación.
+
+Después del cambio se reprocesó el mismo original: `completed`, sin revisión
+manual obligatoria, 15 sistemas, seis observaciones, tres identidades accionables
+y tres antecedentes históricos. Se conserva el literal; el odómetro impreso `0`
+queda en `odometerRaw`, sin inventar unidad; su advertencia es informativa y no
+hace parcial la extracción. No hay generación al subir: sigue siendo necesaria
+la solicitud explícita y su confirmación. «Editar otro dato» permanece disponible.
+
+No fue necesario cambiar historial ni exportación PDF: el recorrido normal
+conserva las seis filas y los tres históricos; solo las tres identidades
+accionables de dos módulos se envían para hallazgos a Responses (política
+existente; los históricos exclusivos no son hallazgos ni se añaden a esos
+módulos). Los snapshots y PDF conservan los antecedentes documentales. Las
+pruebas distinguen 15 sistemas escaneados, tres sistemas con DTC, dos módulos
+con DTC accionables, seis observaciones/identidades y tres hallazgos simulados.
+El informe privado generado anteriormente no se inspeccionó: no se afirma su
+causa exacta ni se reescriben sus snapshots o limitaciones. La contingencia
+progresiva/limitada para otros impedimentos permanece intacta.
+
+Pipeline nuevo: `analysis_pipeline_v6_documentary_active`. Se mantiene
+`diagnostic_prompt_v7_progressive_review`, pues no cambia el prompt ni el esquema
+de salida. El fingerprint separa la nueva interpretación de la versión anterior,
+incluso con los demás parámetros iguales. No cambian modelo, corpus, presupuestos
+120/150, espera frontend, límites PDF, seguridad ni migraciones.
+
+Regresiones sintéticas: fixture compartido con descripciones y vehículo inventados,
+15 sistemas, seis filas, tres Activo/tres Historial, continuación entre páginas y
+odómetro cero sin unidad. Incluyen falsos positivos, extracción hija real sobre
+PDF sintético, autenticación/prueba de reporte sin revisión, transporte Responses
+simulado, guardado y PDF. No demuestran calidad diagnóstica.
+
+Incidentes de verificación: primera ejecución API dirigida (84 pruebas) aprobada;
+la focalizada conjunta posterior tuvo 263 aprobadas y un timeout de 5000 ms en la
+nueva integración PDF/HTTP. No se atribuye su causa al ambiente ni a los fallos
+anteriores. Comprobación dirigida posterior: integración 1/1 en 1618 ms; archivo
+final de compatibilidad, ampliado con nueve casos de semántica, 35/35. No se
+aumentaron timeouts ni se cambió el runner. Una aprobación posterior no demuestra
+estabilidad permanente ni convierte la ejecución fallida en aprobada.
+
+La primera ejecución frontend tuvo 129 aprobadas y una aserción nueva incorrecta:
+esperaba la fuente previa a PDF, pero `downloadReportPdf` recibe el modelo ya
+validado. El build frontend detectó el mismo error de tipos. Se corrigió la prueba
+para comprobar los conteos y antecedentes del modelo real, sin cambiar su
+contrato ni código productivo frontend. La suite API global sigue no aprobada;
+sus dos fallos n8n demostrados en la base son distintos del timeout PDF pendiente
+y del timeout de esta ejecución focalizada, cuya causa no quedó determinada.
+
+Cierre local: compatibilidad API **35/35** y frontend (App, PDF y panel progresivo)
+**143/143** aprobados. Los otros diez archivos API de la ejecución focalizada
+anterior aprobaron **238** comprobaciones; no se repitieron sin cambios relevantes.
+Lint de ambos workspaces, builds API/frontend, `git diff --check` y whitespace del
+fixture nuevo aprobados. Persiste la advertencia conocida del bundle >500 kB.
+No quedaron procesos extractores de esta comprobación. No se ejecutó la suite
+global ni se realizaron llamadas a proveedores, migraciones o despliegues.
+
+Ensayo manual restante: recargar el original, verificar completa/15 sistemas/seis
+filas/3 para análisis/3 históricos y odómetro sin unidad; comprobar que no exige
+revisión; solicitar orientación explícitamente; revisar los tres hallazgos y los
+tres antecedentes en historial/PDF. Este ensayo con generación real no se ejecutó.
+
+El usuario reportó después un ensayo local satisfactorio del Elantra: 15 sistemas,
+seis DTC, tres para análisis y tres históricos. Es evidencia manual reportada,
+no una ejecución automatizada ni una garantía de precisión. Ajuste residual de
+presentación: los avisos de información opcional no exigen revisión; si el backend
+permite continuar, la edición se ofrece contraída bajo «Editar datos extraídos
+(opcional)». Los motivos bloqueantes y la revisión de casos pendientes permanecen.
+Regresiones de este ajuste: adaptador **22/22** y App/panel progresivo **94/94**;
+sin cambios de normalización, DTO de generación, elegibilidad o controles.

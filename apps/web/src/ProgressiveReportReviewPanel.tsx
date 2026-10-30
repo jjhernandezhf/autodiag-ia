@@ -70,8 +70,8 @@ export function ProgressiveReportReviewPanel<T>({ report, available, apiClient, 
   }
   if (!report.extractionToken || original.dtcs.length > 200 || original.systems.length > 100) return <p role="alert">Recarga un reporte legible dentro de los límites para obtener una referencia vigente. No se truncarán originales.</p>;
   if (zero) return <p>Escaneo completo con cero DTC: no hace falta revisión ni generación IA.</p>;
-  return <form className="warnings-panel report-review-panel" onSubmit={event => void submit(event)}>
-    <h3>Revisión mínima de datos pendientes</h3>
+  const editor = <form className="warnings-panel report-review-panel" onSubmit={event => void submit(event)}>
+    <h3>{available ? "Edición opcional de datos extraídos" : "Revisión mínima de datos pendientes"}</h3>
     <p>Se conserva automáticamente lo extraído. Puedes completar lo pendiente o continuar con limitaciones, sin escribir motivos.</p>
     {available && !changed && <p>Los datos técnicos ya están disponibles. No necesitas volver a confirmarlos.</p>}
     <fieldset disabled={pending || disabled}>
@@ -124,4 +124,5 @@ export function ProgressiveReportReviewPanel<T>({ report, available, apiClient, 
     {changed && <button type="button" onClick={() => { active.current?.abort(); active.current = null; setPending(false); setPatches({}); setVehicle({}); setExtras([]); setNotes(e.review?.limited?.userNotes ?? ""); setNotesChanged(false); setMessage(""); onCancel(); }}>Cancelar cambios pendientes</button>}
     {message && <p role="alert">{message}</p>}
   </form>;
+  return available ? <details className="review-evidence"><summary>Editar datos extraídos (opcional)</summary>{editor}</details> : editor;
 }

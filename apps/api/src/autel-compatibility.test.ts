@@ -1,15 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import request from "supertest";
 import { PDFDocument, StandardFonts } from "pdf-lib";
 import { parseAutelReport } from "./autel-parser.js";
 import { prepareAiAnalysis } from "./ai-analysis-adapter.js";
 import { createApp } from "./app.js";
 import { confirmVehicleData } from "./vehicle-confirmation.js";
-import { historyExtractionInputSchema, historyPublicSnapshotSchema } from "./diagnostic-history.js";
-import { DiagnosticAnalysisService, DIAGNOSTIC_PROMPT_VERSION } from "./ai-analysis-service.js";
+import { buildHistoryInsertRecord, historyExtractionInputSchema, historyPublicSnapshotSchema, type HistorySaveInput } from "./diagnostic-history.js";
+import { DiagnosticAnalysisService, DIAGNOSTIC_PROMPT_VERSION, OpenAiResponsesClient } from "./ai-analysis-service.js";
 import { createAnalysisFingerprint } from "./analysis-fingerprint.js";
 import { normalizeDtcStatus } from "./text-normalization.js";
-import type { ExtractedPdfPage, ExtractedTextLine } from "./report-types.js";
+import type { AutelExtraction, ExtractedPdfPage, ExtractedTextLine } from "./report-types.js";
 import type { DiagnosticAnalysisInput } from "./ai-analysis-types.js";
 
 // Structural regression fixtures only. No original PDF, identifier or private field.
@@ -23,6 +24,24 @@ function columns(code: string, description: string, status: string, y: number): 
   ].filter(f => f.text !== "") };
 }
 const header = (y = 780) => columns("DTC", "Descripción", "Estado", y);
+const activeHistoryFixture: AutelExtraction = JSON.parse(readFileSync(new URL("../../../shared/fixtures/autel-active-history.synthetic.json", import.meta.url), "utf8"));
+function activeHistoryPages(): ExtractedPdfPage[] {
+  const e = activeHistoryFixture;
+  return [{ pageNumber: 1, lines: [
+    line("Informe de diagnostico de vehiculo", 820), line("Informacion del vehiculo", 800),
+    line(`${e.vehicle.year} / ${e.vehicle.make} / ${e.vehicle.model} / ${e.vehicle.engine}`, 780),
+    line("Lectura del odometro: 0", 760), line("Sistema/s escaneado/s (15)", 740), line("Sistema Estado/DTC", 720),
+    ...e.systems.map((s, i) => line(`${s.code}(${s.name}) ${s.dtcCount}`, 700 - i * 20)),
+    line("DTC (6)", 380), line("ENG(Motor sintetico) (2 DTC)", 360), header(340),
+    columns("P0014", e.dtcs[0]!.descriptionOriginal, "Activo", 320),
+  ] }, { pageNumber: 2, lines: [
+    header(800), columns("P0078", e.dtcs[1]!.descriptionOriginal, "Activo", 780),
+    line("AB(Seguridad sintetica) (3 DTC)", 750), header(730),
+    ...e.dtcs.slice(2, 5).map((d, i) => columns(d.code, d.descriptionOriginal, d.statusOriginal!, 710 - i * 20)),
+    line("ODS(Deteccion sintetica) (1 DTC)", 630), header(610),
+    columns("B1319", e.dtcs[5]!.descriptionOriginal, "Historial", 590),
+  ] }];
+}
 function mazdaPages(route = "Other/Mazda/AXELA / MAZDA3/"): ExtractedPdfPage[] {
   const codes = ["B10A6:FF", "B1231:FF", "B1877:FF", "B1932:FF", "B2227:FF", "B2232:FF"];
   return [{ pageNumber: 1, lines: [
@@ -77,6 +96,70 @@ async function syntheticPdf(pages: ExtractedPdfPage[]) {
 }
 
 describe("compatibilidad Autel anonimizada", () => {
+  it.each(["Activo", "ACTIVO", "aCtIvO", "  Activo  ", "\r\nActivo\t\n"])("normaliza la etiqueta completa sin inferir causas: %j", label => {
+    expect(normalizeDtcStatus(label)).toBe("current");
+  });
+  it.each([
+    ["Historial", "history"], ["Permanente", "permanent"], ["DTC provisional", "provisional"],
+    ["CMDTCs", "continuous_memory"], ["ODDTCs", "on_demand"], ["1 vez", "unknown"],
+    ["Desconocido", "unknown"], ["Activo / static", "current"], ["Corriente / Historial", "unknown"],
+  ])("conserva la semántica documental anterior: %s", (label, expected) => {
+    expect(normalizeDtcStatus(label)).toBe(expected);
+  });
+  it.each(["Inactivo", "No activo", "No\nactivo", "Activo desconocido", "Activo / Historial", "Actividad", "1 vez"])("no convierte en activo una etiqueta ambigua: %j", label => {
+    expect(normalizeDtcStatus(label)).toBe("unknown");
+    const pages = activeHistoryPages(); pages[0]!.lines[pages[0]!.lines.length - 1] = columns("P0014", "Descripcion sintetica alfa", label, 320);
+    const e = parseAutelReport(pages, secret);
+    expect(e.dtcs[0]).toMatchObject({ status: "unknown", classification: "unknown" });
+    expect(e.requiresManualReview).toBe(true); expect(prepareAiAnalysis(e).available).toBe(false);
+  });
+  it("conserva quince sistemas y seis observaciones entre páginas con odómetro opcional", () => {
+    const e = parseAutelReport(activeHistoryPages(), secret), prep = prepareAiAnalysis(e);
+    expect(e).toMatchObject({ status: "completed", requiresManualReview: false, vehicle: activeHistoryFixture.vehicle,
+      scanSummary: activeHistoryFixture.scanSummary, systems: activeHistoryFixture.systems, dtcs: activeHistoryFixture.dtcs });
+    expect(e.warnings.map(w => w.code)).toEqual(["VIN_NOT_PROVIDED", "ODOMETER_UNIT_NOT_PROVIDED"]);
+    expect(prep).toMatchObject({ available: true, reasons: [], counts: { detected: 6, actionable: 3, historical: 3 } });
+    expect(e.review).toBeUndefined();
+    if (!prep.available) throw new Error("Synthetic fixture unavailable");
+    expect(prep.input.modules).toHaveLength(2);
+    expect(prep.input.modules.flatMap(m => m.dtcs.map(d => [d.code, d.status]))).toEqual([["P0014", "current"], ["P0078", "current"], ["B1670:00", "current"]]);
+  });
+  it("recorre extractor hijo → upload sin revisión → Responses simulado → guardado con tres antecedentes", async () => {
+    const prep = prepareAiAnalysis(parseAutelReport(activeHistoryPages(), secret));
+    if (!prep.available) throw new Error("Synthetic fixture unavailable");
+    const modelOutput = output(prep.input);
+    const create = vi.fn(async () => ({ status: "completed", output: [], output_text: JSON.stringify({ ...modelOutput,
+      findings: modelOutput.findings.map((f, i) => ({ ...f, relatedDtc: `D${String(i + 1).padStart(3, "0")}` })) }) }));
+    const save = vi.fn(async (_user: string, value: HistorySaveInput) => {
+      const record = buildHistoryInsertRecord(value);
+      expect(record.extractionSnapshot.systems).toHaveLength(15);
+      expect(record.extractionSnapshot.dtcs).toEqual(activeHistoryFixture.dtcs);
+      expect(record.extractionSnapshot.vehicle).toMatchObject({ odometer: null, odometerRaw: "0" });
+      expect(record.analysisSnapshot.counts).toEqual({ detected: 6, actionable: 3, historical: 3 });
+      expect(record.analysisSnapshot.output.findings).toHaveLength(3);
+      return { id: "11111111-1111-4111-8111-111111111111" };
+    });
+    const app = createApp({ vinHmacSecret: secret, openAiModel: "synthetic-model",
+      analysisService: new DiagnosticAnalysisService(new OpenAiResponsesClient("synthetic", { responses: { create } } as never), "synthetic-model", 1000),
+      authenticationService: { login: vi.fn(), authenticate: async () => ({ id: "22222222-2222-4222-8222-222222222222", username: "synthetic" }) },
+      historyService: { save, findReusable: async () => null } as never });
+    const upload = await request(app).post("/api/reports/upload").set("Authorization", "Bearer synthetic")
+      .attach("report", await syntheticPdf(activeHistoryPages()), { filename: "synthetic.pdf", contentType: "application/pdf" });
+    expect(upload.status).toBe(201); expect(upload.body.extraction.requiresManualReview).toBe(false);
+    expect(upload.body.analysisPreparation).toMatchObject({ available: true, counts: { detected: 6, actionable: 3, historical: 3 } });
+    expect(create).not.toHaveBeenCalled(); expect(save).not.toHaveBeenCalled();
+    const result = await request(app).post("/api/reports/analyze").set("Authorization", "Bearer synthetic")
+      .set("Idempotency-Key", "33333333-3333-4333-8333-333333333333").send({ input: upload.body.analysisPreparation.input,
+        historyContext: { reportReference: upload.body.id, contentToken: upload.body.contentToken, extractionToken: upload.body.extractionToken, extraction: upload.body.extraction } });
+    expect(result.status).toBe(200); expect(result.body.history.status).toBe("saved");
+    expect(save).toHaveBeenCalledOnce(); expect(create).toHaveBeenCalledOnce();
+    const transport = JSON.stringify(create.mock.calls[0]);
+    for (const code of ["P0014", "P0078", "B1670:00"]) expect(transport).toContain(code);
+    for (const code of ["B1102:00", "B1748:00", "B1319"]) expect(transport).not.toContain(code);
+    expect(transport).toContain('\\"status\\":\\"current\\"');
+    expect(transport).not.toContain("reviewed_uncertain"); expect(transport).not.toContain("odometer");
+    expect(transport).not.toContain(upload.body.extractionToken);
+  });
   it.each(["Other/Mazda/AXELA / MAZDA3/", " Other / Mazda / AXELA / MAZDA3 / "])("preserva ruta sin año y siete referencias: %s", route => {
     const extraction = parseAutelReport(mazdaPages(route), secret);
     expect(extraction).toMatchObject({ status: "completed", requiresManualReview: false,
